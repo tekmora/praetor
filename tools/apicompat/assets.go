@@ -177,9 +177,6 @@ var priorDigests = map[string]string{
 	// The gate before the compare step set GOTOOLCHAIN: auto to override setup-go's
 	// GOTOOLCHAIN=local (#1037).
 	"f7e57ed83e70886bb6a37906d040d4e6352c71d79e3da67215d0243f6ad02a4c": WorkflowFile,
-	// The gate whose job declared 60 minutes, above the job-timeout window of every adopter but
-	// the slowest (order praetor-job-timeouts-emitted-assets-20261106).
-	"b1b8cda8e5e0f06c5f8d58e4df59fa7c567b599382da19854228466696b157a6": WorkflowFile,
 	// The draft skip rendering of the gate before the compare step set GOTOOLCHAIN: auto.
 	"63c91ef6890b046db5a87ad1ec222e4db8a680f4350350b60e5db2934f74f35a": WorkflowFile,
 	// The gate whose checker build module required golang.org/x/tools v0.51.0 (#1197).
