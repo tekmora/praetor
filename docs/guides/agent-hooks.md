@@ -1290,6 +1290,24 @@ both allowed forms (`TestWorktrees_Positive_DeclaredDevRootWorktreeAllowed`,
 `TestWorktrees_Negative_UnparsableWorktreeAddFailsClosed` in
 `internal/agenthook/worktrees_test.go`).
 
+## Background processes
+
+Bare background enforcement is off by default. A host enables it with
+`hooks.background.enforce: true` in an [operator layer](effective-policy.md#operator-settings).
+The pre-tool command policy then refuses bare `&` control operators, including `job &`,
+`a & b`, `(job > log 2>&1 &)` and `{ job & }`. The `bare-background` refusal names the
+setting and directs the agent to its client's background-task mechanism or a systemd
+user unit, so the process remains tracked.
+
+Logical AND (`&&`), redirections (`&>`, `>&`, `2>&1`) and stderr pipes (`|&`) remain
+allowed. Quoted text, including URL queries, escaped ampersands, comments and heredoc
+bodies do not trigger this rule. Executable command substitutions are still checked.
+Unreadable shell input, including an unfinished quote or heredoc and commands over
+4,096 physical lines, fails closed while enforcement is enabled. Once a layer enables
+enforcement, a later layer cannot disable it. The positive, negative and boundary cases
+are covered in `internal/agenthook/background_test.go`; operator-layer validation is
+covered in `internal/config/operator_admission_test.go`.
+
 ## Record mode
 
 Set `PRAETOR_HOOK_RECORD_DIR` to a private, writable directory and every hook call, for

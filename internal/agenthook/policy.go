@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 )
 
 // denyRule is one compiled pattern with its source and the refusal a match prints ahead of
@@ -20,11 +21,19 @@ type denyRule struct {
 	readOnlyExempt bool
 	requiredAny    []string
 	exemptFirst    *regexp.Regexp
+	shellCodeOnly  bool
 }
 
 // matches applies an optional first-command exemption to the line holding each match.
 // A helper invocation on one line cannot exempt a direct merge on another line.
 func (r denyRule) matches(command string) bool {
+	if r.shellCodeOnly {
+		lines, ok := hiss.ShellCode(command, admissionMaxLines)
+		if !ok {
+			return true
+		}
+		command = strings.Join(lines, "\n")
+	}
 	if r.exemptFirst == nil {
 		return r.pattern.MatchString(command)
 	}
