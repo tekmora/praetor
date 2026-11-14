@@ -261,6 +261,7 @@ func (c *ClientSettings) targets() map[string]any {
 	return map[string]any{"clients.mode": &c.Mode, "clients.verified_max_age": &c.VerifiedMaxAge, "clients.govern": &c.Govern}
 }
 
+// targets maps hook setting paths to their destination fields for policy merging.
 func (h *HookSettings) targets() map[string]any {
 	return map[string]any{
 		"hooks.scope": &h.Scope, "hooks.command_policy.deny": &h.CommandPolicy.Deny, "hooks.python": &h.Python,

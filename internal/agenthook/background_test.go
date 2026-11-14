@@ -11,6 +11,7 @@ import (
 	"github.com/cordanaLLM/praetor/internal/config"
 )
 
+// TestBackground_Negative_BareOperators verifies bare background jobs are denied only when enforcement is enabled.
 func TestBackground_Negative_BareOperators(t *testing.T) {
 	for _, enforce := range []bool{true, false} {
 		policy, err := BuildPolicy(config.HookSettings{Background: config.BackgroundSettings{Enforce: enforce}})
@@ -37,6 +38,7 @@ func TestBackground_Negative_BareOperators(t *testing.T) {
 	}
 }
 
+// TestBackground_Positive_DataAndOtherOperators verifies ampersands used as data or other shell operators remain allowed.
 func TestBackground_Positive_DataAndOtherOperators(t *testing.T) {
 	policy, err := BuildPolicy(config.HookSettings{Background: config.BackgroundSettings{Enforce: true}})
 	if err != nil {
@@ -60,6 +62,7 @@ func TestBackground_Positive_DataAndOtherOperators(t *testing.T) {
 	}
 }
 
+// TestBackground_Boundary_UnreadableAndLineLimit verifies unreadable commands are denied and the line limit is inclusive.
 func TestBackground_Boundary_UnreadableAndLineLimit(t *testing.T) {
 	policy, err := BuildPolicy(config.HookSettings{Background: config.BackgroundSettings{Enforce: true}})
 	if err != nil {

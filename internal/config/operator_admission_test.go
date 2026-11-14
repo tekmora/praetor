@@ -95,14 +95,17 @@ func TestOperatorAdmission_Boundary_MergedBoundAndDefault(t *testing.T) {
 	}
 }
 
+// TestOperatorWorktrees_3D verifies worktree enforcement merges monotonically, rejects invalid settings, and defaults off.
 func TestOperatorWorktrees_3D(t *testing.T) {
 	testOperatorEnforcement(t, "worktrees", func(hooks HookSettings) bool { return hooks.Worktrees.Enforce })
 }
 
+// TestOperatorBackground_3D verifies background enforcement merges monotonically, rejects invalid settings, and defaults off.
 func TestOperatorBackground_3D(t *testing.T) {
 	testOperatorEnforcement(t, "background", func(hooks HookSettings) bool { return hooks.Background.Enforce })
 }
 
+// testOperatorEnforcement checks shared enforcement guarantees across operator policy layers.
 func testOperatorEnforcement(t *testing.T, section string, enforced func(HookSettings) bool) {
 	t.Helper()
 	document := func(value string) string { return "hooks: {" + section + ": {enforce: " + value + "}}\n" }
