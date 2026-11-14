@@ -32,9 +32,7 @@ func BuildPolicy(hooks config.HookSettings) (*Policy, error) {
 		policy.rules = append(policy.rules, mergeHelperRule(hooks.Merge.Helper))
 	}
 	policy.worktrees = newWorktreeCheck(hooks.Worktrees)
-	if hooks.Background.Enforce {
-		policy.rules = append(policy.rules, backgroundRule())
-	}
+	policy.background = hooks.Background.Enforce
 	return policy, nil
 }
 

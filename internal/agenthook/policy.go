@@ -21,19 +21,11 @@ type denyRule struct {
 	readOnlyExempt bool
 	requiredAny    []string
 	exemptFirst    *regexp.Regexp
-	shellCodeOnly  bool
 }
 
 // matches applies an optional first-command exemption to the line holding each match.
 // A helper invocation on one line cannot exempt a direct merge on another line.
 func (r denyRule) matches(command string) bool {
-	if r.shellCodeOnly {
-		lines, ok := hiss.ShellCode(command, admissionMaxLines)
-		if !ok {
-			return true
-		}
-		command = strings.Join(lines, "\n")
-	}
 	if r.exemptFirst == nil {
 		return r.pattern.MatchString(command)
 	}
@@ -376,6 +368,8 @@ var builtinMessages = map[string]string{"HISS": evasionMessage, "DEV-01": topolo
 //     `git worktree add` invocations fail closed with the parse reason.
 type Policy struct {
 	rules []denyRule
+	// background enables bounded executable-shell inspection before normalization.
+	background bool
 	// admission is the heavy-step check of hooks.admission; nil unless it is enforced.
 	admission *admissionCheck
 	// worktrees is the git worktree add location check of hooks.worktrees; nil unless it is enforced.
@@ -415,12 +409,10 @@ func NewPolicy(operatorDeny []string) (*Policy, error) {
 	return &Policy{rules: rules}, nil
 }
 
-var lineContinuationReplacer = strings.NewReplacer("\\\r\n", " ", "\\\n", " ")
-
-// joinLineContinuations replaces backslash line continuations (a backslash followed by \r\n or
-// \n) with a single space before any rule runs.
+// joinLineContinuations shares PR 1958's comment-aware shell continuation joiner.
+// A backslash inside a physical comment never consumes the following executable line.
 func joinLineContinuations(command string) string {
-	return lineContinuationReplacer.Replace(command)
+	return hiss.JoinShellContinuations(command)
 }
 
 // Command judges one proposed command line using p's default working directory. The first
@@ -441,17 +433,14 @@ func (p *Policy) CommandIn(ctx context.Context, command, workDir string) Verdict
 	if p == nil {
 		return Verdict{Outcome: Deny, Reason: "[BLOCKED BY HISS] no command policy is loaded"}
 	}
-	command = joinLineContinuations(command)
-	judged := withoutReadOnlyWords(command)
-	for _, rule := range p.rules {
-		text := command
-		if rule.readOnlyExempt {
-			text = judged
-		}
-		if containsRequiredLiteral(text, rule.requiredAny) && rule.matches(text) {
-			return Verdict{Outcome: Deny, Reason: boundReason(rule.prefix + rule.source)}
-		}
+	if reason := p.backgroundRefusal(command); reason != "" {
+		return Verdict{Outcome: Deny, Reason: boundReason(refusal("HISS", backgroundMessage+reason))}
 	}
+	command = joinLineContinuations(command)
+	if reason := p.ruleRefusal(command); reason != "" {
+		return Verdict{Outcome: Deny, Reason: reason}
+	}
+
 	verdict := Verdict{Outcome: Allow}
 	if p.admission != nil {
 		if verdict = p.admission.judgeInDir(ctx, workDir, command); verdict.Outcome != Allow {
@@ -464,6 +453,21 @@ func (p *Policy) CommandIn(ctx context.Context, command, workDir string) Verdict
 		}
 	}
 	return verdict
+}
+
+// ruleRefusal preserves ordered deny-rule evaluation after shell normalization.
+func (p *Policy) ruleRefusal(command string) string {
+	judged := withoutReadOnlyWords(command)
+	for _, rule := range p.rules {
+		text := command
+		if rule.readOnlyExempt {
+			text = judged
+		}
+		if containsRequiredLiteral(text, rule.requiredAny) && rule.matches(text) {
+			return boundReason(rule.prefix + rule.source)
+		}
+	}
+	return ""
 }
 
 // containsRequiredLiteral applies the declared prefilter without interpreting literals as regexes.
