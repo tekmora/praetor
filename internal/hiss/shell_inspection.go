@@ -119,11 +119,14 @@ func (s *shellInspection) context() shellContext {
 }
 
 // sourceSpan isolates executable substitutions without corrupting their parent's quotes.
+// Arithmetic children remain inspected but never introduce a parent command word.
 func (s *shellInspection) sourceSpan(raw string, before shellContext, depth int) {
 	after := s.context()
 	current := s.scopes[len(s.scopes)-1]
+	if len(s.lexer.stack) > depth {
+		writeInspectionPlaceholder(current, before, after)
+	}
 	if len(s.lexer.stack) > depth && (after == shellCommand || after == shellBacktick) {
-		current.WriteString("$_")
 		s.scopes = append(s.scopes, &strings.Builder{})
 		return
 	}
@@ -136,6 +139,20 @@ func (s *shellInspection) sourceSpan(raw string, before shellContext, depth int)
 		return
 	}
 	writeInspectionSource(current, raw, before)
+}
+
+// writeInspectionPlaceholder retains expansion word identity, including a$((1))b.
+// Arithmetic commands separate scopes; their nested substitutions add no executable word.
+func writeInspectionPlaceholder(current *strings.Builder, before, after shellContext) {
+	if inspectionData(before, before) {
+		return
+	}
+	switch after {
+	case shellCommand, shellBacktick, shellArithExpansion:
+		current.WriteString(shellExpansion)
+	case shellArithCommand:
+		current.WriteString(" ; ")
+	}
 }
 
 // inspectionData blanks arithmetic and ordinary heredoc bytes only, preserving child code.
@@ -155,11 +172,21 @@ func inspectionRawSpan(text string, start, end int, ctx shellContext) string {
 	if text[start:end] == "&" && end < len(text) && text[end] == '>' && inspectionExecutable(ctx) {
 		return ""
 	}
+	if inspectionExecutable(ctx) && inspectionBraceSeparator(text, start, end) {
+		return " ; "
+	}
 	return text[start:end]
 }
 
+// inspectionBraceSeparator recognizes grouping keywords, preserving braces inside words.
+// Payload readers must see expanding executable words intact so they can fail closed.
+func inspectionBraceSeparator(text string, start, end int) bool {
+	return end == start+1 && (reservedOpen(text, start) || text[start] == '}' && reservedClose(text, start))
+}
+
+// inspectionSeparator reports a lone parenthesis, which separates commands in an inspected scope.
 func inspectionSeparator(raw string) bool {
-	return len(raw) == 1 && strings.ContainsAny(raw, "(){}")
+	return len(raw) == 1 && strings.ContainsAny(raw, "()")
 }
 
 // writeInspectionSource separates syntactic operators, including adjacent redirections.

@@ -121,12 +121,14 @@ func backgroundShellOption(word string) (bool, bool) {
 	return strings.Contains(word, "c"), strings.Trim(word[1:], "abcefhkmnptuvxBCEHPTl") == ""
 }
 
+// backgroundCommandName returns the command name of a payload's first word, or an empty name and a refusal
+// reason when the word is an ambiguous leading redirection or an executable word bash would expand.
 func backgroundCommandName(words []string) (string, string) {
 	raw := words[0]
 	if len(words) > 1 && strings.Trim(raw, "0123456789") == "" && backgroundRedirection.MatchString(words[1]) {
 		return "", "command unreadable: ambiguous leading redirection"
 	}
-	if !backgroundLiteralWord(raw) {
+	if !backgroundLiteralWord(raw) || backgroundBraceExpansion(raw) {
 		return "", "command unreadable: ambiguous executable word"
 	}
 	name := unquoteShellWord(raw)
@@ -134,6 +136,45 @@ func backgroundCommandName(words []string) (string, string) {
 		return "", "command unreadable: ambiguous leading redirection"
 	}
 	return commandName(name), ""
+}
+
+// backgroundBraceExpansion refuses unquoted list or sequence syntax in executable words.
+// Argument words retain their current handling; quoting and escapes make braces literal.
+func backgroundBraceExpansion(word string) bool {
+	var quotes hiss.QuoteStepper
+	var braces backgroundBraces
+	for i := 0; i < len(word); i++ {
+		if !quotes.InQuote() && braces.step(word[i:]) {
+			return true
+		}
+		i = quotes.Step(word, i)
+	}
+	return false
+}
+
+type backgroundBraces struct {
+	depth, marked int
+}
+
+// step recognizes expansion syntax only once an unquoted closing brace balances its opener.
+// Depth is bounded by the caller's word length; no brace expansion is evaluated.
+func (b *backgroundBraces) step(rest string) bool {
+	switch rest[0] {
+	case '{':
+		b.depth++
+	case ',', '.':
+		if b.depth > 0 && (rest[0] == ',' || strings.HasPrefix(rest, "..")) {
+			b.marked = b.depth
+		}
+	case '}':
+		if b.depth > 0 {
+			if b.marked == b.depth {
+				return true
+			}
+			b.depth--
+		}
+	}
+	return false
 }
 
 func backgroundLookup(name string, args []string) bool {

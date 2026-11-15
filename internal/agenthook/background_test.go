@@ -190,3 +190,47 @@ func TestBackground_ReviewBounds(t *testing.T) {
 	}
 	checkBackgroundReview(t, nested, true, "background inspection depth bound")
 }
+
+// TestBackground_ReviewQuotedContinuations preserves a quoted comment's physical newline.
+func TestBackground_ReviewQuotedContinuations(t *testing.T) {
+	checkBackgroundReview(t, "bash -c '# comment \\\nsleep 5 &'", true, "bare-background")
+	checkBackgroundReview(t, "bash -c \"echo o\\\nk\"", false, "")
+}
+
+// TestBackground_ReviewArithmetic inspects substitutions without inventing executable words.
+func TestBackground_ReviewArithmetic(t *testing.T) {
+	for _, command := range []string{
+		`(( a = $(printf 1) ))`, `echo $(( $(printf 1) + 1 ))`,
+		"(( a = `printf 1` ))", `bash -c '(( a = $(printf 1) ))'`,
+		`echo a$((1))b`,
+	} {
+		t.Run(command, func(t *testing.T) { checkBackgroundReview(t, command, false, "") })
+	}
+	for _, command := range []string{
+		`(( a = $(sleep 5 &) ))`, `echo $(( $(sleep 5 &) + 1 ))`,
+		`(( a = $(bash -c 'sleep 5 &') ))`,
+		`a$((1))b -c 'sleep 5 &'`,
+	} {
+		t.Run(command, func(t *testing.T) { checkBackgroundReview(t, command, true, "bare-background") })
+	}
+}
+
+// TestBackground_ReviewBraceExecutables refuses expanding names while retaining literal data.
+func TestBackground_ReviewBraceExecutables(t *testing.T) {
+	for _, command := range []string{
+		`bash -c "bas{h..h} -c 'sleep 5 &'"`, `bas{h..h} -c 'sleep 5 &'`,
+		`b{a,}sh -c 'sleep 5 &'`, `env bas{h..h} -c 'sleep 5 &'`,
+		`b{a{z},a}sh -c 'sleep 5 &'`, `{bash,sh} -c 'sleep 5 &'`,
+		`{ bash -c 'sleep 5 &'; }`,
+	} {
+		t.Run(command, func(t *testing.T) { checkBackgroundReview(t, command, true, "bare-background") })
+	}
+	for _, command := range []string{
+		`echo {1..3}`, `echo {a,b}`, `bas'{h..h}' -c 'sleep 5 &'`,
+		`"b{a,}sh" -c 'sleep 5 &'`, `bas\{h..h\} -c 'sleep 5 &'`,
+		`b{a}sh -c 'sleep 5 &'`, `{ echo ok; }`,
+		`bash -c 'echo {1..3}'`,
+	} {
+		t.Run(command, func(t *testing.T) { checkBackgroundReview(t, command, false, "") })
+	}
+}
