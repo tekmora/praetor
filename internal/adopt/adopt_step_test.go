@@ -49,13 +49,6 @@ var hostedGatesAdoptStep = chainAdoptSteps(reconcileAPICompatibilityGate, reconc
 // documentationFamilyStep is the documentation gate and its managed assets (#1381).
 var documentationFamilyStep = reconcileDocumentationGate
 
-// managedFamilyGoldenStep is the manifest-to-documentation chain golden tests use after one
-// whole adoption (#1381).
-var managedFamilyGoldenStep = chainAdoptSteps(
-	reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileGitIgnore,
-	reconcileDevContainer, reconcileDocumentationGate, reconcileFormatterIgnore,
-)
-
 // legacyPaperclipAdoptStep reaches the Paperclip harness on a prepared session (#1381).
 var legacyPaperclipAdoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcilePaperclip)
 
@@ -75,12 +68,6 @@ func hostedGatesAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*Adopt
 func documentationAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, documentationFamilyStep)
-}
-
-// managedFamilyAdoptOrStep executes either a full adoption or the managed-family golden step chain.
-func managedFamilyAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
-	t.Helper()
-	return adoptOrStep(t, opts, whole, managedFamilyGoldenStep)
 }
 
 // legacyPaperclipAdoptOrStep executes either a full adoption or the legacy Paperclip step chain.
