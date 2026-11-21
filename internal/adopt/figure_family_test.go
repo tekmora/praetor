@@ -125,15 +125,15 @@ func TestFigurePlayerDirectoryMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newerRoot, newerReport := migrateFigurePlayer(t, "newer-loader", "dist", newerLoader, true)
+	newerRoot, newerReport := migrateFigurePlayer(t, "newer-loader", "dist", newerLoader, true, true)
 	assertMovedFigurePlayer(t, newerRoot, newerReport)
-	playerRoot, playerReport := migrateFigurePlayer(t, "player-dir", "player", newerLoader, false)
+	playerRoot, playerReport := migrateFigurePlayer(t, "player-dir", "player", newerLoader, false, false)
 	assertMovedFigurePlayer(t, playerRoot, playerReport)
 	olderLoader := []byte(mustRead(t, filepath.Join("testdata", "managed-family", "loader.c9bf497702.js")))
 	if got := fmt.Sprintf("%x", sha256.Sum256(olderLoader)); got != "9c741950900a175696e47248c2acd258cb1bb8703f84221d18a0a21146d340fb" {
 		t.Fatalf("older loader digest = %s", got)
 	}
-	olderRoot, olderReport := migrateFigurePlayer(t, "older-loader", "dist", olderLoader, false)
+	olderRoot, olderReport := migrateFigurePlayer(t, "older-loader", "dist", olderLoader, false, false)
 	assertMovedFigurePlayer(t, olderRoot, olderReport)
 	if got := movedFigurePlayerPaths(olderReport); !slices.Equal(got, movedFigurePlayerPaths(newerReport)) {
 		t.Fatalf("older loader migration paths = %v, want newer paths %v", got, movedFigurePlayerPaths(newerReport))
@@ -190,11 +190,13 @@ func assertFigurePlayerLockReleaseAndEngineSkip(t *testing.T) {
 	}
 }
 
-func migrateFigurePlayer(t *testing.T, name, subDir string, loader []byte, ignored bool) (string, *AdoptReport) {
+func migrateFigurePlayer(t *testing.T, name, subDir string, loader []byte, ignored, whole bool) (string, *AdoptReport) {
 	t.Helper()
 	root := newTestRepo(t, "figure-player-migration-"+name)
 	opts := goldenAdoptOptions(t, root)
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	// The first fixture runs whole adoptions; the others run the documentation-gate step
+	// alone on the prepared session (#1381).
+	if _, err := adoptOrStep(t, opts, whole, reconcileDocumentationGate); err != nil {
 		t.Fatal(err)
 	}
 	for _, asset := range []string{"loader.js", "player.js", "THIRD-PARTY-LICENSES.txt"} {
@@ -211,7 +213,7 @@ func migrateFigurePlayer(t *testing.T, name, subDir string, loader []byte, ignor
 	if ignored {
 		mustWrite(t, filepath.Join(root, ".gitignore"), "dist/\n")
 	}
-	report, err := Adopt(t.Context(), opts)
+	report, err := adoptOrStep(t, opts, whole, reconcileDocumentationGate)
 	if err != nil {
 		t.Fatal(err)
 	}

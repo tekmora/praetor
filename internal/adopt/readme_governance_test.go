@@ -179,16 +179,17 @@ func hissAgentsDefinition(readme string) string {
 // so without an identity, renders it unlinked too (the gate is off there: with it, adoption
 // skips the README, TestAdopt_UnresolvedIdentityCompletesWithoutGuessing).
 func TestAdoptReadmeGovernanceLinksTheOriginForge(t *testing.T) {
-	for name, tc := range map[string]struct{ origin, want string }{
-		"github":        {"https://github.com/acme/widgets.git", "https://github.com/acme/widgets/blob/HEAD/AGENTS.md"},
-		"gitlab":        {"git@gitlab.com:acme/widgets.git", "https://gitlab.com/acme/widgets/-/blob/HEAD/AGENTS.md"},
-		"gitea":         {"https://gitea.com/acme/widgets.git", "https://gitea.com/acme/widgets/src/branch/HEAD/AGENTS.md"},
-		"forgejo":       {"ssh://git@codeberg.org/acme/widgets.git", "https://codeberg.org/acme/widgets/src/branch/HEAD/AGENTS.md"},
-		"unknown host":  {"https://git.example.org/acme/widgets.git", ""},
-		"nested gitlab": {"https://gitlab.com/group/acme/widgets.git", ""},
-		"no identity":   {"", ""},
+	step := chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileReadme)
+	for index, tc := range []struct{ name, origin, want string }{
+		{"github", "https://github.com/acme/widgets.git", "https://github.com/acme/widgets/blob/HEAD/AGENTS.md"},
+		{"gitlab", "git@gitlab.com:acme/widgets.git", "https://gitlab.com/acme/widgets/-/blob/HEAD/AGENTS.md"},
+		{"gitea", "https://gitea.com/acme/widgets.git", "https://gitea.com/acme/widgets/src/branch/HEAD/AGENTS.md"},
+		{"forgejo", "ssh://git@codeberg.org/acme/widgets.git", "https://codeberg.org/acme/widgets/src/branch/HEAD/AGENTS.md"},
+		{"unknown host", "https://git.example.org/acme/widgets.git", ""},
+		{"nested gitlab", "https://gitlab.com/group/acme/widgets.git", ""},
+		{"no identity", "", ""},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			repoPath := newTestRepo(t, "widgets")
 			var facets []string
 			if tc.origin == "" {
@@ -199,7 +200,9 @@ func TestAdoptReadmeGovernanceLinksTheOriginForge(t *testing.T) {
 			}
 			path := filepath.Join(repoPath, readmeFile)
 			mustWrite(t, path, "# Demo\n\n"+previousRelativeBlock+"\n")
-			if _, err := Adopt(t.Context(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Facets: facets}); err != nil {
+			// The first fixture runs a whole adoption; the others run the manifest, lock,
+			// policy-catalog and readme steps on the prepared session (#1381).
+			if _, err := adoptOrStep(t, AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Facets: facets}, index == 0, step); err != nil {
 				t.Fatalf("adopt: %v", err)
 			}
 			got := mustRead(t, path)

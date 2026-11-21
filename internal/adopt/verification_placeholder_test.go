@@ -39,9 +39,14 @@ func verificationGatePillar(t *testing.T, report *AdoptReport) Pillar {
 // adoptPlain runs a plain adoption (no --force) of root and fails on an error.
 func adoptPlain(t *testing.T, root string, dryRun bool) *AdoptReport {
 	t.Helper()
-	report, err := Adopt(t.Context(), AdoptOptions{
+	return adoptPlainOrStep(t, root, dryRun, true)
+}
+
+func adoptPlainOrStep(t *testing.T, root string, dryRun, whole bool) *AdoptReport {
+	t.Helper()
+	report, err := adoptOrStep(t, AdoptOptions{
 		Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t), DryRun: dryRun,
-	})
+	}, whole, reconcileMakefile)
 	if err != nil {
 		t.Fatal(err)
 	}

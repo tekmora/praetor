@@ -25,3 +25,17 @@ func adoptOrStep(t *testing.T, opts AdoptOptions, whole bool, step func(context.
 	}
 	return report, step(t.Context(), s)
 }
+
+// chainAdoptSteps composes a bounded slice of reconciliation steps into one adoptStep for
+// adoptOrStep when a test asserts an interaction across two or more steps without running the
+// whole adoption chain.
+func chainAdoptSteps(steps ...adoptStep) adoptStep {
+	return func(ctx context.Context, s *adoptSession) error {
+		for i := 0; i < len(steps) && i < maxAdoptSteps; i++ {
+			if err := steps[i](ctx, s); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}

@@ -5,6 +5,7 @@
 package adopt
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -110,27 +111,43 @@ func TestAdoptRendersHostedGatesForTheDefaultBranch(t *testing.T) {
 func TestAdoptRefreshesPriorHostedGatesAndKeepsEditedOnes(t *testing.T) {
 	root, opts := adoptHostedGates(t, "gates-prior", "")
 	current := hostedGateRenderings(t, managedasset.WorkflowBranch)
-	for name, convert := range map[string]func(string) string{
-		"LF":   func(text string) string { return text },
-		"CRLF": func(text string) string { return strings.ReplaceAll(text, "\n", "\r\n") },
-	} {
-		for rel, priors := range hostedGatePriors {
-			for _, prior := range priors {
-				assertPriorRefreshes(t, root, opts, name, rel, prior, convert(current[rel]), convert)
+	styles := []struct {
+		name    string
+		convert func(string) string
+	}{
+		{"LF", func(text string) string { return text }},
+		{"CRLF", func(text string) string { return strings.ReplaceAll(text, "\n", "\r\n") }},
+	}
+	rels := slices.Sorted(maps.Keys(hostedGatePriors))
+	whole := true
+	for _, style := range styles {
+		for _, rel := range rels {
+			for _, prior := range hostedGatePriors[rel] {
+				assertPriorRefreshes(t, root, opts, style.name, rel, prior, style.convert(current[rel]), style.convert, whole)
+				whole = false
 			}
 		}
 	}
 	assertHandEditedGatesKept(t, root, opts, current)
 }
 
-func assertPriorRefreshes(t *testing.T, root string, opts AdoptOptions, name, rel, prior, want string, convert func(string) string) {
+func hostedGateStep(rel string) adoptStep {
+	if rel == APICompatibilityWorkflowFile {
+		return reconcileAPICompatibilityGate
+	}
+	return reconcileDocumentationGate
+}
+
+func assertPriorRefreshes(t *testing.T, root string, opts AdoptOptions, name, rel, prior, want string, convert func(string) string, whole bool) {
 	t.Helper()
 	data, err := os.ReadFile(prior)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(root, filepath.FromSlash(rel)), convert(string(data)))
-	report, err := Adopt(t.Context(), opts)
+	// The first prior workflow runs a whole adoption; every other one runs its hosted-gate step
+	// alone on the prepared session (#1381).
+	report, err := adoptOrStep(t, opts, whole, hostedGateStep(rel))
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}

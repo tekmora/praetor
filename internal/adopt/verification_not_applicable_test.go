@@ -133,10 +133,11 @@ func assertNotApplicableExecution(t *testing.T, root, makePath string) {
 // Boundary: a root with a build marker (go.mod, package.json, meson.build) or an existing verify-all
 // keeps today's behaviour (declared, unavailable, or preserved).
 func TestAdoptRootWithBuildMarkerPreservesUnavailableOrDeclared(t *testing.T) {
-	// Go module -> declared
+	// Go module -> declared (whole adoption; the other boundary cases run the makefile step on
+	// the prepared session, #1381).
 	goRoot := newTestRepo(t, "go-boundary")
 	mustWrite(t, filepath.Join(goRoot, "go.mod"), "module fixture\n")
-	goRep := adoptPlain(t, goRoot, false)
+	goRep := adoptPlainOrStep(t, goRoot, false, true)
 	if goRep.Verification.Status != verificationDeclared {
 		t.Fatalf("go verification status = %s, want declared", goRep.Verification.Status)
 	}
@@ -144,7 +145,7 @@ func TestAdoptRootWithBuildMarkerPreservesUnavailableOrDeclared(t *testing.T) {
 	// Meson build without native steps -> unavailable (keeps today's behavior)
 	mesonRoot := newTestRepo(t, "meson-boundary")
 	mustWrite(t, filepath.Join(mesonRoot, "meson.build"), "project('fixture', 'c')\n")
-	mesonRep := adoptPlain(t, mesonRoot, false)
+	mesonRep := adoptPlainOrStep(t, mesonRoot, false, false)
 	if mesonRep.Verification.Status != verificationUnavailable {
 		t.Fatalf("meson verification status = %s, want unavailable", mesonRep.Verification.Status)
 	}
@@ -152,7 +153,7 @@ func TestAdoptRootWithBuildMarkerPreservesUnavailableOrDeclared(t *testing.T) {
 	// Existing custom verify-all -> preserved (keeps today's behavior)
 	customRoot := newTestRepo(t, "custom-boundary")
 	mustWrite(t, filepath.Join(customRoot, makefileName), ".PHONY: verify-all\nverify-all:\n\t@echo custom-gate\n")
-	customRep := adoptPlain(t, customRoot, false)
+	customRep := adoptPlainOrStep(t, customRoot, false, false)
 	if customRep.Verification.Status != verificationPreserved {
 		t.Fatalf("custom verification status = %s, want preserved", customRep.Verification.Status)
 	}
@@ -162,7 +163,7 @@ func TestAdoptRootWithBuildMarkerPreservesUnavailableOrDeclared(t *testing.T) {
 // deep under a directory) but no build marker must be unavailable naming the detected language,
 // never not-applicable.
 func TestAdoptRootWithSourceFilesWithoutBuildMarkerUnavailable(t *testing.T) {
-	for _, tc := range []struct {
+	for index, tc := range []struct {
 		name     string
 		file     string
 		wantLang string
@@ -174,7 +175,7 @@ func TestAdoptRootWithSourceFilesWithoutBuildMarkerUnavailable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newTestRepo(t, tc.name)
 			mustWrite(t, filepath.Join(root, tc.file), "print('hello')\n")
-			rep := adoptPlain(t, root, false)
+			rep := adoptPlainOrStep(t, root, false, index == 0)
 			if rep.Verification.Status != verificationUnavailable {
 				t.Fatalf("root with %s: verification status = %s, want %s", tc.file, rep.Verification.Status, verificationUnavailable)
 			}

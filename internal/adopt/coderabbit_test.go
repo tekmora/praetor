@@ -406,23 +406,33 @@ func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 				{"null", "instructions: null", "instructions must be a string"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					assertAdoptCodeRabbitValidation(t, mode.dryRun, tc.field, tc.wantError)
+					assertAdoptCodeRabbitValidation(t, mode.dryRun, !mode.dryRun && tc.name == "custom", tc.field, tc.wantError)
 				})
 			}
 		})
 	}
 }
 
+func runCodeRabbitStep(ctx context.Context, s *adoptSession) error {
+	err := runOrSkipStep(ctx, s, namedStep{"coderabbit", reconcileCodeRabbit}, false)
+	if err != nil {
+		s.report.addError("%s", err)
+	}
+	return err
+}
+
 // assertAdoptCodeRabbitValidation checks preserved bytes, reported failures and dry-run isolation.
-func assertAdoptCodeRabbitValidation(t *testing.T, dryRun bool, field, wantError string) {
+func assertAdoptCodeRabbitValidation(t *testing.T, dryRun, whole bool, field, wantError string) {
 	t.Helper()
 	repo := newTestRepo(t, "coderabbit-validation")
 	file := filepath.Join(repo, codeRabbitFile)
 	initial := codeRabbitUserPolicy(field)
 	mustWrite(t, file, initial)
 	before := snapshotTree(t, repo)
-	report, err := Adopt(t.Context(), AdoptOptions{Path: repo, DryRun: dryRun,
-		LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true})
+	// One fixture runs a whole adoption; every other one runs the coderabbit step alone on
+	// the prepared session (#1381).
+	report, err := adoptOrStep(t, AdoptOptions{Path: repo, DryRun: dryRun,
+		LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true}, whole, runCodeRabbitStep)
 	if wantError == "" {
 		if err != nil {
 			t.Fatalf("adopt valid instructions: %v", err)

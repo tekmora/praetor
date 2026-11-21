@@ -95,9 +95,11 @@ func TestClassifyLefthookConfig_Negative_OnlinePreCommitAuditIsNotCurrent(t *tes
 // to the current rendering for those languages, whose pre-commit audit is offline.
 func TestAdopt_Boundary_OnlinePreCommitAuditMigratesWithoutForce(t *testing.T) {
 	fixtures := readPriorLefthookFixtures(t)
-	for _, rendering := range onlineAuditRenderings {
-		for _, name := range onlineAuditFixtureNames(rendering.fixture) {
-			repoPath, rep := adoptMarkedRepo(t, rendering.fixture, rendering.markers, string(fixtures[name]))
+	for rIdx, rendering := range onlineAuditRenderings {
+		for nIdx, name := range onlineAuditFixtureNames(rendering.fixture) {
+			// The first fixture runs a whole adoption; every other one runs the git-hooks step
+			// alone on the prepared session (#1381).
+			repoPath, rep := adoptMarkedRepoOrStep(t, rendering.fixture, rendering.markers, string(fixtures[name]), rIdx == 0 && nIdx == 0)
 			if got := mustRead(t, filepath.Join(repoPath, lefthookFile)); got != buildLefthookYAMLFor(lefthookShape{languages: adoptedLefthookLanguages(rendering.languages)}, false) {
 				t.Errorf("%s: not migrated to the current rendering:\n%s", name, got)
 			}

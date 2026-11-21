@@ -208,19 +208,21 @@ func hiss01Count(t *testing.T, repo string) (recorded, audited int, warning stri
 // (which warns), the same goto is a finding in both. Boundary: under the documented exception a
 // backward goto and a goto into a nested block's label are still findings in both.
 func TestCleanupGotoExceptionReachesTheAudit(t *testing.T) {
-	cases := map[string]struct {
+	step := chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileBaseline)
+	cases := []struct {
+		name                 string
 		declared, documented bool
 		source               string
 		want                 int
 	}{
-		"documented forward":     {true, true, "forward", 0},
-		"undeclared forward":     {false, false, "forward", 1},
-		"undocumented forward":   {true, false, "forward", 1},
-		"documented backward":    {true, true, "backward", 1},
-		"documented cross-block": {true, true, "cross-block", 1},
+		{"documented forward", true, true, "forward", 0},
+		{"undeclared forward", false, false, "forward", 1},
+		{"undocumented forward", true, false, "forward", 1},
+		{"documented backward", true, true, "backward", 1},
+		{"documented cross-block", true, true, "cross-block", 1},
 	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			repo := newTestRepo(t, "widget")
 			if tc.declared {
 				cleanupGotoRepo(t, repo, cMarkers, tc.documented)
@@ -228,8 +230,10 @@ func TestCleanupGotoExceptionReachesTheAudit(t *testing.T) {
 				mustWrite(t, filepath.Join(repo, "meson.build"), cMarkers["meson.build"])
 			}
 			mustWrite(t, filepath.Join(repo, "src", "unit.c"), cleanupGotoSources[tc.source])
-			if _, err := Adopt(t.Context(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repo,
-				Profile: "native-gpu-systems", RecordBaseline: true}); err != nil {
+			// The first fixture runs a whole adoption; the others run the manifest, lock,
+			// policy-catalog and baseline steps on the prepared session (#1381).
+			if _, err := adoptOrStep(t, AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repo,
+				Profile: "native-gpu-systems", RecordBaseline: true}, index == 0, step); err != nil {
 				t.Fatalf("Adopt: %v", err)
 			}
 			recorded, audited, warning := hiss01Count(t, repo)

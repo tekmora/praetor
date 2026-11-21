@@ -3,9 +3,11 @@ package adopt
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -36,9 +38,14 @@ func readPriorLefthookFixtures(t *testing.T) map[string][]byte {
 
 func adoptLefthookFixture(t *testing.T, name, lefthook string, force bool) (string, *AdoptReport) {
 	t.Helper()
+	return adoptLefthookFixtureOrStep(t, name, lefthook, force, true)
+}
+
+func adoptLefthookFixtureOrStep(t *testing.T, name, lefthook string, force, whole bool) (string, *AdoptReport) {
+	t.Helper()
 	repoPath := newTestRepo(t, name)
 	mustWrite(t, filepath.Join(repoPath, lefthookFile), lefthook)
-	rep, err := Adopt(context.Background(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Force: force})
+	rep, err := adoptOrStep(t, AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Force: force}, whole, reconcileGitHooks)
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
@@ -56,8 +63,13 @@ func TestPriorLefthookDigests_Positive_ReproducedByFixtures(t *testing.T) {
 // Positive: an earlier Praetor rendering is migrated to the current one without --force and
 // then activated, instead of being treated as foreign and never fixed (BUG-859).
 func TestAdopt_Positive_PriorLefthookMigratedAndActivated(t *testing.T) {
-	for name, data := range readPriorLefthookFixtures(t) {
-		repoPath, rep := adoptLefthookFixture(t, "prior-"+strings.TrimSuffix(name, ".lefthook.yml"), string(data), false)
+	fixtures := readPriorLefthookFixtures(t)
+	names := slices.Sorted(maps.Keys(fixtures))
+	for index, name := range names {
+		data := fixtures[name]
+		// The first fixture runs a whole adoption; every other one runs the git-hooks step
+		// alone on the prepared session (#1381).
+		repoPath, rep := adoptLefthookFixtureOrStep(t, "prior-"+strings.TrimSuffix(name, ".lefthook.yml"), string(data), false, index == 0)
 		if got := mustRead(t, filepath.Join(repoPath, lefthookFile)); got != buildLefthookYAML() {
 			t.Errorf("%s: not migrated to the current rendering:\n%s", name, got)
 		}

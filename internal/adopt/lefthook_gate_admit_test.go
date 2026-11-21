@@ -101,9 +101,11 @@ func TestClassifyLefthookConfig_Negative_StrictPrePushGateIsNotCurrent(t *testin
 // --force and no backup, to the current rendering for those languages, which is then activated.
 func TestAdopt_Boundary_StrictPrePushGateMigratesWithoutForce(t *testing.T) {
 	fixtures := readPriorLefthookFixtures(t)
-	for _, rendering := range strictGateRenderings {
-		for _, name := range strictGateFixtureNames(rendering.fixture) {
-			repoPath, rep := adoptMarkedRepo(t, rendering.fixture, rendering.markers, string(fixtures[name]))
+	for rIdx, rendering := range strictGateRenderings {
+		for nIdx, name := range strictGateFixtureNames(rendering.fixture) {
+			// The first fixture runs a whole adoption; every other one runs the git-hooks step
+			// alone on the prepared session (#1381).
+			repoPath, rep := adoptMarkedRepoOrStep(t, rendering.fixture, rendering.markers, string(fixtures[name]), rIdx == 0 && nIdx == 0)
 			if got := mustRead(t, filepath.Join(repoPath, lefthookFile)); got != buildLefthookYAMLFor(lefthookShape{languages: adoptedLefthookLanguages(rendering.languages)}, false) {
 				t.Errorf("%s: not migrated to the current rendering:\n%s", name, got)
 			}

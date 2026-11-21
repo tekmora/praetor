@@ -44,9 +44,9 @@ func TestAdoptHarnessRepositoryOwnedGates(t *testing.T) {
 		{name: "skipped hooks makefile declined", declineMakefileOnly: true, skipHooks: true, force: true, gates: inactiveHooks},
 		{name: "inactive hooks with generated Makefile", inactiveHooks: true, force: true, gates: "generated `make verify-all` + " + inactiveHooks},
 	}
-	for _, tc := range cases {
+	for index, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := adoptLegendFixture(t, tc)
+			harness := adoptLegendFixture(t, tc, index == 0)
 			_, suffix, found := strings.Cut(harness, "Adopted check = ")
 			if !found {
 				t.Fatal("harness lacks adopted-check legend")
@@ -65,7 +65,7 @@ func TestAdoptHarnessRepositoryOwnedGates(t *testing.T) {
 }
 
 // adoptLegendFixture scaffolds a temporary repository exercising tc and returns its AGENTS.md harness.
-func adoptLegendFixture(t *testing.T, tc legendGateCase) string {
+func adoptLegendFixture(t *testing.T, tc legendGateCase, whole bool) string {
 	t.Helper()
 	repo := newTestRepo(t, "legend")
 	if !tc.inactiveHooks {
@@ -95,7 +95,9 @@ func adoptLegendFixture(t *testing.T, tc legendGateCase) string {
 		LockSourceRoot: newAdoptLockSource(t), Path: repo,
 		Profile: "framework", Force: tc.force, SkipHookActivation: tc.skipHooks,
 	}
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	// The first fixture runs a whole adoption; every other one runs the agent-harness step
+	// alone on the prepared session (#1381).
+	if _, err := adoptOrStep(t, opts, whole, reconcileAgentHarness); err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
 	return agentsHarness(t, repo)
