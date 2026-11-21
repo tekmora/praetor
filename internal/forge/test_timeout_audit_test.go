@@ -257,6 +257,69 @@ func TestAuditTestTimeouts_ScanBound(t *testing.T) {
 	}
 }
 
+// Positive: a full-line Makefile comment that mentions go test and -timeout is not judged.
+func TestAuditTestTimeouts_Positive_MakefileCommentIgnored(t *testing.T) {
+	root := t.TempDir()
+	body := "test:\n\t$(GO_TEST) -race -timeout 30m ./...\n" +
+		"# -timeout replaces go test's ten-minute default per package\n"
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := auditTimeouts(t, root)
+	if err != nil || !strings.Contains(out, "[PASS]") {
+		t.Fatalf("Makefile comment: %q, %v; want no finding", out, err)
+	}
+}
+
+// Positive: an indented comment-only line in a workflow is not judged.
+func TestAuditTestTimeouts_Positive_IndentedCommentIgnored(t *testing.T) {
+	wf := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" +
+		"      # go test -timeout 99m ./...\n      - run: go test -timeout 30m ./...\n"
+	out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
+	if err != nil || !strings.Contains(out, "[PASS]") {
+		t.Fatalf("indented comment: %q, %v; want no finding", out, err)
+	}
+}
+
+// Negative: a real go test line with a trailing comment is still judged.
+func TestAuditTestTimeouts_Negative_TrailingCommentStillJudged(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte("test:\n\tgo test -race -timeout 45m ./x # comment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := auditTimeouts(t, root)
+	if err == nil || !strings.Contains(err.Error(), "Makefile:2 sets 45m") {
+		t.Fatalf("trailing comment: err = %v; want 45m flagged", err)
+	}
+}
+
+// checkGoTestTimeoutsWithoutCommentSkip is the pre-fix scan path, kept to prove the comment skip.
+func checkGoTestTimeoutsWithoutCommentSkip(rel string, n int, line string, defaults map[string]exprValue) []string {
+	if !goTestCommand.MatchString(line) {
+		return nil
+	}
+	matches := goTimeoutFlag.FindAllStringSubmatch(line, maxMatchesPerLine)
+	var out []string
+	for i := 0; i < len(matches) && i < maxMatchesPerLine; i++ {
+		if finding := judgeTimeout(fmt.Sprintf("%s:%d", rel, n+1), matches[i][1], defaults); finding != "" {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+// Mutant: without the comment skip, a Makefile comment mentioning go test yields a false finding.
+func TestAuditTestTimeouts_Mutant_CommentLineNotSkipped(t *testing.T) {
+	line := "# -timeout replaces go test's ten-minute default"
+	findings := checkGoTestTimeoutsWithoutCommentSkip("Makefile", 36, line, nil)
+	if len(findings) == 0 {
+		t.Fatalf("mutant without comment skip: want a finding, got none")
+	}
+	if findings := checkGoTestTimeouts("Makefile", 36, line, nil); len(findings) != 0 {
+		t.Fatalf("with comment skip: want no findings, got %v", findings)
+	}
+}
+
 // The checked-in recipe and declaration must exercise the same audit as adopter files.
 func TestAuditTestTimeouts_RepositoryMakefile(t *testing.T) {
 	root := filepath.Join("..", "..")
@@ -267,7 +330,7 @@ func TestAuditTestTimeouts_RepositoryMakefile(t *testing.T) {
 	// Pin the declaration's entry day; expiry itself is exercised by the negative fixture.
 	today := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	out, err := AuditTestTimeouts(t.Context(), TestTimeoutOptions{Root: root, Exceptions: manifest.Exceptions, Today: today})
-	if err != nil || !strings.Contains(out, "Makefile excepted until 2026-11-30") || !strings.Contains(out, "1381") {
-		t.Fatalf("repository timeout audit = %q, %v; want the dated Makefile exception", out, err)
+	if err != nil || !strings.Contains(out, "[PASS] test-timeout") {
+		t.Fatalf("repository timeout audit = %q, %v; want the checked-in Makefile within the bound", out, err)
 	}
 }

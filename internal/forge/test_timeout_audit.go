@@ -175,8 +175,18 @@ func timeoutInputDefaults(data []byte) map[string]exprValue {
 	return workflowCallDefaults(&spec)
 }
 
+// isFullLineComment reports whether line is only a Makefile, shell or YAML comment: leading
+// whitespace then # through end. A command with a trailing # comment is not a comment line.
+func isFullLineComment(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	return trimmed != "" && trimmed[0] == '#'
+}
+
 // checkGoTestTimeouts checks a go test command line for -timeout flags.
 func checkGoTestTimeouts(rel string, n int, line string, defaults map[string]exprValue) []string {
+	if isFullLineComment(line) {
+		return nil
+	}
 	if !goTestCommand.MatchString(line) {
 		return nil
 	}
