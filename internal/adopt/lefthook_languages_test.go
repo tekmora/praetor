@@ -36,6 +36,7 @@ func adoptMarkedRepo(t *testing.T, name string, markers map[string]string, lefth
 	return adoptMarkedRepoOrStep(t, name, markers, lefthook, true)
 }
 
+// adoptMarkedRepoOrStep creates a test repository with markers and runs git-hooks adoption or step reconciliation.
 func adoptMarkedRepoOrStep(t *testing.T, name string, markers map[string]string, lefthook string, whole bool) (string, *AdoptReport) {
 	t.Helper()
 	repoPath := newTestRepo(t, name)

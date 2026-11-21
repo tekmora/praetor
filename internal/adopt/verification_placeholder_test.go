@@ -42,6 +42,7 @@ func adoptPlain(t *testing.T, root string, dryRun bool) *AdoptReport {
 	return adoptPlainOrStep(t, root, dryRun, true)
 }
 
+// adoptPlainOrStep executes either a full adoption or the Makefile reconciliation step on the target repository.
 func adoptPlainOrStep(t *testing.T, root string, dryRun, whole bool) *AdoptReport {
 	t.Helper()
 	report, err := adoptOrStep(t, AdoptOptions{

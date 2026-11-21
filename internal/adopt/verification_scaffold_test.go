@@ -10,6 +10,7 @@ import (
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
+// TestVerificationLegacyMigrationAndCustomPreservation tests migration of legacy verification rules and preservation of custom targets.
 func TestVerificationLegacyMigrationAndCustomPreservation(t *testing.T) {
 	for index, tc := range []struct{ name, existing string }{
 		{"old-stub", legacyVerificationStub},
@@ -27,6 +28,7 @@ func TestVerificationLegacyMigrationAndCustomPreservation(t *testing.T) {
 	}
 }
 
+// assertLegacyOrCustomMakefileRow tests dry-run preview and application consistency for legacy and custom Makefile fixtures.
 func assertLegacyOrCustomMakefileRow(t *testing.T, name, existing string, whole bool) {
 	t.Helper()
 	// The first fixture runs whole adoptions; the others run the makefile step alone (#1381).
@@ -56,6 +58,7 @@ func assertLegacyOrCustomMakefileRow(t *testing.T, name, existing string, whole 
 	assertTreeUnchanged(t, after, snapshotTree(t, root))
 }
 
+// assertVerificationMakefileResult verifies the outcome of Makefile adoption for both legacy templates and custom rules.
 func assertVerificationMakefileResult(t *testing.T, name, existing, got string, plan *VerificationPlan) {
 	t.Helper()
 	if strings.HasPrefix(name, "old-") {
@@ -71,6 +74,7 @@ func assertVerificationMakefileResult(t *testing.T, name, existing, got string, 
 	}
 }
 
+// assertMigratedLegacyMakefile asserts that legacy Makefile recipes are migrated to modern cargo test targets.
 func assertMigratedLegacyMakefile(t *testing.T, name, existing, got string, plan *VerificationPlan) {
 	t.Helper()
 	if got == existing || strings.Contains(got, "Running verification") || !strings.Contains(got, "'cargo' 'test' '--locked'") {

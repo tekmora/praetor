@@ -31,6 +31,7 @@ func adoptPersonaFixture(t *testing.T, rel, existing string, force bool) (string
 	return adoptPersonaFixtureOrStep(t, rel, existing, force, true)
 }
 
+// adoptPersonaFixtureOrStep creates a test repository with persona content and executes agent definitions adoption.
 func adoptPersonaFixtureOrStep(t *testing.T, rel, existing string, force, whole bool) (string, *AdoptReport) {
 	t.Helper()
 	repoPath := newTestRepo(t, "persona")

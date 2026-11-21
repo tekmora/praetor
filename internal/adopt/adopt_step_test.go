@@ -59,31 +59,37 @@ var managedFamilyGoldenStep = chainAdoptSteps(
 // legacyPaperclipAdoptStep reaches the Paperclip harness on a prepared session (#1381).
 var legacyPaperclipAdoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcilePaperclip)
 
+// frameworkAdoptOrStep executes either a full adoption or the harness step for a framework profile.
 func frameworkAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, harnessAdoptStep)
 }
 
+// hostedGatesAdoptOrStep runs either a full adoption or the hosted-gate step on the prepared session.
 func hostedGatesAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, hostedGatesAdoptStep)
 }
 
+// documentationAdoptOrStep executes either a full adoption or the documentation gate family step.
 func documentationAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, documentationFamilyStep)
 }
 
+// managedFamilyAdoptOrStep executes either a full adoption or the managed-family golden step chain.
 func managedFamilyAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, managedFamilyGoldenStep)
 }
 
+// legacyPaperclipAdoptOrStep executes either a full adoption or the legacy Paperclip step chain.
 func legacyPaperclipAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, legacyPaperclipAdoptStep)
 }
 
+// makefileAdoptOrStep executes either a full adoption or the Makefile reconciliation step.
 func makefileAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, reconcileMakefile)
@@ -92,6 +98,7 @@ func makefileAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptRep
 // baselineReadoptStep is the baseline ratchet step re-adoptions exercise (#1381).
 var baselineReadoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcileBaseline)
 
+// baselineReadoptOrStep executes either a full adoption or the baseline ratchet re-adoption step.
 func baselineReadoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
 	t.Helper()
 	return adoptOrStep(t, opts, whole, baselineReadoptStep)

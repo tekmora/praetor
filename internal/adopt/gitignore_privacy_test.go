@@ -10,6 +10,7 @@ import (
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
+// TestAdoptionKeepsWorkingDirectoryPrivate verifies that gitignore reconciliation preserves operator rules and ensures working directory privacy.
 func TestAdoptionKeepsWorkingDirectoryPrivate(t *testing.T) {
 	fixtures := []struct {
 		name, existing string

@@ -36,11 +36,13 @@ func readPriorLefthookFixtures(t *testing.T) map[string][]byte {
 	return readFixtureDir(t, priorLefthookFixtures)
 }
 
+// adoptLefthookFixture runs a full git-hooks adoption on a test repository initialized with lefthook content.
 func adoptLefthookFixture(t *testing.T, name, lefthook string, force bool) (string, *AdoptReport) {
 	t.Helper()
 	return adoptLefthookFixtureOrStep(t, name, lefthook, force, true)
 }
 
+// adoptLefthookFixtureOrStep executes either a full adoption or the git-hooks reconciliation step on a lefthook fixture.
 func adoptLefthookFixtureOrStep(t *testing.T, name, lefthook string, force, whole bool) (string, *AdoptReport) {
 	t.Helper()
 	repoPath := newTestRepo(t, name)

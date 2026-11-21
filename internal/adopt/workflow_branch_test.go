@@ -131,6 +131,7 @@ func TestAdoptRefreshesPriorHostedGatesAndKeepsEditedOnes(t *testing.T) {
 	assertHandEditedGatesKept(t, root, opts, current)
 }
 
+// hostedGateStep selects the appropriate adoption step for a hosted workflow gate file.
 func hostedGateStep(rel string) adoptStep {
 	if rel == APICompatibilityWorkflowFile {
 		return reconcileAPICompatibilityGate
@@ -138,6 +139,7 @@ func hostedGateStep(rel string) adoptStep {
 	return reconcileDocumentationGate
 }
 
+// assertPriorRefreshes verifies that prior hosted gate workflows refresh to the current locked text.
 func assertPriorRefreshes(t *testing.T, root string, opts AdoptOptions, name, rel, prior, want string, convert func(string) string, whole bool) {
 	t.Helper()
 	data, err := os.ReadFile(prior)

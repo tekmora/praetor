@@ -43,6 +43,7 @@ func TestVerificationAssignmentIsNotAPreservedTarget(t *testing.T) {
 	}
 }
 
+// assertVerificationAssignmentRow tests Makefile verification target handling, editor task integration, and verification status.
 func assertVerificationAssignmentRow(t *testing.T, name, makefile string, preserved, whole bool, step adoptStep) {
 	t.Helper()
 	if shared := util.MakefileMayDefineTarget(makefile, verificationTarget); shared != preserved {
@@ -68,6 +69,7 @@ func assertVerificationAssignmentRow(t *testing.T, name, makefile string, preser
 	assertDeclaredVerificationRow(t, got, report.Verification)
 }
 
+// assertPreservedVerificationRow asserts that custom verification targets in Makefile are preserved during adoption.
 func assertPreservedVerificationRow(t *testing.T, makefile, got string, plan *VerificationPlan) {
 	t.Helper()
 	want, mergeErr := mergeDocumentationMakefile(makefile, false)
@@ -79,6 +81,7 @@ func assertPreservedVerificationRow(t *testing.T, makefile, got string, plan *Ve
 	}
 }
 
+// assertDeclaredVerificationRow asserts that declared verification targets are appended to Makefile and properly planned.
 func assertDeclaredVerificationRow(t *testing.T, got string, plan *VerificationPlan) {
 	t.Helper()
 	if plan.Status != verificationDeclared {

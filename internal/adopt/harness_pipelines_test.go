@@ -178,6 +178,7 @@ func TestGeneratedPipelinesPredictGitHooks(t *testing.T) {
 	}
 }
 
+// replayHookPrediction executes an adoption test case and verifies lefthook configuration ownership and harness claims.
 func replayHookPrediction(t *testing.T, tc hookPredictionCase, whole bool) {
 	t.Helper()
 	repo := newTestRepo(t, "pipelines")

@@ -413,6 +413,7 @@ func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 	}
 }
 
+// runCodeRabbitStep executes the CodeRabbit reconciliation step on the adoption session and records errors.
 func runCodeRabbitStep(ctx context.Context, s *adoptSession) error {
 	err := runOrSkipStep(ctx, s, namedStep{"coderabbit", reconcileCodeRabbit}, false)
 	if err != nil {

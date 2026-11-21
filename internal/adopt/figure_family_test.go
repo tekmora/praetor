@@ -190,6 +190,7 @@ func assertFigurePlayerLockReleaseAndEngineSkip(t *testing.T) {
 	}
 }
 
+// migrateFigurePlayer sets up figure player assets in a test repository and executes documentation gate reconciliation.
 func migrateFigurePlayer(t *testing.T, name, subDir string, loader []byte, ignored, whole bool) (string, *AdoptReport) {
 	t.Helper()
 	root := newTestRepo(t, "figure-player-migration-"+name)

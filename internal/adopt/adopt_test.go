@@ -1573,6 +1573,7 @@ func TestAdopt_ExistingAgentsMDMerged(t *testing.T) {
 	}
 }
 
+// TestAdopt_AgentsMD_ForcePreservesCustomInstructions verifies that force adoption updates the operating harness while preserving custom repository instructions.
 func TestAdopt_AgentsMD_ForcePreservesCustomInstructions(t *testing.T) {
 	cases := map[string]string{
 		"legacy-separator":           "<!-- markdownlint-disable -->\n# old Agent Operating Harness\n\n## Core Directives & Invariants\nold table\n\n---\n\n# Custom Repo Instructions\nDon't touch this proprietary text!\n",

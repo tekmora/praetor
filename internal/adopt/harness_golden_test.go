@@ -34,6 +34,7 @@ func adoptedHarness(t *testing.T, profile string, markers map[string]string) str
 	return adoptedHarnessOrStep(t, profile, markers, true)
 }
 
+// adoptedHarnessOrStep adopts a repository with markers and returns the generated AGENTS.md harness.
 func adoptedHarnessOrStep(t *testing.T, profile string, markers map[string]string, whole bool) string {
 	t.Helper()
 	repo := newTestRepo(t, "widget")
@@ -47,6 +48,7 @@ func adoptedHarnessOrStep(t *testing.T, profile string, markers map[string]strin
 	return agentsHarness(t, repo)
 }
 
+// adoptFromOrStep executes adoption on a repository with the specified profile and lock source.
 func adoptFromOrStep(t *testing.T, repo, profile, lockSource string, whole bool) *AdoptReport {
 	t.Helper()
 	step := chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileAgentHarness)

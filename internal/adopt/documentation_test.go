@@ -17,6 +17,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// TestAdoptionDocumentationGatePositive verifies that framework adoption attaches documentation assets, Makefile targets, and status badges.
 func TestAdoptionDocumentationGatePositive(t *testing.T) {
 	root := newTestRepo(t, "documentation-positive")
 	mustWrite(t, filepath.Join(root, readmeFile), "# Documentation fixture\n")
@@ -85,6 +86,7 @@ func TestAdoptionDocumentationGateNegativeFacet(t *testing.T) {
 	}
 }
 
+// TestAdoptionDocumentationGateForceRefresh verifies that plain adoption preserves edited documentation assets while force adoption restores locked originals.
 func TestAdoptionDocumentationGateForceRefresh(t *testing.T) {
 	root := newTestRepo(t, "documentation-refresh")
 	opts := AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t)}
@@ -158,6 +160,7 @@ func TestAdoptionDocumentationGateRefreshesPriorTexts(t *testing.T) {
 	}
 }
 
+// TestAdoptionDocumentationGateFacetTransitionConverges verifies that toggling the documentation facet cleans up and restores documentation assets idempotently.
 func TestAdoptionDocumentationGateFacetTransitionConverges(t *testing.T) {
 	root := newTestRepo(t, "documentation-transition")
 	mustWrite(t, filepath.Join(root, readmeFile), "# Transition\n")
