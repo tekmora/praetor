@@ -40,6 +40,9 @@ type CompileResult struct {
 	// Layered reports that AGENTS.md carries band markers. Client-only sections join the
 	// config band; shared bands remain in the canonical file.
 	Layered bool
+	// LegacyTargets lists the projections VerifyCompiled accepted under the legacy full-content
+	// rollout window (LegacyProjectionExpires), in registry order.
+	LegacyTargets []string
 }
 
 // Transpiler compiles canonical AGENTS.md into vendor-native agent configurations.
@@ -352,10 +355,7 @@ func (t *Transpiler) CompileContent(content string) (*CompileResult, error) {
 	}
 	bands, layered := scanBands(lines)
 	files, err := selected.renderTargets(targets, func(target vendorTarget) string {
-		if layered {
-			return layoutBands(lines, owners, bands, target.section, target.fullContent)
-		}
-		return selectVendorLines(lines, owners, target.section, target.fullContent)
+		return renderVendorBody(lines, owners, bands, layered, target.section, target.fullContent)
 	})
 	if err != nil {
 		return nil, err
@@ -366,6 +366,14 @@ func (t *Transpiler) CompileContent(content string) (*CompileResult, error) {
 		NotApplicable: excluded,
 		Layered:       layered,
 	}, nil
+}
+
+// renderVendorBody selects owned lines and optional shared lines in band or source order.
+func renderVendorBody(lines, owners []string, bands []band, layered bool, section string, shared bool) string {
+	if layered {
+		return layoutBands(lines, owners, bands, section, shared)
+	}
+	return selectVendorLines(lines, owners, section, shared)
 }
 
 // withCanonical binds imports of AGENTS.md to the source snapshot being compiled.

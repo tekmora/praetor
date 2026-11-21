@@ -66,10 +66,7 @@ func (t *Transpiler) prepareImports(target vendorTarget, text string) (string, e
 		return "", fmt.Errorf("target file %s: %w", target.path, err)
 	}
 	if target.importDepth == 0 {
-		for _, ref := range imports {
-			lines[ref.line] = "See " + ref.path + " (read on demand)."
-		}
-		text = strings.Join(lines, "\n")
+		text = replaceDemandImports(lines, imports)
 	}
 	size, via, err := t.expandedSize(target, text, imports)
 	if err != nil {
@@ -84,6 +81,14 @@ func (t *Transpiler) prepareImports(target vendorTarget, text string) (string, e
 		}
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// replaceDemandImports rewrites standalone @path lines for clients without native @path expansion.
+func replaceDemandImports(lines []string, imports []contextImport) string {
+	for _, ref := range imports {
+		lines[ref.line] = "See " + ref.path + " (read on demand)."
+	}
+	return strings.Join(lines, "\n")
 }
 
 // checkLoadedSize applies the registry caps and line budget to all text a client loads.

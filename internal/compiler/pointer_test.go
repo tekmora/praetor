@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cordanaLLM/praetor/internal/agentcontext"
 )
@@ -20,13 +21,13 @@ func fullContentProjection(path string) bool {
 	return false
 }
 
-// TestVerifyRejectsCopiedCanonical plants the old copy form without using the renderer.
+// TestVerifyRejectsCopiedCanonical plants the old copy form after the legacy rollout window expires.
 func TestVerifyRejectsCopiedCanonical(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "AGENTS.md")
 	canonical := "# Harness\n- Shared policy must stay canonical.\n"
 	writeCanonicalFixture(t, source, canonical)
-	tr := NewTranspiler()
+	tr := transpilerAtClock(time.Date(2026, 12, 2, 0, 0, 0, 0, time.UTC))
 	for _, rel := range agentcontext.VendorTargetPaths() {
 		frame := strings.Split(agentcontext.ProjectionFrame(rel), "\n@")[0]
 		writeOutputFixture(t, filepath.Join(root, rel), strings.TrimRight(frame, "\n")+"\n\n"+canonical)

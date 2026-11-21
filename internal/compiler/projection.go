@@ -87,11 +87,29 @@ func verifyVendorContext(ctx context.Context, sw *syncWriter, tr *Transpiler, so
 	registerErr, ignoreErr := verifyRegisterAndEvidence(ctx, source)
 	res, targetsErr := tr.VerifyCompiled(ctx, source, targetDir)
 	if targetsErr == nil {
-		targetsErr = printNotApplicableTargets(sw.w, res)
+		targetsErr = errors.Join(printLegacyProjectionWarnings(sw.w, res), printNotApplicableTargets(sw.w, res))
 	}
 	uncompiledErr := agentcontext.VerifyUncompiledInstructions(ctx, targetDir)
 	const prefix = "context verification failed"
 	return errors.Join(prefixError(prefix, registerErr), prefixError(prefix, ignoreErr), prefixError(prefix, targetsErr), prefixError(prefix, uncompiledErr))
+}
+
+// LegacyProjectionWarning returns the warning line, without a newline, for a vendor target
+// still in the previous full-content form during the legacy projection rollout window.
+func LegacyProjectionWarning(rel string) string {
+	return fmt.Sprintf("[WARN] %s is in the previous full-content form; run 'praetorctl compile-context' before %s (legacy projection window)",
+		rel, agentcontext.LegacyProjectionExpires)
+}
+
+// printLegacyProjectionWarnings emits one warning line per target VerifyCompiled accepted
+// under the legacy full-content rollout window.
+func printLegacyProjectionWarnings(w io.Writer, res *CompileResult) error {
+	for _, rel := range res.LegacyTargets {
+		if _, err := fmt.Fprintln(w, LegacyProjectionWarning(rel)); err != nil {
+			return fmt.Errorf("write legacy projection warning: %w", err)
+		}
+	}
+	return nil
 }
 
 // verifyRegisterAndEvidence checks the text register block of source against the policy of the
