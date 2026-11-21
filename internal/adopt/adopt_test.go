@@ -556,11 +556,12 @@ const renamedHarness = `{
 func TestAdoptForcePatchesOnlyHarnessPlatform(t *testing.T) {
 	for name, eol := range map[string]string{"LF": "\n", "CRLF": "\r\n"} {
 		t.Run(name, func(t *testing.T) {
+			whole := true
 			repoPath := newTestRepo(t, "legacy")
 			original := strings.ReplaceAll(renamedHarness, "\n", eol)
 			mustWrite(t, filepath.Join(repoPath, manifestFile), legacyManifest)
 			mustWrite(t, filepath.Join(repoPath, paperclipFile), original)
-			plain, err := Adopt(t.Context(), sourceAdoptOptions(t, repoPath, false))
+			plain, err := legacyPaperclipAdoptOrStep(t, sourceAdoptOptions(t, repoPath, false), whole)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -568,7 +569,7 @@ func TestAdoptForcePatchesOnlyHarnessPlatform(t *testing.T) {
 				!strings.Contains(strings.Join(plain.Warnings, "\n"), `audit expects "acme/legacy". Re-run praetorctl adopt --force --lock-source-root=`) {
 				t.Fatalf("plain run: harness changed or mismatch not warned: %v", plain.Warnings)
 			}
-			forced, err := Adopt(t.Context(), sourceAdoptOptions(t, repoPath, true))
+			forced, err := legacyPaperclipAdoptOrStep(t, sourceAdoptOptions(t, repoPath, true), false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -581,7 +582,7 @@ func TestAdoptForcePatchesOnlyHarnessPlatform(t *testing.T) {
 				t.Fatalf("platform patch not reported as a one-line replace: %+v", forced.ActionDetails)
 			}
 			requirePassingSourceGate(t, repoPath, paperclipFile)
-			again, err := Adopt(t.Context(), sourceAdoptOptions(t, repoPath, true))
+			again, err := legacyPaperclipAdoptOrStep(t, sourceAdoptOptions(t, repoPath, true), false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1581,7 +1582,8 @@ func TestAdopt_AgentsMD_ForcePreservesCustomInstructions(t *testing.T) {
 		repoPath := newTestRepo(t, name)
 		mustWrite(t, filepath.Join(repoPath, "AGENTS.md"), initial)
 
-		rep, err := Adopt(context.Background(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Profile: "framework", Force: true})
+		opts := AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Profile: "framework", Force: true}
+		rep, err := frameworkAdoptOrStep(t, opts, true)
 		if err != nil {
 			t.Fatalf("%s: Adopt failed: %v", name, err)
 		}
@@ -1603,7 +1605,7 @@ func TestAdopt_AgentsMD_ForcePreservesCustomInstructions(t *testing.T) {
 		}
 
 		// A second --force run is idempotent.
-		if _, err := Adopt(context.Background(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Profile: "framework", Force: true}); err != nil {
+		if _, err := frameworkAdoptOrStep(t, opts, false); err != nil {
 			t.Fatalf("%s: second Adopt failed: %v", name, err)
 		}
 		if again := mustRead(t, filepath.Join(repoPath, "AGENTS.md")); again != content {
@@ -1724,10 +1726,11 @@ func TestAdopt_AgentsMD_ForceKeepsRepositoryAdditions(t *testing.T) {
 func TestAdopt_AgentsMD_ForceKeepsCRLFPreamble(t *testing.T) {
 	for name, wholeCRLF := range map[string]bool{"crlf checkout": true, "crlf preamble only": false} {
 		t.Run(name, func(t *testing.T) {
+			whole := true
 			repoPath := newTestRepo(t, "harness-crlf")
 			agents := filepath.Join(repoPath, agentsFile)
 			opts := AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Profile: "framework"}
-			if _, err := Adopt(context.Background(), opts); err != nil {
+			if _, err := frameworkAdoptOrStep(t, opts, whole); err != nil {
 				t.Fatalf("Adopt: %v", err)
 			}
 			edited, own := harnessAdditionsFixture(t, mustRead(t, agents), "\r\n")
@@ -1736,7 +1739,7 @@ func TestAdopt_AgentsMD_ForceKeepsCRLFPreamble(t *testing.T) {
 			}
 			mustWrite(t, agents, edited)
 			opts.Force = true
-			rep, err := Adopt(context.Background(), opts)
+			rep, err := frameworkAdoptOrStep(t, opts, false)
 			if err != nil {
 				t.Fatalf("Adopt --force: %v", err)
 			}
@@ -1748,7 +1751,7 @@ func TestAdopt_AgentsMD_ForceKeepsCRLFPreamble(t *testing.T) {
 			if strings.Count(content, "\n") != strings.Count(content, "\r\n") || !strings.Contains(content, own[1]+"\r\n") {
 				t.Errorf("the refreshed file must keep CRLF throughout and the escaped-pipe row as written")
 			}
-			if _, err := Adopt(context.Background(), opts); err != nil {
+			if _, err := frameworkAdoptOrStep(t, opts, false); err != nil {
 				t.Fatalf("second Adopt --force: %v", err)
 			}
 			if got := mustRead(t, agents); got != content {
@@ -1767,7 +1770,7 @@ func TestAdopt_AgentsMD_ForceReplacesRenamedHarnessTitle(t *testing.T) {
 	repoPath := newTestRepo(t, "harness-renamed")
 	agents := filepath.Join(repoPath, agentsFile)
 	opts := AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Profile: "framework"}
-	if _, err := Adopt(context.Background(), opts); err != nil {
+	if _, err := frameworkAdoptOrStep(t, opts, true); err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
 	generated := mustRead(t, agents)
@@ -1777,7 +1780,7 @@ func TestAdopt_AgentsMD_ForceReplacesRenamedHarnessTitle(t *testing.T) {
 	mustWrite(t, agents, edited)
 
 	opts.Force = true
-	rep, err := Adopt(context.Background(), opts)
+	rep, err := frameworkAdoptOrStep(t, opts, false)
 	if err != nil {
 		t.Fatalf("Adopt --force: %v", err)
 	}

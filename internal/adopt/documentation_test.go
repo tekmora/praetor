@@ -60,7 +60,7 @@ func TestAdoptionDocumentationGatePositive(t *testing.T) {
 		}
 	}
 	before := snapshotTree(t, root)
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	assertTreeUnchanged(t, before, snapshotTree(t, root))
@@ -88,19 +88,19 @@ func TestAdoptionDocumentationGateNegativeFacet(t *testing.T) {
 func TestAdoptionDocumentationGateForceRefresh(t *testing.T) {
 	root := newTestRepo(t, "documentation-refresh")
 	opts := AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t)}
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := documentationAdoptOrStep(t, opts, true); err != nil {
 		t.Fatal(err)
 	}
 	asset := filepath.Join(root, markdownassets.Directory, "package.json")
 	mustWrite(t, asset, "{}\n")
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustRead(t, asset); got != "{}\n" {
 		t.Fatal("ordinary adoption overwrote an existing managed asset")
 	}
 	opts.Force = true
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	want, err := markdownassets.Read("package.json")
@@ -180,7 +180,7 @@ func TestAdoptionDocumentationGateFacetTransitionConverges(t *testing.T) {
 	}
 	disabled := snapshotTree(t, root)
 	opts.Force = false
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	assertTreeUnchanged(t, disabled, snapshotTree(t, root))
@@ -200,7 +200,7 @@ func TestAdoptionDocumentationGateFacetTransitionConverges(t *testing.T) {
 	}
 	enabled := snapshotTree(t, root)
 	opts.Force = false
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	assertTreeUnchanged(t, enabled, snapshotTree(t, root))

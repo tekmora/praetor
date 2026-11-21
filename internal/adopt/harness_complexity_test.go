@@ -47,7 +47,7 @@ func TestAdoptHarnessesStateEveryComplexityOverride(t *testing.T) {
 			repo := newTestRepo(t, "widget")
 			mustWrite(t, filepath.Join(repo, "go.mod"), "module example.com/widget\n\ngo 1.27\n")
 			mustWrite(t, filepath.Join(repo, manifestFile), complexityOverrideManifest(tc.override))
-			adoptFrom(t, repo, "framework", source)
+			adoptFromOrStep(t, repo, "framework", source, true)
 			agents, paperclipRule := adoptedRules(t, repo, "HISS-04")
 			if agents != tc.want || paperclipRule != tc.want {
 				t.Fatalf("HISS-04: AGENTS.md %q, Paperclip %q; want %q", agents, paperclipRule, tc.want)

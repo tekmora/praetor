@@ -79,7 +79,7 @@ func TestAdoptionAPICompatibilityGateFacetTransitionConverges(t *testing.T) {
 		t.Fatalf("actionlint configuration lacks the gate's runner label:\n%s", actionlint)
 	}
 	enabled := snapshotTree(t, root)
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := adoptOrStep(t, opts, false, reconcileAPICompatibilityGate); err != nil {
 		t.Fatal(err)
 	}
 	assertTreeUnchanged(t, enabled, snapshotTree(t, root))
@@ -113,7 +113,7 @@ func TestAdoptionAPICompatibilityGateFacetTransitionConverges(t *testing.T) {
 	}
 	reenabled := snapshotTree(t, root)
 	opts.Force = false
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := adoptOrStep(t, opts, false, reconcileAPICompatibilityGate); err != nil {
 		t.Fatal(err)
 	}
 	assertTreeUnchanged(t, reenabled, snapshotTree(t, root))

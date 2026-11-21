@@ -47,12 +47,6 @@ func adoptedHarnessOrStep(t *testing.T, profile string, markers map[string]strin
 	return agentsHarness(t, repo)
 }
 
-// adoptFrom adopts repo under profile with the pinned catalog at lockSource.
-func adoptFrom(t *testing.T, repo, profile, lockSource string) *AdoptReport {
-	t.Helper()
-	return adoptFromOrStep(t, repo, profile, lockSource, true)
-}
-
 func adoptFromOrStep(t *testing.T, repo, profile, lockSource string, whole bool) *AdoptReport {
 	t.Helper()
 	step := chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileAgentHarness)

@@ -216,13 +216,13 @@ func TestAdoptCodeRabbitCreatesAndPreserves(t *testing.T) {
 		"existing": "# repository review policy\nlanguage: en-US # keep language\nreviews:\n  profile: assertive # keep profile\n  auto_review:\n    drafts: false # managed switch\n    base_branches: ['release/.*'] # keep branches\n  pre_merge_checks:\n    docstrings:\n      threshold: 85 # keep threshold\nchat:\n  auto_reply: false # keep chat\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			adoptCodeRabbitCase(t, name, initial)
+			adoptCodeRabbitCase(t, name, initial, true)
 		})
 	}
 }
 
 // adoptCodeRabbitCase checks a complete adoption and a byte-identical second adoption.
-func adoptCodeRabbitCase(t *testing.T, name, initial string) {
+func adoptCodeRabbitCase(t *testing.T, name, initial string, whole bool) {
 	t.Helper()
 	repo := newTestRepo(t, "coderabbit-"+name)
 	file := filepath.Join(repo, ".coderabbit.yaml")
@@ -230,7 +230,7 @@ func adoptCodeRabbitCase(t *testing.T, name, initial string) {
 		mustWrite(t, file, initial)
 	}
 	opts := AdoptOptions{Path: repo, LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true}
-	report, err := Adopt(t.Context(), opts)
+	report, err := adoptOrStep(t, opts, whole, reconcileCodeRabbit)
 	if err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
@@ -242,7 +242,7 @@ func adoptCodeRabbitCase(t *testing.T, name, initial string) {
 		t.Fatal("managed keys absent from adoption report")
 	}
 	before := snapshotTree(t, repo)
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := adoptOrStep(t, opts, false, reconcileCodeRabbit); err != nil {
 		t.Fatalf("readopt: %v", err)
 	}
 	assertTreeUnchanged(t, before, snapshotTree(t, repo))

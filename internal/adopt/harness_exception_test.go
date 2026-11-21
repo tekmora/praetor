@@ -71,7 +71,7 @@ func TestAdoptHonoursDocumentedCleanupGotoException(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			repo := cleanupGotoRepo(t, newTestRepo(t, "widget"), tc.markers, tc.documented)
-			report := adoptFrom(t, repo, "native-gpu-systems", newAdoptLockSource(t))
+			report := adoptFromOrStep(t, repo, "native-gpu-systems", newAdoptLockSource(t), true)
 			agents, paperclipRule := adoptedRules(t, repo, "HISS-01")
 			if agents != tc.want || paperclipRule != tc.want {
 				t.Fatalf("HISS-01: AGENTS.md %q, Paperclip %q; want %q", agents, paperclipRule, tc.want)
@@ -124,7 +124,7 @@ func TestAdoptHarnessesStateTheAuditFunctionLength(t *testing.T) {
 				mustWrite(t, filepath.Join(repo, manifestFile), "version: 1\nrepository:\n  owner: acme\n  name: widget\nprofiles:\n  - framework\n"+
 					"overrides:\n  complexity:\n    max_func_loc: "+tc.override+"\n")
 			}
-			adoptFrom(t, repo, "framework", source)
+			adoptFromOrStep(t, repo, "framework", source, true)
 			audit, err := config.LoadEffectivePolicyContext(t.Context(), config.EffectiveOptions{Root: repo, Audit: true})
 			if err != nil || audit.Policy.Complexity.MaxFuncLOC != tc.want {
 				t.Fatalf("audit policy: %v, %v; want function length %d", audit, err, tc.want)

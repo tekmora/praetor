@@ -89,7 +89,7 @@ func TestAdoptRendersHostedGatesForTheDefaultBranch(t *testing.T) {
 		}
 	}
 	before := snapshotTree(t, root)
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := hostedGatesAdoptOrStep(t, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	assertTreeUnchanged(t, before, snapshotTree(t, root))

@@ -39,3 +39,60 @@ func chainAdoptSteps(steps ...adoptStep) adoptStep {
 		return nil
 	}
 }
+
+// harnessAdoptStep is the manifest through agent-harness chain tests use after one whole adoption.
+var harnessAdoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileAgentHarness)
+
+// hostedGatesAdoptStep refreshes both hosted gate workflows after one whole adoption (#1381).
+var hostedGatesAdoptStep = chainAdoptSteps(reconcileAPICompatibilityGate, reconcileDocumentationGate)
+
+// documentationFamilyStep is the documentation gate and its managed assets (#1381).
+var documentationFamilyStep = reconcileDocumentationGate
+
+// managedFamilyGoldenStep is the manifest-to-documentation chain golden tests use after one
+// whole adoption (#1381).
+var managedFamilyGoldenStep = chainAdoptSteps(
+	reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileGitIgnore,
+	reconcileDevContainer, reconcileDocumentationGate, reconcileFormatterIgnore,
+)
+
+// legacyPaperclipAdoptStep reaches the Paperclip harness on a prepared session (#1381).
+var legacyPaperclipAdoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcilePaperclip)
+
+func frameworkAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, harnessAdoptStep)
+}
+
+func hostedGatesAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, hostedGatesAdoptStep)
+}
+
+func documentationAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, documentationFamilyStep)
+}
+
+func managedFamilyAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, managedFamilyGoldenStep)
+}
+
+func legacyPaperclipAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, legacyPaperclipAdoptStep)
+}
+
+func makefileAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, reconcileMakefile)
+}
+
+// baselineReadoptStep is the baseline ratchet step re-adoptions exercise (#1381).
+var baselineReadoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcileBaseline)
+
+func baselineReadoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
+	t.Helper()
+	return adoptOrStep(t, opts, whole, baselineReadoptStep)
+}
