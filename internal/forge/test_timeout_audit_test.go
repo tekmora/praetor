@@ -293,6 +293,46 @@ func TestAuditTestTimeouts_Negative_TrailingCommentStillJudged(t *testing.T) {
 	}
 }
 
+// Negative: a recipe comment ending in a backslash ends at its own newline in the shell and cannot
+// hide a long timeout on the following recipe lines.
+func TestAuditTestTimeouts_Negative_ContinuedCommentDoesNotHideCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"recipe comment before go test", "test:\n\t# note \\\n\tgo test -race -timeout 45m ./x\n", "Makefile:3 sets 45m"},
+		{"recipe comment before continued go test", "test:\n\t# note \\\n\t$(GO_TEST) -v -race \\\n\t  -timeout 45m ./internal/adopt/\n", "Makefile:3 sets 45m"},
+		{"continued command then comment then go test", "test:\n\t@true; \\\n\t# note \\\n\tgo test -race -timeout 45m ./x\n", "Makefile:4 sets 45m"},
+		{"dangling comment continuation", "test:\n\t# note \\", "Makefile:2 has an unfinished continuation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := auditTimeouts(t, root)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v; want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// Positive: a recipe comment ending in a backslash followed by a command within the bound passes,
+// and a comment in a continued command does not inject a timeout token into that command.
+func TestAuditTestTimeouts_Positive_ContinuedCommentWithinBound(t *testing.T) {
+	root := t.TempDir()
+	body := "test:\n\t# note \\\n\tgo test -race -timeout 30m ./x\n\t$(GO_TEST) -race -timeout 30m ./a; \\\n\t# -timeout 99m\n"
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := auditTimeouts(t, root)
+	if err != nil || !strings.Contains(out, "[PASS]") {
+		t.Fatalf("continued comment within bound: %q, %v; want [PASS]", out, err)
+	}
+}
+
 // checkGoTestTimeoutsWithoutCommentSkip is the pre-fix scan path, kept to prove the comment skip.
 func checkGoTestTimeoutsWithoutCommentSkip(rel string, n int, line string, defaults map[string]exprValue) []string {
 	if !goTestCommand.MatchString(line) {
@@ -317,6 +357,20 @@ func TestAuditTestTimeouts_Mutant_CommentLineNotSkipped(t *testing.T) {
 	}
 	if findings := checkGoTestTimeouts("Makefile", 36, line, nil); len(findings) != 0 {
 		t.Fatalf("with comment skip: want no findings, got %v", findings)
+	}
+}
+
+// Mutant: joining continued physical lines through a backslash-ended comment hides the 45m go test
+// command on the next physical line.
+func TestAuditTestTimeouts_Mutant_ContinuedCommentJoined(t *testing.T) {
+	body := "test:\n\t# note \\\n\tgo test -race -timeout 45m ./x\n"
+	joined, err := scanMakefileTimeouts(body, false)
+	if err != nil || len(joined) != 0 {
+		t.Fatalf("mutant joining through comment: got %v, %v; want the 45m finding suppressed", joined, err)
+	}
+	kept, err := makefileTimeouts(body)
+	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:3 sets 45m") {
+		t.Fatalf("with comment boundary kept: got %v, %v; want Makefile:3 sets 45m", kept, err)
 	}
 }
 

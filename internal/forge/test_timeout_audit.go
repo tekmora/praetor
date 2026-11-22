@@ -116,32 +116,71 @@ func physicalLines(text string) int {
 	return lines
 }
 
-// makefileTimeouts joins continued physical lines and retains their first line number.
-func makefileTimeouts(text string) ([]string, error) {
-	lines := strings.Split(text, "\n")
-	var out []string
-	var logical strings.Builder
-	start := 0
-	continued := false
-	for n := 0; n < len(lines) && n < maxTimeoutWorkflowLines; n++ {
-		if !continued {
-			start = n
+// makefileScanner accumulates continued physical Makefile lines into logical commands while
+// keeping recipe comment boundaries intact.
+type makefileScanner struct {
+	logical         strings.Builder
+	out             []string
+	start           int
+	continued       bool
+	splitAtComments bool
+}
+
+// flush checks the accumulated logical line at its starting line number and resets the buffer.
+func (s *makefileScanner) flush() {
+	s.out = append(s.out, checkGoTestTimeouts("Makefile", s.start, s.logical.String(), nil)...)
+	s.logical.Reset()
+	s.continued = false
+}
+
+// addLine appends one physical line (without CR) to the current logical command or ends it at a
+// comment boundary.
+func (s *makefileScanner) addLine(n int, line string) {
+	if s.splitAtComments && isFullLineComment(line) {
+		if s.continued {
+			s.flush()
 		}
-		line := strings.TrimSuffix(lines[n], "\r")
-		continued = strings.HasSuffix(line, "\\")
-		if continued {
-			logical.WriteString(strings.TrimSuffix(line, "\\"))
-			logical.WriteByte(' ')
-			if n+1 >= len(lines) || (n+2 == len(lines) && lines[n+1] == "") || n+1 >= maxTimeoutWorkflowLines {
-				return nil, fmt.Errorf("[FAIL] %s: Makefile:%d has an unfinished continuation", testTimeoutGate, n+1)
-			}
-			continue
-		}
-		logical.WriteString(line)
-		out = append(out, checkGoTestTimeouts("Makefile", start, logical.String(), nil)...)
-		logical.Reset()
+		return
 	}
-	return out, nil
+	if !s.continued {
+		s.start = n
+	}
+	if strings.HasSuffix(line, "\\") {
+		s.logical.WriteString(strings.TrimSuffix(line, "\\"))
+		s.logical.WriteByte(' ')
+		s.continued = true
+		return
+	}
+	s.logical.WriteString(line)
+	s.flush()
+}
+
+// unfinishedContinuation reports whether line n's trailing backslash has no following physical line
+// within the scan bound.
+func unfinishedContinuation(lines []string, n int) bool {
+	return n+1 >= len(lines) || (n+2 == len(lines) && lines[n+1] == "") || n+1 >= maxTimeoutWorkflowLines
+}
+
+// makefileTimeouts joins continued physical lines and retains their first line number. A physical
+// comment line ends at its own newline in a recipe shell even when it ends with a backslash, so it
+// flushes any open command and never absorbs the next line.
+func makefileTimeouts(text string) ([]string, error) {
+	return scanMakefileTimeouts(text, true)
+}
+
+// scanMakefileTimeouts implements makefileTimeouts; splitAtComments is false only in the mutant
+// test that proves joining through a backslash-ended comment hides the following command.
+func scanMakefileTimeouts(text string, splitAtComments bool) ([]string, error) {
+	lines := strings.Split(text, "\n")
+	scanner := makefileScanner{splitAtComments: splitAtComments}
+	for n := 0; n < len(lines) && n < maxTimeoutWorkflowLines; n++ {
+		line := strings.TrimSuffix(lines[n], "\r")
+		if strings.HasSuffix(line, "\\") && unfinishedContinuation(lines, n) {
+			return nil, fmt.Errorf("[FAIL] %s: Makefile:%d has an unfinished continuation", testTimeoutGate, n+1)
+		}
+		scanner.addLine(n, line)
+	}
+	return scanner.out, nil
 }
 
 // readTestTimeoutFiles retains workflow paths and adds the optional root Makefile through the
