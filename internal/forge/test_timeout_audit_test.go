@@ -454,50 +454,57 @@ func TestAuditTestTimeouts_Mutant_TopLevelCommentContinueOff(t *testing.T) {
 	}
 }
 
-// TestAuditTestTimeouts_MakefileGNUContinuation covers GNU make odd/even backslash continuation for
-// recipes and top-level comments (PR 2034 round 3).
+// makefileGNUContinuationCases covers GNU make odd/even backslash continuation for recipes and
+// top-level comments (PR 2034 rounds 3 and 4).
+var makefileGNUContinuationCases = []struct {
+	name     string
+	body     string
+	wantErr  string
+	wantPass bool
+}{
+	{
+		name:    "recipe continuation line starting with hash",
+		body:    "test:\n\techo a\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:     "recipe comment after space before continuation backslash",
+		body:     "test:\n\techo a \\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:    "top-level comment even backslash pair before recipe",
+		body:    "test:\n# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:3 sets 45m",
+	},
+	{
+		name: "top-level comment single backslash hides next line",
+		body: "# disabled \\\n" +
+			"go test -timeout 45m ./pkg/\n" +
+			"test:\n\t@true\n",
+		wantPass: true,
+	},
+	{
+		name: "top-level three trailing backslashes continue comment",
+		body: "# note \\\\\\\n" +
+			"go test -timeout 45m ./pkg/\n" +
+			"test:\n\t@true\n",
+		wantPass: true,
+	},
+	{
+		name:    "top-level two trailing backslashes end comment",
+		body:    "# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "recipe even backslash pair ends command",
+		body:    "test:\n\techo a\\\\\n\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:3 sets 45m",
+	},
+}
+
 func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		body     string
-		wantErr  string
-		wantPass bool
-	}{
-		{
-			name:    "recipe continuation line starting with hash",
-			body:    "test:\n\techo a\\\n#b; go test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:2 sets 45m",
-		},
-		{
-			name:    "top-level comment even backslash pair before recipe",
-			body:    "test:\n# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:3 sets 45m",
-		},
-		{
-			name: "top-level comment single backslash hides next line",
-			body: "# disabled \\\n" +
-				"go test -timeout 45m ./pkg/\n" +
-				"test:\n\t@true\n",
-			wantPass: true,
-		},
-		{
-			name: "top-level three trailing backslashes continue comment",
-			body: "# note \\\\\\\n" +
-				"go test -timeout 45m ./pkg/\n" +
-				"test:\n\t@true\n",
-			wantPass: true,
-		},
-		{
-			name:    "top-level two trailing backslashes end comment",
-			body:    "# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:2 sets 45m",
-		},
-		{
-			name:    "recipe even backslash pair ends command",
-			body:    "test:\n\techo a\\\\\n\tgo test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:3 sets 45m",
-		},
-	} {
+	for _, tc := range makefileGNUContinuationCases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(tc.body), 0o600); err != nil {
@@ -514,6 +521,25 @@ func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
 				t.Fatalf("err = %v; want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestAuditTestTimeouts_Boundary_WordSpliceKeepsRecipeShellText proves the scanner keeps a tab-led # line
+// after a word-joining continuation (`echo a\`) as shell text: the shell reads `a#b; go test ...`. The red run
+// against the scanner without continuationBackslashJoinsWord is recorded in the PR (round 4).
+func TestAuditTestTimeouts_Boundary_WordSpliceKeepsRecipeShellText(t *testing.T) {
+	body := "test:\n\techo a\\\n\t#b; go test -timeout 45m ./pkg/\n"
+	scanner := makefileScanner{opts: makefileScanOptions{
+		splitAtComments: true, topLevelCommentContinue: true, trackShellQuotes: true,
+	}}
+	lines := strings.Split(body, "\n")
+	scanner.startPhysicalLine(1, lines[1])
+	if scanner.recipeCommentEndsCommand(lines[2]) {
+		t.Fatal("word-splice: want # line treated as shell text, not comment boundary")
+	}
+	got, err := makefileTimeouts(body)
+	if err != nil || len(got) != 1 || !strings.Contains(got[0], "Makefile:2 sets 45m") {
+		t.Fatalf("full audit: got %v, %v; want Makefile:2 sets 45m", got, err)
 	}
 }
 

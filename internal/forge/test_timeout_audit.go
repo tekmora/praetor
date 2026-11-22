@@ -140,6 +140,7 @@ type makefileScanner struct {
 	recipeCommand  bool
 	opts           makefileScanOptions
 	inCommentBlock bool
+	lastContLine   string
 }
 
 // trailingBackslashCount is how many consecutive backslashes end line (GNU make continuation: odd count continues).
@@ -156,12 +157,27 @@ func lineContinuesAtEOL(line string) bool {
 	return trailingBackslashCount(line)%2 == 1
 }
 
+// continuationBackslashJoinsWord reports whether an EOL continuation backslash leaves the shell inside
+// a word so the next physical line continues that token (backslash immediately after a non-blank byte).
+func continuationBackslashJoinsWord(line string) bool {
+	if !lineContinuesAtEOL(line) {
+		return false
+	}
+	spliceAt := len(line) - 1
+	if spliceAt == 0 {
+		return false
+	}
+	prev := line[spliceAt-1]
+	return prev != ' ' && prev != '\t'
+}
+
 // flush checks the accumulated logical line at its starting line number and resets the buffer.
 func (s *makefileScanner) flush() {
 	s.out = append(s.out, checkGoTestTimeouts("Makefile", s.start, s.logical.String(), nil)...)
 	s.logical.Reset()
 	s.continued = false
 	s.recipeCommand = false
+	s.lastContLine = ""
 }
 
 // isRecipeLine reports whether line is a Makefile recipe line (default recipe prefix is tab).
@@ -221,6 +237,9 @@ func (s *makefileScanner) recipeCommentEndsCommand(line string) bool {
 	if s.opts.trackShellQuotes && hasOpenShellQuote(s.logical.String()) {
 		return false
 	}
+	if s.continued && continuationBackslashJoinsWord(s.lastContLine) {
+		return false
+	}
 	return true
 }
 
@@ -240,6 +259,7 @@ func (s *makefileScanner) appendPhysicalLine(line string) {
 	if lineContinuesAtEOL(line) {
 		s.logical.WriteString(trimContinuationSuffix(line))
 		s.logical.WriteByte(' ')
+		s.lastContLine = line
 		return
 	}
 	s.logical.WriteString(line)
@@ -254,6 +274,7 @@ func (s *makefileScanner) startPhysicalLine(n int, line string) {
 		s.logical.WriteString(trimContinuationSuffix(line))
 		s.logical.WriteByte(' ')
 		s.continued = true
+		s.lastContLine = line
 		return
 	}
 	s.logical.WriteString(line)
@@ -295,10 +316,7 @@ func (s *makefileScanner) skipTopLevelCommentBlock(line string) bool {
 	if s.continued {
 		s.flush()
 	}
-	if s.opts.topLevelCommentContinue && lineContinuesAtEOL(line) {
-		s.inCommentBlock = true
-		return true
-	}
+	s.inCommentBlock = s.opts.topLevelCommentContinue && lineContinuesAtEOL(line)
 	return true
 }
 
