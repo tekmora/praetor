@@ -473,6 +473,26 @@ var makefileGNUContinuationCases = []struct {
 		wantPass: true,
 	},
 	{
+		name:     "recipe space after tab before hash comment line",
+		body:     "test:\n\techo a\\\n\t # go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:     "recipe semicolon before continuation backslash",
+		body:     "test:\n\techo a;\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:     "recipe close-paren before continuation backslash",
+		body:     "test:\n\techo a)\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:     "recipe pipe before continuation backslash",
+		body:     "test:\n\techo a|\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
 		name:    "top-level comment even backslash pair before recipe",
 		body:    "test:\n# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
 		wantErr: "Makefile:3 sets 45m",

@@ -158,7 +158,8 @@ func lineContinuesAtEOL(line string) bool {
 }
 
 // continuationBackslashJoinsWord reports whether an EOL continuation backslash leaves the shell inside
-// a word so the next physical line continues that token (backslash immediately after a non-blank byte).
+// a word so the next physical line can continue that token: the byte before the backslash is neither
+// blank nor a shell operator that ends the preceding word.
 func continuationBackslashJoinsWord(line string) bool {
 	if !lineContinuesAtEOL(line) {
 		return false
@@ -168,7 +169,23 @@ func continuationBackslashJoinsWord(line string) bool {
 		return false
 	}
 	prev := line[spliceAt-1]
-	return prev != ' ' && prev != '\t'
+	if prev == ' ' || prev == '\t' {
+		return false
+	}
+	switch prev {
+	case ';', '&', '|', '(', ')', '<', '>':
+		return false
+	}
+	return true
+}
+
+// recipeHashContinuesContinuedWord reports whether line is a recipe line whose shell payload, after
+// stripping exactly one recipe-prefix tab, begins with # so a continued word can absorb it (a#b).
+func recipeHashContinuesContinuedWord(line string) bool {
+	if len(line) < 2 || line[0] != '\t' {
+		return false
+	}
+	return line[1] == '#'
 }
 
 // flush checks the accumulated logical line at its starting line number and resets the buffer.
@@ -237,7 +254,7 @@ func (s *makefileScanner) recipeCommentEndsCommand(line string) bool {
 	if s.opts.trackShellQuotes && hasOpenShellQuote(s.logical.String()) {
 		return false
 	}
-	if s.continued && continuationBackslashJoinsWord(s.lastContLine) {
+	if s.continued && continuationBackslashJoinsWord(s.lastContLine) && recipeHashContinuesContinuedWord(line) {
 		return false
 	}
 	return true
