@@ -831,7 +831,7 @@ class CommandSpans:
             raise ValueError("invalid shell command: nesting bound exceeded: 16")
         frame = self.consumer_frames[-1]
         if closer != '"':
-            stages, data, proof, group = frame
+            _stages, data, proof, group = frame
             execution = self.execution_start == self.position
             execution &= self.execution_depth == len(self.stack) + 1
             if execution:
@@ -2064,6 +2064,7 @@ var priorEvasionHookDigests = map[string]string{
 	"682a8ed3eea87a45a9d6f4b9b5ddc68a1363a2cbeec0dca407cc50a6bee647dd": "current rendering after main changes and SPDX header",
 	"d3dcb48d31aed45db876298e355fe4a815c688d1cac59ff4ec90b7d5b42cd669": "privilege escalation refusal and bounded diagnostics",
 	"1adce72984aa3c355370298290876e99f536007ee486663eef61634659d0e55a": "whole-word literal boundary without codespell split",
+	"54f4c60081496c98f3ec1975c89c6eedb82b03a917ea863e95fadaee29e37ba1": "unused push-frame stages unpack renamed to _stages under RUF059",
 }
 
 // reconcileEvasionHook scaffolds the interceptor. It is generated, not audit-verified, so an

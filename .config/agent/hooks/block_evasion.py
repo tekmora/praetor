@@ -349,7 +349,7 @@ class CommandSpans:
             raise ValueError("invalid shell command: nesting bound exceeded: 16")
         frame = self.consumer_frames[-1]
         if closer != '"':
-            stages, data, proof, group = frame
+            _stages, data, proof, group = frame
             execution = self.execution_start == self.position
             execution &= self.execution_depth == len(self.stack) + 1
             if execution:
