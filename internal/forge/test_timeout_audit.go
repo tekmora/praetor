@@ -116,14 +116,29 @@ func physicalLines(text string) int {
 	return lines
 }
 
-// makefileScanner accumulates continued physical Makefile lines into logical commands while
-// keeping recipe comment boundaries intact.
+// makefileScanOptions tunes makefileScanner; only scanMakefileTimeouts supplies non-defaults
+// for the mutant tests.
+type makefileScanOptions struct {
+	splitAtComments         bool
+	topLevelCommentContinue bool
+	trackShellQuotes        bool
+}
+
+// makefileScanner accumulates continued physical Makefile lines into logical commands. Recipe
+// lines are physical lines that start with a tab (.RECIPEPREFIX is not read; only the tab rule
+// applies). A full-line recipe comment (tab, then # through end) ends at its newline in the shell
+// and never absorbs the next line, except when the open logical command still has an unclosed
+// shell quote: then the line is shell text and is appended like any continued line. Top-level
+// full-line comments (not recipe lines) follow GNU make: a trailing backslash continues the
+// comment onto following physical lines until one does not end with a backslash, and that last
+// comment line is ignored too.
 type makefileScanner struct {
-	logical         strings.Builder
-	out             []string
-	start           int
-	continued       bool
-	splitAtComments bool
+	logical        strings.Builder
+	out            []string
+	start          int
+	continued      bool
+	opts           makefileScanOptions
+	inCommentBlock bool
 }
 
 // flush checks the accumulated logical line at its starting line number and resets the buffer.
@@ -133,18 +148,83 @@ func (s *makefileScanner) flush() {
 	s.continued = false
 }
 
-// addLine appends one physical line (without CR) to the current logical command or ends it at a
-// comment boundary.
-func (s *makefileScanner) addLine(n int, line string) {
-	if s.splitAtComments && isFullLineComment(line) {
-		if s.continued {
-			s.flush()
+// isRecipeLine reports whether line is a Makefile recipe line (default recipe prefix is tab).
+func isRecipeLine(line string) bool {
+	return line != "" && line[0] == '\t'
+}
+
+// advanceShellQuoteState updates single/double-quote shell state at text[i]; it skips an escaped
+// byte and reports the next index to read.
+func advanceShellQuoteState(text string, i int, inSingle, inDouble *bool) int {
+	c := text[i]
+	if *inSingle {
+		if c == '\'' {
+			*inSingle = false
 		}
+		return i + 1
+	}
+	if *inDouble {
+		if c == '\\' && i+1 < len(text) {
+			return i + 2
+		}
+		if c == '"' {
+			*inDouble = false
+		}
+		return i + 1
+	}
+	switch c {
+	case '\'':
+		*inSingle = true
+	case '"':
+		*inDouble = true
+	case '\\':
+		if i+1 < len(text) {
+			return i + 2
+		}
+	}
+	return i + 1
+}
+
+// hasOpenShellQuote reports whether text ends inside an unclosed single- or double-quoted span,
+// using sh quoting rules. Each step advances at least one byte, so the loop reads at most
+// len(text) bytes (HISS-02): the logical command is already bounded by the snapshot reader.
+func hasOpenShellQuote(text string) bool {
+	inSingle, inDouble := false, false
+	for i := 0; i < len(text); {
+		i = advanceShellQuoteState(text, i, &inSingle, &inDouble)
+	}
+	return inSingle || inDouble
+}
+
+// recipeCommentEndsCommand reports whether line is a recipe full-line comment that ends the
+// current logical command instead of appending shell text.
+func (s *makefileScanner) recipeCommentEndsCommand(line string) bool {
+	if !s.opts.splitAtComments || !isFullLineComment(line) || !isRecipeLine(line) {
+		return false
+	}
+	if s.opts.trackShellQuotes && hasOpenShellQuote(s.logical.String()) {
+		return false
+	}
+	return true
+}
+
+// appendPhysicalLine adds one physical line to the open logical command.
+func (s *makefileScanner) appendPhysicalLine(line string) {
+	if !s.continued {
 		return
 	}
-	if !s.continued {
-		s.start = n
+	if strings.HasSuffix(line, "\\") {
+		s.logical.WriteString(strings.TrimSuffix(line, "\\"))
+		s.logical.WriteByte(' ')
+		return
 	}
+	s.logical.WriteString(line)
+	s.flush()
+}
+
+// startPhysicalLine begins a new logical command at line number n.
+func (s *makefileScanner) startPhysicalLine(n int, line string) {
+	s.start = n
 	if strings.HasSuffix(line, "\\") {
 		s.logical.WriteString(strings.TrimSuffix(line, "\\"))
 		s.logical.WriteByte(' ')
@@ -155,28 +235,73 @@ func (s *makefileScanner) addLine(n int, line string) {
 	s.flush()
 }
 
+// addLine appends one physical line (without CR) to the current logical command or ends it at a
+// comment boundary.
+func (s *makefileScanner) addLine(n int, line string) {
+	if s.recipeCommentEndsCommand(line) {
+		if s.continued {
+			s.flush()
+		}
+		return
+	}
+	if s.continued {
+		s.appendPhysicalLine(line)
+		return
+	}
+	s.startPhysicalLine(n, line)
+}
+
+// skipTopLevelCommentBlock updates inCommentBlock for non-recipe full-line comments and returns
+// whether the current physical line should be ignored.
+func (s *makefileScanner) skipTopLevelCommentBlock(line string) bool {
+	if s.opts.topLevelCommentContinue && s.inCommentBlock {
+		if strings.HasSuffix(line, "\\") {
+			return true
+		}
+		s.inCommentBlock = false
+		return true
+	}
+	if isRecipeLine(line) || !isFullLineComment(line) {
+		return false
+	}
+	if s.continued {
+		s.flush()
+	}
+	if s.opts.topLevelCommentContinue && strings.HasSuffix(line, "\\") {
+		s.inCommentBlock = true
+		return true
+	}
+	return true
+}
+
 // unfinishedContinuation reports whether line n's trailing backslash has no following physical line
 // within the scan bound.
 func unfinishedContinuation(lines []string, n int) bool {
 	return n+1 >= len(lines) || (n+2 == len(lines) && lines[n+1] == "") || n+1 >= maxTimeoutWorkflowLines
 }
 
-// makefileTimeouts joins continued physical lines and retains their first line number. A physical
-// comment line ends at its own newline in a recipe shell even when it ends with a backslash, so it
-// flushes any open command and never absorbs the next line.
+// makefileTimeouts joins continued physical lines and retains their first line number. See
+// makefileScanner for recipe versus top-level comment rules and the open-quote exception.
 func makefileTimeouts(text string) ([]string, error) {
-	return scanMakefileTimeouts(text, true)
+	return scanMakefileTimeouts(text, makefileScanOptions{
+		splitAtComments:         true,
+		topLevelCommentContinue: true,
+		trackShellQuotes:        true,
+	})
 }
 
-// scanMakefileTimeouts implements makefileTimeouts; splitAtComments is false only in the mutant
-// test that proves joining through a backslash-ended comment hides the following command.
-func scanMakefileTimeouts(text string, splitAtComments bool) ([]string, error) {
+// scanMakefileTimeouts implements makefileTimeouts; non-default option fields exist only for
+// mutant tests (splitAtComments, topLevelCommentContinue, trackShellQuotes).
+func scanMakefileTimeouts(text string, opts makefileScanOptions) ([]string, error) {
 	lines := strings.Split(text, "\n")
-	scanner := makefileScanner{splitAtComments: splitAtComments}
+	scanner := makefileScanner{opts: opts}
 	for n := 0; n < len(lines) && n < maxTimeoutWorkflowLines; n++ {
 		line := strings.TrimSuffix(lines[n], "\r")
 		if strings.HasSuffix(line, "\\") && unfinishedContinuation(lines, n) {
 			return nil, fmt.Errorf("[FAIL] %s: Makefile:%d has an unfinished continuation", testTimeoutGate, n+1)
+		}
+		if scanner.skipTopLevelCommentBlock(line) {
+			continue
 		}
 		scanner.addLine(n, line)
 	}

@@ -364,13 +364,108 @@ func TestAuditTestTimeouts_Mutant_CommentLineNotSkipped(t *testing.T) {
 // command on the next physical line.
 func TestAuditTestTimeouts_Mutant_ContinuedCommentJoined(t *testing.T) {
 	body := "test:\n\t# note \\\n\tgo test -race -timeout 45m ./x\n"
-	joined, err := scanMakefileTimeouts(body, false)
+	joined, err := scanMakefileTimeouts(body, makefileScanOptions{splitAtComments: false})
 	if err != nil || len(joined) != 0 {
 		t.Fatalf("mutant joining through comment: got %v, %v; want the 45m finding suppressed", joined, err)
 	}
 	kept, err := makefileTimeouts(body)
 	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:3 sets 45m") {
 		t.Fatalf("with comment boundary kept: got %v, %v; want Makefile:3 sets 45m", kept, err)
+	}
+}
+
+// TestAuditTestTimeouts_MakefileCommentSemantics covers top-level GNU make comment continuation,
+// recipe comments with open shell quotes, and scanner mutants.
+func TestAuditTestTimeouts_MakefileCommentSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantErr  string
+		wantPass bool
+	}{
+		{
+			name: "top-level continued comment hides go test",
+			body: "# Disabled command: \\\n" +
+				"go test -timeout 45m ./pkg/\n" +
+				"test:\n\t@true\n",
+			wantPass: true,
+		},
+		{
+			name: "top-level comment two backslash lines then go test",
+			body: "# note \\\n# also \\\n# end\n" +
+				"go test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:4 sets 45m",
+		},
+		{
+			name: "top-level comment without continuation then go test",
+			body: "# disabled\n" +
+				"go test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:2 sets 45m",
+		},
+		{
+			name:    "quoted hash in continued recipe",
+			body:    "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n",
+			wantErr: "Makefile:2 sets 45m",
+		},
+		{
+			name:    "single-quoted hash continuation",
+			body:    "test:\n\tNOTE='a \\\n\t# b' go test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:2 sets 45m",
+		},
+		{
+			name:    "quote closed before hash comment line",
+			body:    "test:\n\tNOTE=\"a\" \\\n\t# note\n\tgo test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:4 sets 45m",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := auditTimeouts(t, root)
+			if tc.wantPass {
+				if err != nil || !strings.Contains(out, "[PASS]") {
+					t.Fatalf("AuditTestTimeouts = %q, %v; want pass", out, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v; want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Mutant: without top-level comment continuation, go test inside a continued make comment is audited.
+func TestAuditTestTimeouts_Mutant_TopLevelCommentContinueOff(t *testing.T) {
+	body := "# Disabled command: \\\n" +
+		"go test -timeout 45m ./pkg/\n" +
+		"test:\n\t@true\n"
+	got, err := scanMakefileTimeouts(body, makefileScanOptions{
+		splitAtComments: true, topLevelCommentContinue: false,
+	})
+	if err != nil || len(got) == 0 || !strings.Contains(got[0], "Makefile:2 sets 45m") {
+		t.Fatalf("mutant top-level off: got %v, %v; want Makefile:2 45m", got, err)
+	}
+	kept, err := makefileTimeouts(body)
+	if err != nil || len(kept) != 0 {
+		t.Fatalf("with top-level continuation: got %v, %v; want no finding", kept, err)
+	}
+}
+
+// Mutant: without shell-quote tracking, a quoted hash line ends the command and hides -timeout.
+func TestAuditTestTimeouts_Mutant_ShellQuoteTrackingOff(t *testing.T) {
+	body := "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n"
+	got, err := scanMakefileTimeouts(body, makefileScanOptions{
+		splitAtComments: true, trackShellQuotes: false,
+	})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("mutant quotes off: got %v, %v; want 45m suppressed", got, err)
+	}
+	kept, err := makefileTimeouts(body)
+	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:2 sets 45m") {
+		t.Fatalf("with quote tracking: got %v, %v; want Makefile:2 sets 45m", kept, err)
 	}
 }
 
