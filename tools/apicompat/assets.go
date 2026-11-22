@@ -65,7 +65,9 @@ const (
 // pins stable so the gate runs on every runner without relying on a pre-installed toolchain
 // or assuming a root go.mod exists. Because setup-go exports GOTOOLCHAIN=local unconditionally,
 // the compare step sets GOTOOLCHAIN: auto in its environment so a module go or toolchain
-// directive selects the toolchain (#1037). This fixes root modules and patch-level nested
+// directive selects the toolchain (#1037). It also sets TMPDIR to the runner temp directory
+// so Go 1.27.4's local -L check does not treat the job's own go-build archives as linker
+// inputs when a module cgo passes -L with the system temp directory (#1907). This fixes root modules and patch-level nested
 // modules requiring a newer toolchain; a nested module whose go language version is newer than
 // the checker toolchain is not covered (docs/guides/api-compatibility.md).
 // The job keeps module and build caches of its own, keyed by its job name, instead of
@@ -123,6 +125,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           GOTOOLCHAIN: auto
+          TMPDIR: ${{ runner.temp }}
         run: go run tools/apicompat/gate/main.go -base="$BASE"
 `
 
@@ -195,6 +198,10 @@ var priorDigests = map[string]string{
 	"9127c94ae1aa6b1aeee2f1b42ae0408e68e471adf927ab6aa43282a41f17283f": Directory + "/" + GateFile,
 	// Outgoing review-round text; fixture: api-gate-main-review-round6.go.txt.
 	"a57af7537bc9c1e3b6b6be6be839c991b26562c1daafbaedbad334d9f88d3507": Directory + "/" + GateFile,
+	// The workflow before the compare step set TMPDIR to the runner temp directory (#1907).
+	"2e42c9c296492a39b5657e364b9bffc589731aaa96f676d3c320d1650896c3d9": WorkflowFile,
+	// The draft skip rendering before the compare step set TMPDIR to the runner temp (#1907).
+	"7adb370198f73023178d900ad25735b5959691f7260b89224e55a2c3e0b399a9": WorkflowFile,
 }
 
 var assetNames = [...]string{GateFile, PlaceholderFile}
