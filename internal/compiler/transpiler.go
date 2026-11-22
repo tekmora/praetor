@@ -82,21 +82,29 @@ func (t *Transpiler) Compile(agentsMdPath string) (*CompileResult, error) {
 // the same manifest that governs the text register block, so compile, verify and audit agree
 // on which projections exist.
 func (t *Transpiler) CompileContext(ctx context.Context, agentsMdPath string) (*CompileResult, error) {
+	_, _, res, err := t.compileRepository(ctx, agentsMdPath)
+	return res, err
+}
+
+// compileRepository reads agentsMdPath once, resolves repository configuration and compiles
+// the selected vendor projections, returning the canonical snapshot alongside the result.
+func (t *Transpiler) compileRepository(ctx context.Context, agentsMdPath string) (string, *Transpiler, *CompileResult, error) {
 	bound := t.bound()
 	contentBytes, err := contextopt.ReadSnapshot(ctx, agentsMdPath)
 	if dErr, _ := targetDeadlineError(ctx, bound, agentsMdPath, err); dErr != nil {
-		return nil, fmt.Errorf("failed to read source %s: %w", agentsMdPath, dErr)
+		return "", nil, nil, fmt.Errorf("failed to read source %s: %w", agentsMdPath, dErr)
 	}
 	selected, err := t.forRepository(ctx, filepath.Dir(agentsMdPath))
 	if dErr, _ := targetDeadlineError(ctx, bound, agentsMdPath, err); dErr != nil {
-		return nil, dErr
+		return "", nil, nil, dErr
 	}
-	res, err := selected.CompileContent(string(contentBytes))
+	content := string(contentBytes)
+	res, err := selected.CompileContent(content)
 	if err != nil {
-		return nil, err
+		return "", nil, nil, err
 	}
 	res.SourcePath = agentsMdPath
-	return res, nil
+	return content, selected, res, nil
 }
 
 // forRepository binds the client selection, confined import reader and known nested project
@@ -158,6 +166,20 @@ func (t *Transpiler) CompileContent(content string) (*CompileResult, error) {
 		ReadImport: t.readImport, ProjectDocBytes: t.projectDocBytes, ProjectDocChain: t.projectDocChain,
 		ProjectDocLines: t.projectDocLines, ProjectDocLineChain: t.projectDocLineChain}
 	return leaf.CompileContent(content)
+}
+
+// compileLegacyContent delegates pre-pointer full-content rendering to the shared leaf renderer.
+func (t *Transpiler) compileLegacyContent(content string) (map[string]string, error) {
+	leaf := agentcontext.Transpiler{MaxLines: t.MaxLines, Clients: t.Clients, Env: t.Env}
+	return leaf.CompileLegacyContent(content)
+}
+
+// now returns the transpiler's clock reading (RenderEnv.NowTime).
+func (t *Transpiler) now() time.Time {
+	if t == nil {
+		return time.Now()
+	}
+	return t.Env.NowTime()
 }
 
 // maxContextChainDepth bounds ancestor directory traversal for one nested context file (HISS-02).
@@ -273,12 +295,17 @@ func (t *Transpiler) VerifyContext(ctx context.Context, agentsMdPath, targetDir 
 // projections it checked and the ones the client selection left out.
 // Every independent target check runs; read failures and drift are joined.
 func (t *Transpiler) VerifyCompiled(ctx context.Context, agentsMdPath, targetDir string) (*CompileResult, error) {
-	res, err := t.CompileContext(ctx, agentsMdPath)
+	content, selected, res, err := t.compileRepository(ctx, agentsMdPath)
 	if err != nil {
 		return nil, err
 	}
 	bound := t.bound()
 	read := t.targetReader()
+	legacy := legacyVerifier{
+		tr:      selected,
+		content: content,
+		expired: agentcontext.LegacyProjectionExpired(t.now()),
+	}
 	var errs []error
 	for _, f := range res.Files {
 		existing, err := read(ctx, targetDir, f.RelativePath)
@@ -287,6 +314,10 @@ func (t *Transpiler) VerifyCompiled(ctx context.Context, agentsMdPath, targetDir
 			continue
 		}
 		if equal, strict := projectionMatches(existing, []byte(f.Content)); !equal {
+			if legacy.matches(f.RelativePath, existing) {
+				res.LegacyTargets = append(res.LegacyTargets, f.RelativePath)
+				continue
+			}
 			errs = append(errs, fmt.Errorf("target %s is out of sync with %s%s; run 'praetorctl compile-context' to reconcile",
 				f.RelativePath, agentsMdPath, util.ByteExactNote(strict)))
 		}
@@ -295,4 +326,32 @@ func (t *Transpiler) VerifyCompiled(ctx context.Context, agentsMdPath, targetDir
 		return nil, err
 	}
 	return res, nil
+}
+
+// legacyVerifier lazily renders pre-pointer full-content projections at most once inside the rollout window.
+type legacyVerifier struct {
+	tr      *Transpiler
+	content string
+	expired bool
+	loaded  bool
+	files   map[string]string
+}
+
+// matches reports whether existing equals rel's pre-pointer full-content rendering inside the window.
+func (v *legacyVerifier) matches(rel string, existing []byte) bool {
+	if v.expired {
+		return false
+	}
+	if !v.loaded {
+		v.loaded = true
+		if files, err := v.tr.compileLegacyContent(v.content); err == nil {
+			v.files = files
+		}
+	}
+	prev, ok := v.files[rel]
+	if !ok {
+		return false
+	}
+	equal, _ := projectionMatches(existing, []byte(prev))
+	return equal
 }

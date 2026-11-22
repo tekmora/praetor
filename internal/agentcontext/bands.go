@@ -42,6 +42,14 @@ type RenderEnv struct {
 	Seed int64
 }
 
+// NowTime returns the injected clock reading when set, or time.Now() for the production render.
+func (e *RenderEnv) NowTime() time.Time {
+	if e != nil && e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
+}
+
 // order returns the indexes 0..n-1 in the order the render visits them: registry order for a
 // nil env, a Seed-dependent permutation otherwise.
 func (e *RenderEnv) order(n int) []int {
