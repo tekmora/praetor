@@ -137,8 +137,23 @@ type makefileScanner struct {
 	out            []string
 	start          int
 	continued      bool
+	recipeCommand  bool
 	opts           makefileScanOptions
 	inCommentBlock bool
+}
+
+// trailingBackslashCount is how many consecutive backslashes end line (GNU make continuation: odd count continues).
+func trailingBackslashCount(line string) int {
+	n := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n
+}
+
+// lineContinuesAtEOL reports whether line's trailing backslash count is odd (GNU make line splice).
+func lineContinuesAtEOL(line string) bool {
+	return trailingBackslashCount(line)%2 == 1
 }
 
 // flush checks the accumulated logical line at its starting line number and resets the buffer.
@@ -146,6 +161,7 @@ func (s *makefileScanner) flush() {
 	s.out = append(s.out, checkGoTestTimeouts("Makefile", s.start, s.logical.String(), nil)...)
 	s.logical.Reset()
 	s.continued = false
+	s.recipeCommand = false
 }
 
 // isRecipeLine reports whether line is a Makefile recipe line (default recipe prefix is tab).
@@ -208,13 +224,21 @@ func (s *makefileScanner) recipeCommentEndsCommand(line string) bool {
 	return true
 }
 
+// trimContinuationSuffix removes one logical continuation backslash from line's end (odd trailing count).
+func trimContinuationSuffix(line string) string {
+	if !lineContinuesAtEOL(line) {
+		return line
+	}
+	return line[:len(line)-1]
+}
+
 // appendPhysicalLine adds one physical line to the open logical command.
 func (s *makefileScanner) appendPhysicalLine(line string) {
 	if !s.continued {
 		return
 	}
-	if strings.HasSuffix(line, "\\") {
-		s.logical.WriteString(strings.TrimSuffix(line, "\\"))
+	if lineContinuesAtEOL(line) {
+		s.logical.WriteString(trimContinuationSuffix(line))
 		s.logical.WriteByte(' ')
 		return
 	}
@@ -225,8 +249,9 @@ func (s *makefileScanner) appendPhysicalLine(line string) {
 // startPhysicalLine begins a new logical command at line number n.
 func (s *makefileScanner) startPhysicalLine(n int, line string) {
 	s.start = n
-	if strings.HasSuffix(line, "\\") {
-		s.logical.WriteString(strings.TrimSuffix(line, "\\"))
+	s.recipeCommand = isRecipeLine(line)
+	if lineContinuesAtEOL(line) {
+		s.logical.WriteString(trimContinuationSuffix(line))
 		s.logical.WriteByte(' ')
 		s.continued = true
 		return
@@ -254,8 +279,11 @@ func (s *makefileScanner) addLine(n int, line string) {
 // skipTopLevelCommentBlock updates inCommentBlock for non-recipe full-line comments and returns
 // whether the current physical line should be ignored.
 func (s *makefileScanner) skipTopLevelCommentBlock(line string) bool {
+	if s.continued && s.recipeCommand {
+		return false
+	}
 	if s.opts.topLevelCommentContinue && s.inCommentBlock {
-		if strings.HasSuffix(line, "\\") {
+		if lineContinuesAtEOL(line) {
 			return true
 		}
 		s.inCommentBlock = false
@@ -267,7 +295,7 @@ func (s *makefileScanner) skipTopLevelCommentBlock(line string) bool {
 	if s.continued {
 		s.flush()
 	}
-	if s.opts.topLevelCommentContinue && strings.HasSuffix(line, "\\") {
+	if s.opts.topLevelCommentContinue && lineContinuesAtEOL(line) {
 		s.inCommentBlock = true
 		return true
 	}
@@ -297,7 +325,7 @@ func scanMakefileTimeouts(text string, opts makefileScanOptions) ([]string, erro
 	scanner := makefileScanner{opts: opts}
 	for n := 0; n < len(lines) && n < maxTimeoutWorkflowLines; n++ {
 		line := strings.TrimSuffix(lines[n], "\r")
-		if strings.HasSuffix(line, "\\") && unfinishedContinuation(lines, n) {
+		if lineContinuesAtEOL(line) && unfinishedContinuation(lines, n) {
 			return nil, fmt.Errorf("[FAIL] %s: Makefile:%d has an unfinished continuation", testTimeoutGate, n+1)
 		}
 		if scanner.skipTopLevelCommentBlock(line) {

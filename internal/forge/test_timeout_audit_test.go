@@ -454,6 +454,69 @@ func TestAuditTestTimeouts_Mutant_TopLevelCommentContinueOff(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_MakefileGNUContinuation covers GNU make odd/even backslash continuation for
+// recipes and top-level comments (PR 2034 round 3).
+func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantErr  string
+		wantPass bool
+	}{
+		{
+			name:    "recipe continuation line starting with hash",
+			body:    "test:\n\techo a\\\n#b; go test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:2 sets 45m",
+		},
+		{
+			name:    "top-level comment even backslash pair before recipe",
+			body:    "test:\n# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:3 sets 45m",
+		},
+		{
+			name: "top-level comment single backslash hides next line",
+			body: "# disabled \\\n" +
+				"go test -timeout 45m ./pkg/\n" +
+				"test:\n\t@true\n",
+			wantPass: true,
+		},
+		{
+			name: "top-level three trailing backslashes continue comment",
+			body: "# note \\\\\\\n" +
+				"go test -timeout 45m ./pkg/\n" +
+				"test:\n\t@true\n",
+			wantPass: true,
+		},
+		{
+			name:    "top-level two trailing backslashes end comment",
+			body:    "# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:2 sets 45m",
+		},
+		{
+			name:    "recipe even backslash pair ends command",
+			body:    "test:\n\techo a\\\\\n\tgo test -timeout 45m ./pkg/\n",
+			wantErr: "Makefile:3 sets 45m",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := auditTimeouts(t, root)
+			if tc.wantPass {
+				if err != nil || !strings.Contains(out, "[PASS]") {
+					t.Fatalf("AuditTestTimeouts = %q, %v; want pass", out, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v; want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // Mutant: without shell-quote tracking, a quoted hash line ends the command and hides -timeout.
 func TestAuditTestTimeouts_Mutant_ShellQuoteTrackingOff(t *testing.T) {
 	body := "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n"
