@@ -93,8 +93,7 @@ type DedupeReport struct {
 	// holds source listed in Unscanned.
 	Partial bool `json:"partial"`
 
-	// ForeignDuplicates holds duplicate groups discovered by the foreign scanner (jscpd).
-	// Foreign duplicate groups are reported, not gated (they do not alter CleanlinessScore or Passed).
+	// ForeignDuplicates holds unexcused duplicate groups from the foreign scanner (jscpd).
 	ForeignDuplicates []DuplicateGroup `json:"foreign_duplicates,omitempty"`
 	// ForeignExcepted holds foreign groups fully excused by live HISS-19 exceptions.
 	ForeignExcepted []DuplicateGroup `json:"foreign_excepted,omitempty"`
@@ -102,7 +101,7 @@ type DedupeReport struct {
 	ForeignScanner string `json:"foreign_scanner,omitempty"`
 	// ForeignSkipped records why the foreign scan was skipped, if applicable.
 	ForeignSkipped string `json:"foreign_skipped,omitempty"`
-	// ForeignScanned counts source files per language scanned by the foreign scanner (reported, not gated).
+	// ForeignScanned counts source files per language scanned by the foreign scanner.
 	ForeignScanned map[string]int `json:"foreign_scanned,omitempty"`
 }
 
@@ -1020,6 +1019,6 @@ func calculateScore(report *DedupeReport) {
 	// order engine-dedupe-jscpd-skip-fails-closed-20261027: any foreign clone scan skip (missing
 	// jscpd, version mismatch) fails closed so missing tooling never silently bypasses non-Go clone
 	// detection. Applicable and not-applicable reports both get Passed=false.
-	report.Passed = len(report.Duplicates) == 0 && len(report.SprawlItems) == 0 &&
-		len(report.StaleExceptions) == 0 && report.ForeignSkipped == ""
+	report.Passed = len(report.Duplicates) == 0 && len(report.ForeignDuplicates) == 0 &&
+		len(report.SprawlItems) == 0 && len(report.StaleExceptions) == 0 && report.ForeignSkipped == ""
 }

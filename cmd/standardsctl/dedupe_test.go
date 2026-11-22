@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -67,6 +68,7 @@ func TestPrintDedupeReport_ExceptedForeignEndLine(t *testing.T) {
 	}
 }
 
+// TestPrintDedupeReport_ExpiredForeignException checks that the report names the expiry date of a foreign group's lapsed exception.
 func TestPrintDedupeReport_ExpiredForeignException(t *testing.T) {
 	report := &dedupe.DedupeReport{
 		Applicable: true, Passed: true,
@@ -79,7 +81,7 @@ func TestPrintDedupeReport_ExpiredForeignException(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreign findings remain reported without gating: %v", err)
 	}
-	mustContain(t, out, "Foreign Duplicate Blocks (1, reported, not gated):", "app.py:1", "its HISS-19 exception expired on 2026-10-20")
+	mustContain(t, out, "Foreign Duplicate Blocks (1):", "app.py:1", "its HISS-19 exception expired on 2026-10-20")
 }
 
 // TestPrintDedupeReport_ForeignEndLine checks spans and metadata across end boundaries.
@@ -774,6 +776,84 @@ func TestRunDedupeScan_Planted_BoundaryNoForeignFilesWithWrongStubPasses(t *test
 
 	if err := runDedupeScan([]string{dir}); err != nil {
 		t.Fatalf("clean repo without foreign files must pass without asking stub: %v", err)
+	}
+}
+
+// TestDedupeVerdict_Negative_ForeignDuplicateBlockFails checks that an unexcused foreign clone group fails the dedupe verdict.
+func TestDedupeVerdict_Negative_ForeignDuplicateBlockFails(t *testing.T) {
+	report := &dedupe.DedupeReport{
+		Applicable: true, Passed: false,
+		ForeignDuplicates: []dedupe.DuplicateGroup{{
+			Language: "rust", LOC: 10,
+			Locations: []dedupe.FileLocation{
+				{Path: "src/a.rs", Line: 1, EndLine: 10},
+				{Path: "src/b.rs", Line: 1, EndLine: 10},
+			},
+		}},
+	}
+	err := dedupeVerdict(report)
+	mustErrContain(t, err, "1 foreign duplicate block group")
+	mustErrContain(t, err, "src/a.rs:1-10")
+}
+
+// TestDedupeVerdict_Positive_ForeignExceptedPasses checks that a foreign group covered by an exception leaves the verdict passing.
+func TestDedupeVerdict_Positive_ForeignExceptedPasses(t *testing.T) {
+	report := &dedupe.DedupeReport{
+		Applicable: true, Passed: true,
+		ForeignExcepted: []dedupe.DuplicateGroup{{Language: "rust", LOC: 10}},
+	}
+	if err := dedupeVerdict(report); err != nil {
+		t.Fatalf("excepted foreign clone must pass verdict: %v", err)
+	}
+}
+
+// TestRunDedupeScan_Negative_PlantedRustForeignDuplicateFails checks that the scan command fails on a planted Rust clone pair.
+func TestRunDedupeScan_Negative_PlantedRustForeignDuplicateFails(t *testing.T) {
+	dir := dedupeFixtureDir(t, "main.go", "package main\nfunc main() {}\n")
+	writeFixtureFile(t, dir, "src/lib.rs", "fn shared_impl() {}\n")
+	writeFixtureFile(t, dir, "src/util.rs", "fn shared_impl() {}\n")
+	lib := filepath.Join(dir, "src", "lib.rs")
+	util := filepath.Join(dir, "src", "util.rs")
+	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,
+		"firstFile":{"name":%q,"start":1,"end":12},
+		"secondFile":{"name":%q,"start":1,"end":12}}]}`, lib, util)
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
+	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+
+	out, err := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
+	mustErrContain(t, err, "1 foreign duplicate block group")
+	mustContain(t, out, "Foreign Duplicate Blocks (1):", "src/lib.rs", "Passed:            false")
+}
+
+// TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted checks that the scan command passes when both Rust files carry live exceptions.
+func TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted(t *testing.T) {
+	dir := dedupeFixtureDir(t, "main.go", "package main\nfunc main() {}\n")
+	writeFixtureFile(t, dir, "src/lib.rs", "fn shared_impl() {}\n")
+	writeFixtureFile(t, dir, "src/util.rs", "fn shared_impl() {}\n")
+	lib := filepath.Join(dir, "src", "lib.rs")
+	util := filepath.Join(dir, "src", "util.rs")
+	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,
+		"firstFile":{"name":%q,"start":1,"end":12},
+		"secondFile":{"name":%q,"start":1,"end":12}}]}`, lib, util)
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
+	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+	expires := time.Now().AddDate(0, 0, 30).Format(config.ExceptionDateLayout)
+	manifest := fmt.Sprintf(`exceptions:
+  - rule: HISS-19
+    path: src/lib.rs
+    reason: "Category D: shared fixture clones"
+    expires: %s
+  - rule: HISS-19
+    path: src/util.rs
+    reason: "Category D: shared fixture clones"
+    expires: %s
+`, expires, expires)
+	writeFixtureFile(t, dir, config.ManifestFileName, manifest)
+
+	if err := runDedupeScan([]string{dir}); err != nil {
+		t.Fatalf("excepted rust duplicate must pass: %v", err)
 	}
 }
 

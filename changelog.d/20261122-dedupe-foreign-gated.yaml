@@ -1,0 +1,3 @@
+type: changed
+title: "praetorctl dedupe scan now fails the HISS-19 gate on unexcused foreign-language duplicate blocks from jscpd, the same way native Go clone groups do; adopters must fix or declare a group-scoped HISS-19 exception (path plus fingerprint prefix and category expiry) for each foreign clone group, not a path-wide entry that would hide future duplicates"
+breaking: false

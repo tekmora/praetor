@@ -126,7 +126,7 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 		fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
 		printUnscannedLanguages(report)
 		if report.ForeignScanner != "" {
-			fmt.Printf("  Foreign Scanner:   %s (reported, not gated)\n", report.ForeignScanner)
+			fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
 		} else if report.ForeignSkipped != "" {
 			fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
 		} else {
@@ -136,7 +136,7 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 		printExceptedBlocks("Excepted Foreign Duplicate Blocks", report.ForeignExcepted)
 		printStaleExceptions(report.StaleExceptions)
 		printNotCheckedExceptions(report.NotCheckedExceptions)
-		if len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" {
+		if len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" || len(report.ForeignDuplicates) > 0 {
 			return dedupeVerdict(report)
 		}
 		return nil
@@ -157,7 +157,7 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 		fmt.Printf("  Passed:            %v\n", report.Passed)
 	}
 	if report.ForeignScanner != "" {
-		fmt.Printf("  Foreign Scanner:   %s (reported, not gated)\n", report.ForeignScanner)
+		fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
 	} else if report.ForeignSkipped != "" {
 		fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
 	}
@@ -172,6 +172,7 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 	return dedupeVerdict(report)
 }
 
+// printForeignDuplicates prints the foreign (non-Go) clone groups with a count per language and their file spans.
 func printForeignDuplicates(report *dedupe.DedupeReport) {
 	if len(report.ForeignDuplicates) == 0 {
 		return
@@ -180,7 +181,7 @@ func printForeignDuplicates(report *dedupe.DedupeReport) {
 	for i := 0; i < len(report.ForeignDuplicates); i++ {
 		langCounts[report.ForeignDuplicates[i].Language]++
 	}
-	fmt.Printf("\nForeign Duplicate Blocks (%d, reported, not gated):\n", len(report.ForeignDuplicates))
+	fmt.Printf("\nForeign Duplicate Blocks (%d):\n", len(report.ForeignDuplicates))
 	for _, lang := range slices.Sorted(maps.Keys(langCounts)) {
 		unit := "groups"
 		if langCounts[lang] == 1 {
@@ -205,13 +206,9 @@ func printForeignDuplicates(report *dedupe.DedupeReport) {
 	}
 }
 
-// formatDedupeLocation includes the span's end only when it extends past the start.
+// formatDedupeLocation renders one clone location as path:line or path:start-end through dedupe.FormatFileLocation.
 func formatDedupeLocation(loc dedupe.FileLocation) string {
-	location := fmt.Sprintf("%s:%d", loc.Path, loc.Line)
-	if loc.EndLine > loc.Line && loc.EndLine != 0 {
-		location += fmt.Sprintf("-%d", loc.EndLine)
-	}
-	return location
+	return dedupe.FormatFileLocation(loc)
 }
 
 func printDuplicateBlocks(duplicates []dedupe.DuplicateGroup) {
@@ -302,15 +299,19 @@ func dedupeVerdict(report *dedupe.DedupeReport) error {
 	if report.ForeignSkipped != "" {
 		return fmt.Errorf("dedupe audit failed: foreign clone scan skipped: %s", report.ForeignSkipped)
 	}
-	if report.Passed || (!report.Applicable && len(report.StaleExceptions) == 0) {
+	if report.Passed {
 		return nil
 	}
-	if len(report.StaleExceptions) > 0 {
-		return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d utility sprawl finding(s), %d stale exception(s); cleanliness %.1f%%",
-			len(report.Duplicates), len(report.SprawlItems), len(report.StaleExceptions), report.CleanlinessScore)
+	if !report.Applicable && len(report.StaleExceptions) == 0 && len(report.ForeignDuplicates) == 0 {
+		return nil
 	}
-	return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d utility sprawl finding(s); cleanliness %.1f%%",
-		len(report.Duplicates), len(report.SprawlItems), report.CleanlinessScore)
+	foreignSuffix := dedupe.ForeignDuplicateVerdictSuffix(report.ForeignDuplicates)
+	if len(report.StaleExceptions) > 0 {
+		return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d foreign duplicate block group(s)%s, %d utility sprawl finding(s), %d stale exception(s); cleanliness %.1f%%",
+			len(report.Duplicates), len(report.ForeignDuplicates), foreignSuffix, len(report.SprawlItems), len(report.StaleExceptions), report.CleanlinessScore)
+	}
+	return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d foreign duplicate block group(s)%s, %d utility sprawl finding(s); cleanliness %.1f%%",
+		len(report.Duplicates), len(report.ForeignDuplicates), foreignSuffix, len(report.SprawlItems), report.CleanlinessScore)
 }
 
 func runDedupeCadence(args []string) error {

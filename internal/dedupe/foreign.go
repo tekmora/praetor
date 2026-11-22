@@ -628,7 +628,7 @@ func shouldKeepGroup(g DuplicateGroup, mainRoot string) bool {
 }
 
 // updateForeignScannedLanguages records the languages and file counts scanned by jscpd
-// in ForeignScanned. Languages remain in Unscanned because foreign groups are reported, not gated.
+// in ForeignScanned. Languages the foreign scan did not read stay in Unscanned for coverage reporting.
 func updateForeignScannedLanguages(files []string, report *DedupeReport) {
 	for i := 0; i < len(files) && i < maxForeignScanFiles; i++ {
 		if language := foreignSourceLanguage(files[i]); language != "" {
