@@ -94,8 +94,8 @@ var codeRabbitMakeOptions = []string{
 // buildCodeRabbitVerifyStep compiles the make verify-all detector from the allowed option list.
 func buildCodeRabbitVerifyStep(options []string) *regexp.Regexp {
 	// GNU Make manual 9.2 "Arguments to Specify the Goals" and 9.5 "Overriding Variables".
-	arg := `(?:` + strings.Join(options, `|`) + `|[A-Za-z_][A-Za-z0-9_]*=[^ \t;|&]*|[A-Za-z0-9_./][A-Za-z0-9_./-]*)`
-	return regexp.MustCompile(`(?m)(?:^|[;&|])[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t;|&]+[ \t]+)*make[ \t]+(?:` + arg + `[ \t]+)*verify-all(?:[ \t]+` + arg + `)*(?:[ \t]*[;&|]|[ \t]*$)`)
+	arg := `(?:` + strings.Join(options, `|`) + `|[A-Za-z_][A-Za-z0-9_]*=[^ \t\r\n;|&]*|[A-Za-z0-9_./][A-Za-z0-9_./-]*)`
+	return regexp.MustCompile(`(?m)(?:^|[;&|])[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t\r\n;|&]+[ \t]+)*make[ \t]+(?:` + arg + `[ \t]+)*verify-all(?:[ \t]+` + arg + `)*(?:[ \t]*[;&|]|[ \t]*$)`)
 }
 
 // codeRabbitVerifyStep recognises literal make invocations at shell command boundaries.
@@ -399,15 +399,16 @@ func refreshCodeRabbitEvidence(old, value *yaml.Node, evidence bool) (*yaml.Node
 			desired = text
 		}
 	}
+	changed := false
 	for i := 0; i < len(old.Content) && i < maxAdoptManifestMappingNodes; i++ {
 		entry := old.Content[i]
 		text := util.YAMLMappingValue(entry, "instructions")
 		if util.YAMLMappingValue(entry, "path").Value == "**" && managed[text.Value] && text.Value != desired {
 			text.Value = desired
-			return value, true, nil
+			changed = true
 		}
 	}
-	return value, false, nil
+	return value, changed, nil
 }
 
 // validateCodeRabbitInstructions checks bounded instruction objects before retaining a global entry.

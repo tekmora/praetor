@@ -480,5 +480,21 @@
   {"name": "readopt-heredoc-literal-quote-delimiter", "allow": false, "payload": {"tool_input": {"command": "cat <<\"'true'\"\ndata\n'true'\ngit commit -n -m msg\ntrue"}}},
   {"name": "readopt-heredoc-continued-delimiter", "allow": false, "payload": {"tool_input": {"command": "cat <<true\ntr\\\nue\ngit commit -n -m msg\ntrue"}}},
   {"name": "readopt-control-plain-skip-flag", "allow": false, "payload": {"tool_input": {"command": "git commit -n -m msg"}}},
-  {"name": "readopt-control-safe-commit", "allow": true, "payload": {"tool_input": {"command": "git commit -m msg"}}}
+  {"name": "readopt-control-safe-commit", "allow": true, "payload": {"tool_input": {"command": "git commit -m msg"}}},
+  {"name": "allow-r8-quoted-double-message-option", "allow": true,
+   "payload": {"tool_input": {"command": "git commit \"-m\" \"$message\""}}},
+  {"name": "allow-r8-quoted-single-message-option", "allow": true,
+   "payload": {"tool_input": {"command": "git commit '-m' \"$message\""}}},
+  {"name": "allow-r8-partial-quote-message-option", "allow": true,
+   "payload": {"tool_input": {"command": "git commit -\"m\" docs"}}},
+  {"name": "deny-r8-quoted-double-skip-before-message", "allow": false,
+   "payload": {"tool_input": {"command": "git commit \"-n\" -m x"}}},
+  {"name": "deny-r8-quoted-single-skip-before-message", "allow": false,
+   "payload": {"tool_input": {"command": "git commit '-n' -m x"}}},
+  {"name": "deny-r8-partial-quote-skip-before-message", "allow": false,
+   "payload": {"tool_input": {"command": "git commit -\"n\" -m x"}}},
+  {"name": "deny-r8-quoted-long-skip-before-message", "allow": false,
+   "payload": {"tool_input": {"command": "git commit \"--no-verify\" -m x"}}},
+  {"name": "deny-r8-quoted-message-then-quoted-skip", "allow": false,
+   "payload": {"tool_input": {"command": "git commit \"-m\" x \"-n\""}}}
 ]

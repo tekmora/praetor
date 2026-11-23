@@ -1073,16 +1073,33 @@ class CommandSpans:
         if commit_command(prefix + word, self.short_pattern):
             self.git_command = word
 
+    def data_option_word(self, word):
+        """Decode a fully literal quoted commit option before operand tests."""
+        if self.data_option_pattern.match(word):
+            return word
+        if self.literal_word(word) != word:
+            return word
+        literal = shell_unquote_word(word)
+        if not self.normalizable_word(word, literal):
+            return word
+        return literal
+
     def data_offset(self, word):
         """Identify a full data operand or an option's attached value."""
         if self.next_data or self.redirect_data:
             return 0
         if self.git_command != "commit":
             return -1
-        option = self.data_option_pattern.match(word)
+        candidate = self.data_option_word(word)
+        option = self.data_option_pattern.match(candidate)
         if option is None:
             return -1
-        self.next_data = option.end() == len(word) and not option[0].endswith("=")
+        if candidate != word:
+            if option.end() != len(candidate):
+                return -1
+            self.next_data = not option[0].endswith("=")
+            return len(word)
+        self.next_data = option.end() == len(candidate) and not option[0].endswith("=")
         return option.end()
 
     def mask(self, start, end):
@@ -2049,6 +2066,7 @@ func warnPreservedCheckpoint(s *adoptSession, ready, written bool) {
 // TestPriorEvasionHookDigests_Boundary_CurrentRenderingRecorded fails until a changed rendering
 // is recorded here, so the next release still refreshes it (evasion_prior_test.go).
 var priorEvasionHookDigests = map[string]string{
+	"48e84d4d85d4997d38ea60ee244809c2a6899b0febf3c3eb1f702ba2025a46fb": "proven data-reader shapes and shell execution replay",
 	"53cb9d43a952342693d3c463bc5000c5d7fcf59bf45157d3a113816948e89574": "proven data-reader shapes and shell execution replay",
 	"6c2771f14f4b5ccb0c8eec97685cb06fb5a21423ea01726dbe7ad711f2a79f06": "proven data-reader shapes and shell execution replay",
 	"2f097dcab20384dd19576208c89f914b3a0d16571f06121f15d893877bb5cfc8": "proven data-reader shapes and shell execution replay",

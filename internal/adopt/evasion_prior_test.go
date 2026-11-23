@@ -65,13 +65,9 @@ func parseCodacyExcludePatterns(t *testing.T, data []byte) []string {
 // matchCodacyEvasionPattern matches one exclusion pattern against evasion fixtures by whole path segments.
 func matchCodacyEvasionPattern(pattern string, fixtures map[string][]byte) []string {
 	const dir = "internal/adopt/testdata/evasion"
-	dirSegments := strings.Split(dir, "/")
 	cleaned := strings.TrimSuffix(strings.TrimPrefix(util.NormalizeSlashes(pattern), "./"), "/")
 	patSegments := strings.Split(cleaned, "/")
 	var findings []string
-	if len(patSegments) >= len(dirSegments) && slices.Equal(patSegments[:len(dirSegments)], dirSegments) {
-		findings = append(findings, pattern)
-	}
 	for name := range fixtures {
 		segments := strings.Split(dir+"/"+name, "/")
 		for end := 1; end <= len(segments); end++ {
@@ -101,6 +97,7 @@ func TestEvasionFixturesRemainInCodacyScope(t *testing.T) {
 		{"engine-level exclusion", "engines:\n  bandit:\n    enabled: true\n    exclude_paths:\n      - \"internal/adopt/testdata/evasion/before-minimal-python.block_evasion.py.txt\"\n", true},
 		{"sibling folder", "exclude_paths:\n  - \"internal/adopt/testdata/evasion-archive/**\"\n", false},
 		{"top-level exclusion", "exclude_paths:\n  - \"internal/adopt/testdata/evasion/**\"\n", true},
+		{"nonexistent descendant", "exclude_paths:\n  - \"internal/adopt/testdata/evasion/nonexistent/**\"\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := len(codacyEvasionExclusions(t, []byte(tc.config), fixtures)) > 0

@@ -965,16 +965,33 @@ class CommandSpans:
         if commit_command(prefix + word, self.short_pattern):
             self.git_command = word
 
+    def data_option_word(self, word):
+        """Decode a fully literal quoted commit option before operand tests."""
+        if self.data_option_pattern.match(word):
+            return word
+        if self.literal_word(word) != word:
+            return word
+        literal = shell_unquote_word(word)
+        if not self.normalizable_word(word, literal):
+            return word
+        return literal
+
     def data_offset(self, word):
         """Identify a full data operand or an option's attached value."""
         if self.next_data or self.redirect_data:
             return 0
         if self.git_command != "commit":
             return -1
-        option = self.data_option_pattern.match(word)
+        candidate = self.data_option_word(word)
+        option = self.data_option_pattern.match(candidate)
         if option is None:
             return -1
-        self.next_data = option.end() == len(word) and not option[0].endswith("=")
+        if candidate != word:
+            if option.end() != len(candidate):
+                return -1
+            self.next_data = not option[0].endswith("=")
+            return len(word)
+        self.next_data = option.end() == len(candidate) and not option[0].endswith("=")
         return option.end()
 
     def mask(self, start, end):

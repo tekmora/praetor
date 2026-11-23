@@ -87,6 +87,66 @@ func TestCodeRabbitCIEvidenceManaged(t *testing.T) {
 	}
 }
 
+// codeRabbitGlobalInstructions returns catch-all path instruction text in list order.
+func codeRabbitGlobalInstructions(t *testing.T, data []byte) []string {
+	t.Helper()
+	var got struct {
+		Reviews struct {
+			Instructions []struct {
+				Path         string `yaml:"path"`
+				Instructions string `yaml:"instructions"`
+			} `yaml:"path_instructions"`
+		} `yaml:"reviews"`
+	}
+	if err := util.DecodeYAMLDocument(data, &got, util.YAMLDocumentOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, entry := range got.Reviews.Instructions {
+		if entry.Path == "**" {
+			out = append(out, entry.Instructions)
+		}
+	}
+	return out
+}
+
+// assertCodeRabbitManagedGlobalsRefresh checks managed catch-alls refresh while a user global stays byte-identical.
+func assertCodeRabbitManagedGlobalsRefresh(t *testing.T, after []string, wantAbsent string, got []byte, userEntry string) {
+	t.Helper()
+	if len(after) != 3 || after[0] != wantAbsent || after[1] != wantAbsent {
+		t.Fatalf("positive: managed globals want evidence-absent text: got %v", after)
+	}
+	if after[2] != "Use our custom CI policy." || !strings.Contains(string(got), userEntry) {
+		t.Errorf("negative: user global changed: %q in %s", after[2], got)
+	}
+}
+
+// TestCodeRabbitCIEvidenceRefreshesAllManagedGlobals checks every managed catch-all entry refreshes.
+func TestCodeRabbitCIEvidenceRefreshesAllManagedGlobals(t *testing.T) {
+	base := codeRabbitConfiguration(true)
+	header := "  path_instructions:\n"
+	prefix := base[:strings.Index(base, header)+len(header)]
+	entry := base[len(prefix):]
+	const userEntry = "    - path: '**'\n      instructions: 'Use our custom CI policy.'\n"
+	initial := prefix + entry + entry + userEntry
+	before := codeRabbitGlobalInstructions(t, []byte(initial))
+	wantAbsent := codeRabbitGlobalInstructions(t, []byte(codeRabbitConfiguration(false)))[0]
+	if len(before) != 3 || before[0] != before[1] || !strings.Contains(before[0], "CI verification job") {
+		t.Fatalf("fixture globals: %v", before)
+	}
+
+	got, err := mergeCodeRabbit(t.Context(), []byte(initial), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := codeRabbitGlobalInstructions(t, got)
+	assertCodeRabbitManagedGlobalsRefresh(t, after, wantAbsent, got, userEntry)
+	again, err := mergeCodeRabbit(t.Context(), got, false)
+	if err != nil || string(again) != string(got) {
+		t.Fatalf("boundary: second merge changed bytes: %v", err)
+	}
+}
+
 // TestCodeRabbitCIEvidenceKeepsUserGlobal checks existing global guidance remains byte-identical.
 func TestCodeRabbitCIEvidenceKeepsUserGlobal(t *testing.T) {
 	const initial = "reviews:\n  auto_review: {drafts: true, base_branches: [.*]}\n  path_instructions:\n    - path: '**' # user-owned global\n      instructions: 'Use our custom CI policy.' # keep wording\n"
@@ -492,6 +552,11 @@ func TestCodeRabbitWorkflowEvidence(t *testing.T) {
 		{"jobs spaced", "make -j 4 verify-all", true},
 		{"directory", "make -C . verify-all", true},
 		{"variable assignment", "make CI=1 verify-all", true},
+		{"assignment newline printf goal", "|\n          make CI=1\n          printf verify-all", false},
+		{"assignment newline make goal", "|\n          make CI=1\n          make verify-all", true},
+		{"block assignment newline goal", "|\n          make CI=1 |\n          printf verify-all", false},
+		{"prefix newline make goal", "|\n          CI=1\n          make verify-all", true},
+		{"prefix newline printf spoof", "|\n          CI=1\n          printf make verify-all", false},
 		{"goal list", "make lint verify-all", true},
 		{"version long", "make --version verify-all", false},
 		{"version short", "make -v verify-all", false},

@@ -867,6 +867,21 @@ func (s *shellSpans) enterGitCommand(word string, end int) {
 	}
 }
 
+// dataOptionWord decodes a fully literal quoted commit option before operand tests.
+func dataOptionWord(word string) string {
+	if shellDataOptionPattern.FindString(word) != "" {
+		return word
+	}
+	if shellLiteralWord(word) != word {
+		return word
+	}
+	literal := unquoteShellWord(word)
+	if !normalizableWord(word, literal) {
+		return word
+	}
+	return literal
+}
+
 // dataOffset identifies an entire data operand or the value attached to its option.
 func (s *shellSpans) dataOffset(word string) int {
 	if s.nextData || s.redirectData {
@@ -875,11 +890,19 @@ func (s *shellSpans) dataOffset(word string) int {
 	if s.gitCommand != "commit" {
 		return -1
 	}
-	option := shellDataOptionPattern.FindString(word)
+	candidate := dataOptionWord(word)
+	option := shellDataOptionPattern.FindString(candidate)
 	if option == "" {
 		return -1
 	}
-	s.nextData = len(option) == len(word) && !strings.HasSuffix(option, "=")
+	if candidate != word {
+		if len(option) != len(candidate) {
+			return -1
+		}
+		s.nextData = !strings.HasSuffix(option, "=")
+		return len(word)
+	}
+	s.nextData = len(option) == len(candidate) && !strings.HasSuffix(option, "=")
 	return len(option)
 }
 
