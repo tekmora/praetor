@@ -240,8 +240,11 @@ func resolveAdmitPolicy(opts admitOptions) admission.Policy {
 	}
 	stats, err := admitHostStatsReader()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "%s push-class host-capped thresholds not applied: %v\n",
-			time.Now().Format("15:04:05"), err)
+		// The caller's policy is the fallback whether or not the warning reaches stderr.
+		if _, werr := fmt.Fprintf(os.Stderr, "%s push-class host-capped thresholds not applied: %v\n",
+			time.Now().Format("15:04:05"), err); werr != nil {
+			return opts.policy
+		}
 		return opts.policy
 	}
 	return applyPushHostPolicy(opts.policy, stats, opts.explicitMinAvail, opts.explicitMinSwap, opts.defaultLoad)
