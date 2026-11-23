@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -333,7 +334,7 @@ var (
 var heredocConsumers = map[string]string{
 	"*": "shell", ".": "shell", "source": "shell", "eval": "shell",
 	"bash": "shell", "sh": "shell", "zsh": "shell", "dash": "shell", "ksh": "shell",
-	"git": "data", "cat": "data", "tee": "data", "head": "data", "tail": "data", "wc": "data",
+	"git": "data", "cat": "data", "grep": "data", "tee": "data", "head": "data", "tail": "data", "wc": "data",
 }
 
 // HeredocConsumers returns the shared stdin consumer table without exposing mutable policy.
@@ -344,7 +345,20 @@ var shellConsumerToken = regexp.MustCompile(`^(?:[^ \t\n'"\\$\x60;&|<>()]+|'[^']
 
 // shellLiteralWord returns the leading literal shell word when it ends at a word boundary.
 func shellLiteralWord(text string) string {
-	word := shellConsumerToken.FindString(text)
+	return leadingShellWord(text, shellConsumerToken)
+}
+
+// One name-start character proves an unbraced parameter. The rest is ordinary
+// word text, so the repeated alternatives never compete for name characters.
+const shellPlainParameter = `\$(?:[A-Za-z_]|\{[A-Za-z_][A-Za-z0-9_]*\})`
+
+var shellHereStringToken = regexp.MustCompile(
+	`^(?:[^ \t\n'"\\$\x60;&|<>()]|'[^']*'|\\[^\n]|` + shellPlainParameter +
+		`|"(?:[^"\\$\x60]|\\[\s\S]|` + shellPlainParameter + `)*")+`)
+
+// leadingShellWord requires the token to reach an unquoted word boundary.
+func leadingShellWord(text string, token *regexp.Regexp) string {
+	word := token.FindString(text)
 	if word == "" {
 		return ""
 	}
@@ -402,7 +416,7 @@ func shellConsumerMode(text string) string {
 	return "shell"
 }
 
-// shellConsumerStage retains mutable pipeline offsets, redirection spans and plain-file stdout state.
+// shellConsumerStage retains pipeline offsets, omitted spans and plain-file stdout state.
 type shellConsumerStage struct {
 	start, end int
 	redirects  [][2]int
@@ -647,10 +661,17 @@ func (s *shellSpans) joinContinuation() bool {
 		return false
 	}
 	position := s.position
-	s.command = s.command[:position] + s.command[position+2:]
-	s.judged = append(s.judged[:position], s.judged[position+2:]...)
+	stop := position + 2
+	s.command = s.command[:position] + s.command[stop:]
+	s.judged = append(s.judged[:position], s.judged[stop:]...)
 	if s.ruleText != nil {
-		s.ruleText = append(s.ruleText[:position], s.ruleText[position+2:]...)
+		s.ruleText = append(s.ruleText[:position], s.ruleText[stop:]...)
+	}
+	// Only the latest redirect can have a target end ahead of the cursor.
+	frame := s.consumerFrame()
+	redirects := frame.stages[len(frame.stages)-1].redirects
+	if last := len(redirects) - 1; last >= 0 && redirects[last][1] > position {
+		redirects[last][1] -= stop - position
 	}
 	return true
 }
@@ -1161,6 +1182,7 @@ func (s *shellSpans) comment() bool {
 		end = s.position + newline
 	}
 	s.mask(s.position, end)
+	s.recordRedirect(s.position, end)
 	if len(s.stack) == 0 {
 		s.wordStart = -1
 	}
@@ -1202,7 +1224,7 @@ func (s *shellSpans) consumerFrame() *shellConsumerFrame {
 	return s.consumerFrames[len(s.consumerFrames)-1]
 }
 
-// stageCommandText returns command[stage.start:end] with parsed redirection spans replaced by spaces.
+// stageCommandText returns command[stage.start:end] with redirections and comments replaced by spaces.
 func (s *shellSpans) stageCommandText(stage *shellConsumerStage, end int) string {
 	if len(stage.redirects) == 0 {
 		return s.command[stage.start:end]
@@ -1399,7 +1421,7 @@ func (s *shellSpans) redirectDescriptor() (string, int) {
 	return "", s.position
 }
 
-// recordRedirect records one parsed redirection span on the active pipeline stage.
+// recordRedirect omits one lexed span from the active stage's reader text.
 func (s *shellSpans) recordRedirect(start, end int) {
 	frame := s.consumerFrame()
 	stage := frame.stages[len(frame.stages)-1]
@@ -1454,6 +1476,18 @@ func (s *shellSpans) hereDocumentOpener(rest string, redirStart int) bool {
 	return true
 }
 
+// isDescriptorStyleRedirectTarget reports an absolute target that may write to a descriptor rather
+// than a plain file: every path under /proc and every path under /dev except /dev/null (so
+// /proc/thread-self/fd/1, /dev/fd/1 and /dev/stdout alike). Such a target never makes the stage a
+// plain-file barrier.
+func isDescriptorStyleRedirectTarget(raw string) bool {
+	path := filepath.ToSlash(filepath.Clean(unquoteShellWord(strings.TrimSpace(raw))))
+	if path == "/dev/null" {
+		return false
+	}
+	return path == "/dev" || path == "/proc" || strings.HasPrefix(path, "/dev/") || strings.HasPrefix(path, "/proc/")
+}
+
 // recordStandardRedirect updates stage redirection spans and plain-file stdout tracking.
 func (s *shellSpans) recordStandardRedirect(fd, redirect string, redirStart int, plain bool) {
 	target := ""
@@ -1474,23 +1508,28 @@ func (s *shellSpans) recordStandardRedirect(fd, redirect string, redirStart int,
 	if (fd == "" || fd == "1") && strings.Contains(redirect, ">") && redirect != "<>" {
 		frame := s.consumerFrame()
 		stage := frame.stages[len(frame.stages)-1]
-		stage.stdoutFile = plain && !strings.HasPrefix(redirect, ">&") && target != ""
+		stage.stdoutFile = plain && !strings.HasPrefix(redirect, ">&") && target != "" &&
+			!isDescriptorStyleRedirectTarget(target)
 	}
 }
 
-// hereStringFeed consumes literal stdin words directly, retaining expanded words for scanning.
+// hereStringFeed consumes literal and plain-parameter words, leaving other words to the scanner.
 func (s *shellSpans) hereStringFeed(redirStart int) bool {
 	document := s.feedDocument()
 	s.position += 3
-	s.position += len(s.command[s.position:]) - len(strings.TrimLeft(s.command[s.position:], " \t"))
-	word := shellLiteralWord(s.command[s.position:])
+	rest := s.command[s.position:]
+	text := strings.TrimLeft(rest, " \t")
+	s.position += len(rest) - len(text)
+	word := shellLiteralWord(text)
+	s.feeds = append(s.feeds, shellFeed{document: document, body: unquoteShellWord(word), unresolved: word == ""})
 	if word == "" {
-		s.feeds = append(s.feeds, shellFeed{document: document, unresolved: true})
+		word = leadingShellWord(text, shellHereStringToken)
+	}
+	if word == "" {
 		s.redirectData = len(s.stack) == 0
 		s.redirectStart = redirStart
 		return true
 	}
-	s.feeds = append(s.feeds, shellFeed{document: document, body: unquoteShellWord(word)})
 	s.mask(s.position, s.position+len(word))
 	s.maskRules(s.position, s.position+len(word))
 	s.position += len(word)

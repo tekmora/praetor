@@ -332,3 +332,60 @@ func TestPolicyEvasionHeredocConsumerMutants(t *testing.T) {
 		})
 	}
 }
+
+// TestDescriptorStyleRedirectTarget classifies pipeline descriptors separately from plain files.
+func TestDescriptorStyleRedirectTarget(t *testing.T) {
+	for _, tc := range []struct {
+		target string
+		want   bool
+	}{
+		{"/proc/self/fd/1", true},
+		{"/dev/stdout", true},
+		{"/dev/fd/2", true},
+		{"/dev/stderr", true},
+		{"/proc/1234/fd", true},
+		{"notes.txt", false},
+		{"out/notes.txt", false},
+		{"/tmp/evil/proc/self/fd/1", false},
+		{"/proc/thread-self/fd/1", true},
+		{"/dev/tty", true},
+		{"//dev//stdout", true},
+		{"'/dev/stdout'", true},
+		{"/dev/null", false},
+		{"/devices/out.txt", false},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			if got := isDescriptorStyleRedirectTarget(tc.target); got != tc.want {
+				t.Errorf("isDescriptorStyleRedirectTarget(%q)=%v want=%v", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPolicyR8B1DescriptorRedirectRows checks descriptor redirects refuse and plain files allow.
+func TestPolicyR8B1DescriptorRedirectRows(t *testing.T) {
+	builtin := policy(t)
+	for _, tc := range []struct {
+		name    string
+		command string
+		allow   bool
+	}{
+		{
+			"deny-proc-self-fd1",
+			"cat <<'EOF' > /proc/self/fd/1 | sh\ngit commit -n -m x\nEOF",
+			false,
+		},
+		{
+			"allow-notes-txt",
+			"cat <<'EOF' > notes.txt\ngit commit -n -m x\nEOF",
+			true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := builtin.Command(tc.command)
+			if (got.Outcome == Allow) != tc.allow {
+				t.Errorf("verdict: %+v, want allow=%v", got, tc.allow)
+			}
+		})
+	}
+}

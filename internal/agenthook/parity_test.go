@@ -134,6 +134,7 @@ func refusalCases() []struct {
 		want          []byte
 	}{
 		{"evasion flag", "git push --no-verify origin main", []byte(BuiltinRules()[0].RefusalPrefix() + builtinEvasion[0] + "\n")},
+		{"skip flag after data here-string", "cat <<< \"$note\"; git commit -n -m x", []byte(boundReason(rulePrefix("HISS", evasionMessage)+shortSkipFlagRule) + "\n")},
 		{"gh pr merge admin", "gh pr merge 123 --admin", []byte(BuiltinRules()[10].RefusalPrefix() + builtinEvasion[10] + "\n")},
 		{"gh api merge", "gh api repos/owner/repo/pulls/123/merge", []byte(BuiltinRules()[11].RefusalPrefix() + builtinEvasion[11] + "\n")},
 		{"gh api graphql merge", "gh api graphql -f query='mutation { mergePullRequest }'", []byte(BuiltinRules()[12].RefusalPrefix() + builtinEvasion[12] + "\n")},

@@ -101,6 +101,7 @@ HEREDOC_CONSUMERS = {
     "dash": "shell",
     "eval": "shell",
     "git": "data",
+    "grep": "data",
     "head": "data",
     "ksh": "shell",
     "sh": "shell",
@@ -261,6 +262,17 @@ def shell_unquote_word(word):
     return "".join(result)
 
 
+def descriptor_style_redirect_target(raw):
+    """Return whether raw may write to a descriptor rather than a plain file.
+
+    Every absolute path under /proc and every path under /dev except /dev/null counts.
+    """
+    path = os.path.normpath(shell_unquote_word(raw.strip())).replace(os.sep, "/")
+    if path == "/dev/null":
+        return False
+    return path in ("/dev", "/proc") or path.startswith(("/dev/", "/proc/"))
+
+
 def shell_here_doc_delimiter(text):
     """Read exactly the delimiter subset accepted by util.ShellHereDocDelimiter."""
     word_end = " \t;&|<>()"
@@ -312,6 +324,13 @@ class CommandSpans:
     literal_pattern = re.compile(r'[^"\\$\x60\n]+')
     consumer_token = re.compile(
         r"^(?:[^ \t\n'\"\\$\x60;&|<>()]+|'[^']*'|\"(?:[^\"\\$\x60]|\\[\s\S])*\"|\\[^\n])+"
+    )
+    # One name-start character proves an unbraced parameter. The rest is ordinary
+    # word text, so the repeated alternatives never compete for name characters.
+    plain_parameter = r"\$(?:[A-Za-z_]|\{[A-Za-z_][A-Za-z0-9_]*\})"
+    here_string_token = re.compile(
+        rf"""^(?:[^ \t\n'"\\$\x60;&|<>()]|'[^']*'|\\[^\n]|{plain_parameter}"""
+        rf"""|"(?:[^"\\$\x60]|\\[\s\S]|{plain_parameter})*")+"""
     )
     assignment_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -394,11 +413,20 @@ class CommandSpans:
         self.command = self.command[:position] + self.command[stop:]
         del self.judged[position:stop]
         del self.rule_text[position:stop]
+        # Only the latest redirect can have a target end ahead of the cursor.
+        redirects = self.consumer_frames[-1][0][-1][2]
+        if redirects and redirects[-1][1] > position:
+            start, end = redirects[-1]
+            redirects[-1] = (start, end - (stop - position))
         return True
 
     def literal_word(self, text):
         """Return a leading literal shell word when it ends at a word boundary."""
-        match = self.consumer_token.match(text)
+        return self.leading_word(text, self.consumer_token)
+
+    def leading_word(self, text, token):
+        """Require the token to reach an unquoted word boundary."""
+        match = token.match(text)
         if not match:
             return ""
         end = match.end()
@@ -849,6 +877,7 @@ class CommandSpans:
         if end < 0:
             end = len(self.command)
         self.mask(self.position, end)
+        self.record_redirect(self.position, end)
         if not self.stack:
             self.word_start = -1
         self.uncertain |= bool(self.stack)
@@ -866,18 +895,18 @@ class CommandSpans:
         self.mask_rules(start, self.position)
 
     def stage_text(self, stage, end):
-        """Return stage command text up to end with redirection spans removed."""
+        """Return stage text up to end with redirections and comments omitted."""
         position = stage[0]
         if not stage[2]:
             return self.command[position:end]
         parts = []
-        for redir_start, redir_end in stage[2]:
-            if redir_start >= end:
+        for span_start, span_end in stage[2]:
+            if span_start >= end:
                 break
-            if redir_start > position:
-                parts.append(self.command[position:redir_start])
+            if span_start > position:
+                parts.append(self.command[position:span_start])
             parts.append(" ")
-            position = max(position, min(redir_end, end))
+            position = max(position, min(span_end, end))
         if position < end:
             parts.append(self.command[position:end])
         return "".join(parts)
@@ -1070,7 +1099,7 @@ class CommandSpans:
         return "", self.position
 
     def record_redirect(self, start, end):
-        """Record one parsed redirection span on the active pipeline stage."""
+        """Omit one lexed span from the active stage's reader text."""
         self.consumer_frames[-1][0][-1][2].append((start, end))
 
     def redirection(self):
@@ -1134,24 +1163,30 @@ class CommandSpans:
         else:
             self.record_redirect(redir_start, self.position)
         if fd in ("", "1") and ">" in redirect and redirect != "<>":
-            stdout_file = plain and not redirect.startswith(">&") and bool(target)
+            stdout_file = (
+                plain
+                and not redirect.startswith(">&")
+                and bool(target)
+                and not descriptor_style_redirect_target(target)
+            )
             self.consumer_frames[-1][0][-1][3] = stdout_file
 
     def here_string_feed(self, redir_start):
-        """Consume literal stdin words directly; refuse unresolved shell feeds."""
+        """Consume literal or plain-parameter words and scan other expansions."""
         document = self.feed_document()
         self.position += 3
         start = self.position
         rest = self.command[start:]
-        self.position += len(rest) - len(rest.lstrip(" \t"))
-        start = self.position
-        word = self.literal_word(self.command[start:])
+        text = rest.lstrip(" \t")
+        self.position += len(rest) - len(text)
+        word = self.literal_word(text)
+        self.feeds.append((document, shell_unquote_word(word), False, not word))
         if not word:
-            self.feeds.append((document, "", False, True))
+            word = self.leading_word(text, self.here_string_token)
+        if not word:
             self.redirect_data = not self.stack
             self.redirect_start = redir_start
             return True
-        self.feeds.append((document, shell_unquote_word(word), False, False))
         self.mask(self.position, self.position + len(word))
         self.mask_rules(self.position, self.position + len(word))
         self.position += len(word)
