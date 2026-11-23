@@ -784,7 +784,7 @@ func regenerateCanonicalEvasionGuard(t *testing.T, guard string) string {
 	}
 	guard = strings.Replace(guard, "segments = command_segments(command_str)",
 		"segments = command_segments(raw_command, READ_ONLY_EXEMPT_PATTERNS[0])", 1)
-	if !strings.Contains(guard, "segments = command_segments(raw_command, READ_ONLY_EXEMPT_PATTERNS[0])") {
+	if !strings.Contains(guard, "segments = command_segments(raw_command, READ_ONLY_EXEMPT_PATTERNS[0]") {
 		guard = strings.Replace(guard, "    judged = without_read_only_words(command_str)",
 			"    try:\n        segments = command_segments(raw_command, READ_ONLY_EXEMPT_PATTERNS[0])\n"+
 				"    except ValueError as error:\n        sys.stderr.write(str(error) + \"\\n\")\n        return False\n"+

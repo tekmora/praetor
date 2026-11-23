@@ -122,16 +122,19 @@ def commit_command(command, short_pattern, anchored=False):
     return search(domain, join_line_continuations(command))
 
 
-def command_segments(command, short_pattern):
+def command_segments(command, short_pattern, admission=None):
     """Scan executable message bodies iteratively, with no recursive parser calls."""
     queue, parts = [(command, False)], []
     for index in range(len(command) + 1):
         if index >= len(queue):
             break
-        spans, nested = scan_shell_input(queue[index], short_pattern)
-        if spans and not queue[index][1] and len(spans[0]) == 2:
+        source = queue[index]
+        spans, nested, parser = scan_shell_input(source, short_pattern)
+        if admission is not None and not source[1]:
+            admission.append(admission_source(source[0], spans, parser))
+        if spans and not source[1] and len(spans[0]) == 2:
             text, veto = spans[0]
-            spans[0] = (text, veto, queue[index][0])
+            spans[0] = (text, veto, source[0])
         parts.extend(spans)
         queue.extend(nested)
         if len(queue) > len(command) + 1:
@@ -158,13 +161,13 @@ def scan_shell_input(source, short_pattern):
         raise ValueError("invalid shell command: unterminated here-document")
     spans.nested.extend((execution, False) for execution in spans.word_executions)
     spans.feed_inputs()
-    return [], spans.nested
+    return [], spans.nested, spans
 
 
 def scan_command_spans(command, short_pattern, code_only=False):
     """Mask data operands while collecting executable message substitutions."""
     if not needs_shell_spans(command, short_pattern):
-        return [(command, bool(re.search(READ_ONLY_VETO, command)))], []
+        return [(command, bool(re.search(READ_ONLY_VETO, command)))], [], None
     spans = CommandSpans(command, short_pattern)
     spans.consumer_state_unknown = code_only
     spans.code_only = code_only
@@ -182,11 +185,11 @@ def scan_command_spans(command, short_pattern, code_only=False):
     spans.feed_inputs()
     code = "".join(spans.rule_text)
     if spans.whole:
-        return [("".join(spans.judged), True, code)], spans.nested
+        return [("".join(spans.judged), True, code)], spans.nested, spans
     if spans.parts:
         text, veto = spans.parts[0]
         spans.parts[0] = (text, veto, code)
-    return spans.parts, spans.nested
+    return spans.parts, spans.nested, spans
 
 
 def needs_shell_spans(command, short_pattern):
@@ -207,6 +210,18 @@ def executable_text(command, segments):
     if segments and len(segments[0]) == 3:
         command = segments[0][2]
     return join_line_continuations(command)
+
+
+def admission_source(command, segments, parser):
+    """Keep physical lines while removing framing for independently scanned stdin."""
+    if parser is None or not parser.document_spans:
+        return executable_text(command, segments), False
+    text = parser.rule_text.copy()
+    for opener, start, end in parser.document_spans:
+        first, last = opener
+        text[first:last] = " " * (last - first)
+        text[start:end] = re.sub(r"[^\n]", " ", parser.command[start:end])
+    return join_line_continuations("".join(text)), True
 
 
 def join_document_continuations(body):
@@ -358,6 +373,7 @@ class CommandSpans:
         self.consumer_state_unknown = False
         self.code_only = False
         self.document_end = 0
+        self.document_spans = []
 
     def top(self):
         """Return the innermost quote or substitution terminator."""
@@ -891,6 +907,7 @@ class CommandSpans:
         if document[1]:
             body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
         self.feeds.append((document, body, document[4], False))
+        self.document_spans.append((document[8], start, self.position))
         self.mask(start, self.position)
         self.mask_rules(start, self.position)
 
@@ -1130,6 +1147,7 @@ class CommandSpans:
             raise ValueError(
                 "invalid shell command: pending here-document bound exceeded: 16"
             )
+        self.position += opener + width
         self.documents.append(
             (
                 delimiter,
@@ -1140,9 +1158,9 @@ class CommandSpans:
                 self.consumer_frames[-1],
                 len(self.consumer_frames[-1][0]) - 1,
                 self.consumer_frames[-1][3] or self.groups > 0,
+                (redir_start, self.position),
             )
         )
-        self.position += opener + width
         self.record_redirect(redir_start, self.position)
         return True
 
@@ -1331,8 +1349,9 @@ def audit_command(command_str: str) -> bool:
     command_str = join_line_continuations(command_str)
     if not scannable(command_str):
         return False
+    sources = []
     try:
-        segments = command_segments(raw_command, READ_ONLY_EXEMPT_PATTERNS[0])
+        segments = command_segments(raw_command, READ_ONLY_EXEMPT_PATTERNS[0], sources)
     except ValueError as error:
         sys.stderr.write("[BLOCKED BY HISS] Invalid hook input: " + str(error) + "\n")
         return False
@@ -1361,7 +1380,14 @@ def audit_command(command_str: str) -> bool:
             )
             return False
 
-    return check_admission(command_str)
+    return check_admission_sources(command_str, sources)
+
+
+def check_admission_sources(command, sources):
+    """Judge document-fed code separately, with its own shell lexer state."""
+    if not any(has_document for _, has_document in sources):
+        return check_admission(command)
+    return all(check_admission(text) for text, _ in sources)
 
 
 # Host admission delegation to Go (`praetorctl admission-check`) when hooks.admission.enforce
