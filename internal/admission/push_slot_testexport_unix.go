@@ -18,6 +18,7 @@ func PushSlotTestBase(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	// #nosec G302 -- a directory needs the owner search bit; 0700 grants nothing to group or others.
+	// nosemgrep: go_file-permissions_rule-fileperm, go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a directory needs the owner search bit; 0700 grants nothing to group or others
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
