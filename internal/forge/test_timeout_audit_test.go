@@ -478,6 +478,41 @@ var makefileGNUContinuationCases = []struct {
 		wantErr: "Makefile:2 sets 45m",
 	},
 	{
+		name:    "recipe continued word through hash payload lines",
+		body:    "test:\n\techo a\\\n\t#x\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:     "recipe shell comment on continued hash line ends command",
+		body:     "test:\n\techo a\\\n\t#x #c\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:     "recipe hash comment before continuation backslash",
+		body:     "test:\n\techo #\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:    "recipe hash inside word before continuation backslash",
+		body:    "test:\n\techo a#\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "recipe quoted hash before continuation backslash",
+		body:    "test:\n\techo '#'\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "recipe escaped blank before hash before continuation backslash",
+		body:    "test:\n\techo a\\ #\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "recipe escaped backslash before hash before continuation backslash",
+		body:    "test:\n\techo x \\\\#\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
 		name:     "recipe comment after space before continuation backslash",
 		body:     "test:\n\techo a \\\n\t#b; go test -timeout 45m ./pkg/\n",
 		wantPass: true,
@@ -579,6 +614,89 @@ func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v; want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+var hashStartsShellCommentCases = []struct {
+	name         string
+	line         string
+	i            int
+	start        int
+	startsInWord bool
+	prevEscaped  bool
+	want         bool
+}{
+	{name: "payload start not in word", line: "\t#x", i: 1, start: 1, startsInWord: false, prevEscaped: false, want: true},
+	{name: "payload start in word", line: "\t#x", i: 1, start: 1, startsInWord: true, prevEscaped: false, want: false},
+	{name: "comment after unescaped word break", line: "echo a #c", i: 7, start: 0, startsInWord: true, prevEscaped: false, want: true},
+	{name: "hash inside word not comment", line: "a#b", i: 1, start: 0, startsInWord: true, prevEscaped: false, want: false},
+	{name: "word break suppressed by escape", line: "a\\ #", i: 3, start: 0, startsInWord: false, prevEscaped: true, want: false},
+	{name: "boundary i equals start zero", line: "#", i: 0, start: 0, startsInWord: false, prevEscaped: false, want: true},
+}
+
+func TestHashStartsShellComment(t *testing.T) {
+	for _, tc := range hashStartsShellCommentCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hashStartsShellComment(tc.line, tc.i, tc.start, tc.startsInWord, tc.prevEscaped)
+			if got != tc.want {
+				t.Fatalf("hashStartsShellComment(%q, %d, %d, %v, %v) = %v; want %v",
+					tc.line, tc.i, tc.start, tc.startsInWord, tc.prevEscaped, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShellCommentRunsToEOLBeforeContinuation(t *testing.T) {
+	tests := []struct {
+		name         string
+		line         string
+		startsInWord bool
+		want         bool
+	}{
+		{
+			name:         "payload hash continues word",
+			line:         "\t#x\\",
+			startsInWord: true,
+			want:         false,
+		},
+		{
+			name:         "payload hash at command start",
+			line:         "\t#x\\",
+			startsInWord: false,
+			want:         true,
+		},
+		{
+			name:         "comment after word break before continuation",
+			line:         "\techo a #c\\",
+			startsInWord: true,
+			want:         true,
+		},
+		{
+			name:         "word continues without comment hash",
+			line:         "\techo a\\",
+			startsInWord: false,
+			want:         false,
+		},
+		{
+			name:         "empty line boundary",
+			line:         "",
+			startsInWord: false,
+			want:         false,
+		},
+		{
+			name:         "no continuation backslash",
+			line:         "\techo a",
+			startsInWord: false,
+			want:         false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shellCommentRunsToEOLBeforeContinuation(tc.line, tc.startsInWord)
+			if got != tc.want {
+				t.Fatalf("shellCommentRunsToEOLBeforeContinuation(%q, %v) = %v; want %v", tc.line, tc.startsInWord, got, tc.want)
 			}
 		})
 	}

@@ -140,7 +140,7 @@ type makefileScanner struct {
 	recipeCommand  bool
 	opts           makefileScanOptions
 	inCommentBlock bool
-	lastContLine   string
+	startsInWord   bool
 }
 
 // trailingBackslashCount is how many consecutive backslashes end line (GNU make continuation: odd count continues).
@@ -183,12 +183,54 @@ func closingParenBeforeBackslashIsSubst(line string, closeIdx int) bool {
 	return false
 }
 
+// hashStartsShellComment reports whether the unquoted # at i in line starts a shell comment that
+// runs through the EOL continuation backslash: at payload start (i == start) only when startsInWord
+// is false, otherwise only after an unescaped word break.
+func hashStartsShellComment(line string, i, start int, startsInWord, prevEscaped bool) bool {
+	if i == start {
+		return !startsInWord
+	}
+	return !prevEscaped && isShellWordBreak(line[i-1])
+}
+
+// shellCommentRunsToEOLBeforeContinuation reports whether an unquoted shell # begins a comment
+// at recipe payload start (only when startsInWord is false) or after a word break and runs through
+// the EOL continuation backslash.
+// Each step advances at least one byte, so the loop reads at most spliceAt - start bytes (HISS-02).
+func shellCommentRunsToEOLBeforeContinuation(line string, startsInWord bool) bool {
+	if !lineContinuesAtEOL(line) {
+		return false
+	}
+	spliceAt := len(line) - 1
+	start := 0
+	if len(line) > 0 && line[0] == '\t' {
+		start = 1
+	}
+	inSingle, inDouble := false, false
+	prevEscaped := false
+	for i := start; i < spliceAt; {
+		if !inSingle && !inDouble && line[i] == '#' {
+			if hashStartsShellComment(line, i, start, startsInWord, prevEscaped) {
+				return true
+			}
+		}
+		unquoted := !inSingle && !inDouble
+		prev := i
+		i = advanceShellQuoteState(line, i, &inSingle, &inDouble)
+		prevEscaped = unquoted && i-prev == 2
+	}
+	return false
+}
+
 // continuationBackslashJoinsWord reports whether an EOL continuation backslash leaves the shell inside
 // a word so the next physical line can continue that token: the byte before the backslash is neither
 // blank nor a shell operator that ends the preceding word, unless that byte is itself escaped
-// (echo a\;\ keeps `a;` as literal word text).
-func continuationBackslashJoinsWord(line string) bool {
+// (echo a\;\ keeps `a;` as literal word text). A shell comment that runs to the backslash does not splice.
+func continuationBackslashJoinsWord(line string, startsInWord bool) bool {
 	if !lineContinuesAtEOL(line) {
+		return false
+	}
+	if shellCommentRunsToEOLBeforeContinuation(line, startsInWord) {
 		return false
 	}
 	spliceAt := len(line) - 1
@@ -229,7 +271,7 @@ func (s *makefileScanner) flush() {
 	s.logical.Reset()
 	s.continued = false
 	s.recipeCommand = false
-	s.lastContLine = ""
+	s.startsInWord = false
 }
 
 // isRecipeLine reports whether line is a Makefile recipe line (default recipe prefix is tab).
@@ -289,7 +331,7 @@ func (s *makefileScanner) recipeCommentEndsCommand(line string) bool {
 	if s.opts.trackShellQuotes && hasOpenShellQuote(s.logical.String()) {
 		return false
 	}
-	if s.continued && continuationBackslashJoinsWord(s.lastContLine) && recipeHashContinuesContinuedWord(line) {
+	if s.continued && s.startsInWord && recipeHashContinuesContinuedWord(line) {
 		return false
 	}
 	return true
@@ -308,10 +350,11 @@ func (s *makefileScanner) appendPhysicalLine(line string) {
 	if !s.continued {
 		return
 	}
+	lineStart := s.startsInWord
 	if lineContinuesAtEOL(line) {
 		s.logical.WriteString(trimContinuationSuffix(line))
 		s.logical.WriteByte(' ')
-		s.lastContLine = line
+		s.startsInWord = continuationBackslashJoinsWord(line, lineStart)
 		return
 	}
 	s.logical.WriteString(line)
@@ -322,11 +365,13 @@ func (s *makefileScanner) appendPhysicalLine(line string) {
 func (s *makefileScanner) startPhysicalLine(n int, line string) {
 	s.start = n
 	s.recipeCommand = isRecipeLine(line)
+	s.startsInWord = false
+	lineStart := false
 	if lineContinuesAtEOL(line) {
 		s.logical.WriteString(trimContinuationSuffix(line))
 		s.logical.WriteByte(' ')
 		s.continued = true
-		s.lastContLine = line
+		s.startsInWord = continuationBackslashJoinsWord(line, lineStart)
 		return
 	}
 	s.logical.WriteString(line)
