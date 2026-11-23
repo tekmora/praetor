@@ -985,12 +985,28 @@ class CommandSpans:
         """Mask proven message and document data; retain redirect targets for other rules."""
         self.rule_text[start:end] = " " * (end - start)
 
+    def quoted_argument_expansion(self):
+        """Split quoted parameter expansions outside commit and amend data operands."""
+        if (
+            self.execution_start >= 0
+            or len(self.stack) != 1
+            or self.top() != '"'
+            or self.git_command not in ("commit", "am")
+            or self.word_start < 0
+            or self.next_data
+            or self.redirect_data
+        ):
+            return False
+        start, end = self.word_start, self.position + 1
+        return self.data_offset(self.command[start:end]) < 0
+
     def mark_expansion(self):
         """Retain splitting for array expansions even inside double quotes."""
         self.word_expansion = True
         self.word_splitting |= (
             self.code_only
             or not self.stack
+            or self.quoted_argument_expansion()
             or (
                 self.execution_start < 0
                 and self.array_expansion_pattern.match(self.command, self.position)

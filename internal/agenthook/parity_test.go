@@ -928,6 +928,7 @@ func splittingSegmentCase(name string) bool {
 		"am substitution",
 		"substitution flag", "backtick flag", "nested substitution flag",
 		"substitution separator flag", "positional substitution", "state function",
+		"positional parameter", "positional prefixed parameter", "message positional flag",
 	}, name)
 }
 

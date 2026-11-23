@@ -417,6 +417,7 @@ func splittingSegmentCase(name string) bool {
 		"am substitution",
 		"substitution flag", "backtick flag", "nested substitution flag",
 		"substitution separator flag", "positional substitution", "state function",
+		"positional parameter", "positional prefixed parameter", "message positional flag",
 	}, name)
 }
 
@@ -508,8 +509,6 @@ func evasionSegmentMutants() []struct {
 		{"redirection veto", `if not needs_shell_spans(command, short_pattern):`,
 			"if re.search(r\"[<>]\", command):\n    return [(command, True)], []\n" + `if not needs_shell_spans(command, short_pattern):`,
 			`git commit -m x 2>&1 | tail -n 1`, 2},
-		{"positional expansion", "self.uncertain |= self.word_expansion", "self.uncertain |= False",
-			`git commit "$x" && git log -n 1`, 0},
 		{"process execution", "if self.command.startswith((\"<(\", \">(\"), self.position):", "if False:",
 			`git commit <(printf %s -n)`, 0},
 		{"runtime-only message parameter", "if self.git_command and self.arguments_uncertain and not self.stack:",
@@ -524,6 +523,12 @@ func evasionSegmentMutants() []struct {
 		{"escaped boundary", "if not self.word_boundary():",
 			"if self.position > 0 and self.command[self.position - 1] not in \" \\t\\n;|&(\":",
 			`git commit -m fix\ #note -n`, 0},
+		{"F1 backslash newline inside a word", "if following == \"\\n\":\n    return \"\", True",
+			"if False:\n    return \"\", True", "git com\\\nmit -n -m x", 0},
+		{"F2 continuation joins the flag word", "if self.join_continuation():",
+			"if False:", "git commit -\\\nn -m x", 0},
+		{"F3 quoted argument expansion", "or self.quoted_argument_expansion()",
+			"or False", `git commit "$skip" -m x`, 0},
 	}, evasionRoundSixMutants()...)
 }
 
@@ -574,6 +579,33 @@ func replaceEvasionMutant(rendered, before, after string) string {
 		after = strings.ReplaceAll(after, "\n", "\n"+indent)
 	}
 	return strings.Replace(rendered, before, after, 1)
+}
+
+// TestEmittedEvasionExpansionUncertaintyBehindQuotedRule proves the expansion uncertainty still
+// refuses a quoted positional parameter once the earlier quoted-argument rule is mutated away, and
+// that the command passes only when both are gone: the two refuse the same rows (two barriers).
+func TestEmittedEvasionExpansionUncertaintyBehindQuotedRule(t *testing.T) {
+	python, _ := emittedInterceptor(t)
+	rendered := buildBlockEvasionPY()
+	withoutQuoted := replaceEvasionMutant(rendered, "or self.quoted_argument_expansion()", "or False")
+	withoutBoth := replaceEvasionMutant(withoutQuoted, "self.uncertain |= self.word_expansion", "self.uncertain |= False")
+	if withoutQuoted == rendered || withoutBoth == withoutQuoted {
+		t.Fatal("mutation did not change the rendering")
+	}
+	command := `git commit "$x" && git log -n 1`
+	for _, tc := range []struct {
+		name, source string
+		want         int
+	}{{"quoted rule mutated", withoutQuoted, 2}, {"both mutated", withoutBoth, 0}} {
+		script := filepath.Join(t.TempDir(), "mutant_block_evasion.py")
+		mustWrite(t, script, tc.source)
+		if err := compileEvasionMutant(t, python, script, tc.name); err != nil {
+			t.Fatal(err)
+		}
+		if code := runInterceptor(t, python, script, nil, nil, command); code != tc.want {
+			t.Errorf("%s: exit %d, want %d", tc.name, code, tc.want)
+		}
+	}
 }
 
 // TestEmittedEvasionSegmentMutants proves both whole-command matching paths regress.

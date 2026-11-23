@@ -1093,12 +1093,28 @@ class CommandSpans:
         """Mask proven message and document data; retain redirect targets for other rules."""
         self.rule_text[start:end] = " " * (end - start)
 
+    def quoted_argument_expansion(self):
+        """Split quoted parameter expansions outside commit and amend data operands."""
+        if (
+            self.execution_start >= 0
+            or len(self.stack) != 1
+            or self.top() != '"'
+            or self.git_command not in ("commit", "am")
+            or self.word_start < 0
+            or self.next_data
+            or self.redirect_data
+        ):
+            return False
+        start, end = self.word_start, self.position + 1
+        return self.data_offset(self.command[start:end]) < 0
+
     def mark_expansion(self):
         """Retain splitting for array expansions even inside double quotes."""
         self.word_expansion = True
         self.word_splitting |= (
             self.code_only
             or not self.stack
+            or self.quoted_argument_expansion()
             or (
                 self.execution_start < 0
                 and self.array_expansion_pattern.match(self.command, self.position)
@@ -2033,6 +2049,8 @@ func warnPreservedCheckpoint(s *adoptSession, ready, written bool) {
 // TestPriorEvasionHookDigests_Boundary_CurrentRenderingRecorded fails until a changed rendering
 // is recorded here, so the next release still refreshes it (evasion_prior_test.go).
 var priorEvasionHookDigests = map[string]string{
+	"53cb9d43a952342693d3c463bc5000c5d7fcf59bf45157d3a113816948e89574": "proven data-reader shapes and shell execution replay",
+	"6c2771f14f4b5ccb0c8eec97685cb06fb5a21423ea01726dbe7ad711f2a79f06": "proven data-reader shapes and shell execution replay",
 	"2f097dcab20384dd19576208c89f914b3a0d16571f06121f15d893877bb5cfc8": "proven data-reader shapes and shell execution replay",
 	"adca6d70c591d3ffd7d7f5e564d7570cc0feb2e483c560ee89f6bba157f692c1": "proven data-reader shapes and shell execution replay",
 	"f5318e397d2677f3a44d68c05a44e78d07feed48e5687397f32d20a8b3ab9fe0": "proven data-reader shapes and shell execution replay",

@@ -897,11 +897,21 @@ func (s *shellSpans) maskRules(start, end int) {
 	}
 }
 
+// quotedArgumentExpansion splits quoted parameter expansions outside commit data operands.
+func (s *shellSpans) quotedArgumentExpansion() bool {
+	if s.executionStart >= 0 || len(s.stack) != 1 || s.top() != '"' ||
+		(s.gitCommand != "commit" && s.gitCommand != "am") || s.wordStart < 0 ||
+		s.nextData || s.redirectData {
+		return false
+	}
+	return s.dataOffset(s.command[s.wordStart:s.position+1]) < 0
+}
+
 // markExpansion retains splitting for array expansions even inside double quotes.
 func (s *shellSpans) markExpansion() {
 	s.wordExpansion = true
 	array := s.executionStart < 0 && shellArrayExpansionPattern.MatchString(s.command[s.position:])
-	s.wordSplitting = s.wordSplitting || len(s.stack) == 0 || array || s.codeOnly
+	s.wordSplitting = s.wordSplitting || len(s.stack) == 0 || array || s.codeOnly || s.quotedArgumentExpansion()
 }
 
 // redirectOrExecution recognises process substitutions before ordinary redirections.
