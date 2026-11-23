@@ -257,27 +257,37 @@ func TestAuditTestTimeouts_ScanBound(t *testing.T) {
 	}
 }
 
-// Positive: a full-line Makefile comment that mentions go test and -timeout is not judged.
+// Positive: a full-line Makefile comment that mentions go test and -timeout is not judged;
+// a real recipe line in the same file is still scanned so a no-op pass cannot hide a dead scanner.
 func TestAuditTestTimeouts_Positive_MakefileCommentIgnored(t *testing.T) {
 	root := t.TempDir()
 	body := "test:\n\t$(GO_TEST) -race -timeout 30m ./...\n" +
-		"# -timeout replaces go test's ten-minute default per package\n"
+		"# -timeout replaces go test's ten-minute default per package\n" +
+		"\tgo test -timeout 45m ./control/\n"
 	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := auditTimeouts(t, root)
-	if err != nil || !strings.Contains(out, "[PASS]") {
-		t.Fatalf("Makefile comment: %q, %v; want no finding", out, err)
+	_, err := auditTimeouts(t, root)
+	if err == nil || !strings.Contains(err.Error(), "Makefile:4 sets 45m") {
+		t.Fatalf("Makefile comment: err = %v; want only the control recipe at line 4 refused", err)
+	}
+	if strings.Contains(err.Error(), "Makefile:3") || strings.Contains(err.Error(), "99m") {
+		t.Fatalf("Makefile comment: err = %v; want no finding on the comment line", err)
 	}
 }
 
-// Positive: an indented comment-only line in a workflow is not judged.
+// Positive: an indented comment-only line in a workflow is not judged; a bound step in the same
+// file is still scanned so a no-op pass cannot hide a dead scanner.
 func TestAuditTestTimeouts_Positive_IndentedCommentIgnored(t *testing.T) {
 	wf := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" +
-		"      # go test -timeout 99m ./...\n      - run: go test -timeout 30m ./...\n"
-	out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
-	if err != nil || !strings.Contains(out, "[PASS]") {
-		t.Fatalf("indented comment: %q, %v; want no finding", out, err)
+		"      # go test -timeout 99m ./...\n      - run: go test -timeout 30m ./...\n" +
+		"      - run: go test -timeout 45m ./control/\n"
+	_, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
+	if err == nil || !strings.Contains(err.Error(), ".github/workflows/ci.yml:8 sets 45m") {
+		t.Fatalf("indented comment: err = %v; want only the control step at line 8 refused", err)
+	}
+	if strings.Contains(err.Error(), "ci.yml:6") || strings.Contains(err.Error(), "99m") {
+		t.Fatalf("indented comment: err = %v; want no finding on the comment line", err)
 	}
 }
 
