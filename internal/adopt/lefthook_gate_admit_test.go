@@ -38,7 +38,7 @@ func strictGateFixtureNames(fixture string) []string {
 // flag's own constant, and its header says a root with neither go.mod nor Cargo.lock is admitted
 // without a receipt. Run against a recording stub, the line calls exactly those arguments.
 func TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages(t *testing.T) {
-	want := "gate run --path=. --" + gating.AdmitUnsupportedFlag
+	want := "admit --class push --local --label push-gate -- gate run --path=. --" + gating.AdmitUnsupportedFlag
 	for _, languages := range lefthookLanguageSets {
 		for _, checkpoint := range []bool{false, true} {
 			rendered := buildLefthookYAMLFor(lefthookShape{languages: languages}, checkpoint)

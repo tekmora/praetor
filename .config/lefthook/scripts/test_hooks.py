@@ -3242,7 +3242,7 @@ class ScopeAndGuard(unittest.TestCase):
             self.assertTrue(run_full_gate(Path(".")))
         calls = [(call.args[0][3:5], call.kwargs["timeout"]) for call in spawned.call_args_list]
         self.assertEqual(calls, [(["gate", "deadline"], GATE_QUERY_TIMEOUT),
-                                 (["gate", "run"], 2100 + GATE_LAUNCH_MARGIN),
+                                 (["admit", "--class"], 2100 + GATE_LAUNCH_MARGIN),
                                  (["gate", "verify"], 2100 + GATE_LAUNCH_MARGIN)])
 
     def test_full_gate_refuses_an_unusable_deadline(self):
@@ -4242,7 +4242,9 @@ class ScopeAndGuard(unittest.TestCase):
                 self.assertTrue(source_checks(root, [".standards.yaml"], base=base))
                 self.assertEqual(calls, [[toolchain.make_program(), "--no-print-directory", "state-audit"],
                                         ["go", "run", "./cmd/standardsctl", "gate", "deadline", "--json"],
-                                        ["go", "run", "./cmd/standardsctl", "gate", "run", "--path=.", "--race-packages=none"],
+                                        ["go", "run", "./cmd/standardsctl", "admit", "--class", "push", "--local",
+                                         "--label", "push-gate", "--",
+                                         "go", "run", "./cmd/standardsctl", "gate", "run", "--path=.", "--race-packages=none"],
                                         ["go", "run", "./cmd/standardsctl", "gate", "verify", "--path=."]])
             def reject_pin(argv, **kwargs):
                 if argv[:5] == ["go", "run", "./cmd/standardsctl", "gate", "verify"]:

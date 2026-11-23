@@ -105,6 +105,15 @@ workstation checkout or stdin.
 | `--wait` | `6h` | longest the step is held; after it the step is refused |
 | `--poll` | `1m` | time between readings while held |
 | `--timeout` | `6h` | longest the step runs once admitted |
+| `--class push` | off | take the one host push-gate slot before load admission; release when the step ends |
+
+`--class push` queues the step first come, first served by request time in the flock-held lease
+files under `<runtime>/praetor-admit-leases/host-push/`, reusing the same lease mechanism as
+remote executor admission (`internal/admission/remote_lease.go`). The oldest live lease is the
+holder; every other waiter keeps its place until it becomes the oldest live lease or `--wait`
+passes, when the step exits with `push slot: still held after ...` (`ErrPushSlotHeld`). A holder
+that dies releases the slot for the next waiter. On non-Unix platforms the push class refuses
+with a named error, as remote executor leases do.
 
 A host exactly at a threshold is admitted. In named local mode a host that stays under one
 until `--wait` passes refuses the step with `still held after ...`. A failed local reading

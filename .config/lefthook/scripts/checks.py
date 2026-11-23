@@ -683,10 +683,11 @@ def run_full_gate(directory, packages=None):
                  timeout=GATE_QUERY_TIMEOUT)
     timeout = gate_timeout(report)
     scope = [] if packages is None else ["--race-packages=" + (",".join(packages) or "none")]
-    for subcommand in ("run", "verify"):
-        args = scope if subcommand == "run" else []
-        run([*command, subcommand, "--path=.", *args], cwd=directory, env=clean_env(),
-            timeout=timeout, capture=False)
+    # The gate run holds the one host push slot (praetorctl admit --class push); verify only
+    # reads the signed receipt, so it runs after the slot is released, under its own deadline.
+    run([*CLI, "admit", "--class", "push", "--local", "--label", "push-gate", "--",
+         *command, "run", "--path=.", *scope], cwd=directory, env=clean_env(), timeout=timeout, capture=False)
+    run([*command, "verify", "--path=."], cwd=directory, env=clean_env(), timeout=timeout, capture=False)
     return True
 
 

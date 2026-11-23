@@ -25,7 +25,12 @@ const (
 	maxWorkspacePath      = 4096
 	executorLeasesDir     = "praetor-admit-leases"
 	maxExecutorLeaseFiles = 256
+	// PushSlotLeaseResource is the lease directory name for the one host push gate slot.
+	PushSlotLeaseResource = "host-push"
 )
+
+// ErrPushSlotHeld is returned when a push-class step gives up waiting for the host push slot.
+var ErrPushSlotHeld = errors.New("push slot still held")
 
 // ErrExecutorLeaseCap is raised when an executor's lease directory exceeds maxExecutorLeaseFiles lock files.
 var ErrExecutorLeaseCap = errors.New("lease directory exceeds lock file limit")
@@ -97,6 +102,11 @@ func (e Executor) validate() error {
 // validExecutorName reports whether name is an allowed alphanumeric identifier and not the reserved name local.
 func validExecutorName(name string) bool {
 	return name != "local" && executorName.MatchString(name)
+}
+
+// validAdmissionLeaseName reports whether name may name a directory under executorLeasesDir.
+func validAdmissionLeaseName(name string) bool {
+	return name == PushSlotLeaseResource || validExecutorName(name)
 }
 
 // validSSHHost reports whether host is a zoneless IP address or valid hostname without consecutive dots.

@@ -78,4 +78,6 @@ pre-push:
     audit:
       run: sh .config/lefthook/engine.sh audit
     gate:
-      run: sh .config/lefthook/engine.sh gate run --path=. --admit-unsupported
+      run: >-
+        sh .config/lefthook/engine.sh admit --class push --local --label
+        push-gate -- gate run --path=. --admit-unsupported

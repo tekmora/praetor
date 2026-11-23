@@ -44,7 +44,7 @@ const (
 	// gating.AdmitUnsupportedFlag, so a root with neither go.mod nor Cargo.lock (Meson, CMake,
 	// npm, Python) is admitted without a receipt, its unverified languages named, instead of every
 	// push being refused (#648); a Go or Cargo root is refused as before when its stages did not run.
-	prePushGateArgs = "gate run --path=. --" + gating.AdmitUnsupportedFlag
+	prePushGateArgs = "admit --class push --local --label push-gate -- gate run --path=. --" + gating.AdmitUnsupportedFlag
 	// govulnGateArgs is the Go vulnerability gate the generated pre-push security job runs where
 	// govulncheck is installed: govulncheck at symbol level, judged against the repository's
 	// OpenVEX document (internal/govuln), the check the gate run's security stage makes. The job

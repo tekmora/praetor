@@ -53,7 +53,10 @@ class RacePackages(unittest.TestCase):
                 patch("checks.golangci_lint_command", return_value=["lint"]), \
                 patch("checks.run", side_effect=process):
             self.assertTrue(checks.source_checks(root, names))
-        launched = next(cmd for cmd in calls if cmd[3:5] == ["gate", "run"])
+        admitted = next(cmd for cmd in calls if cmd[3:5] == ["admit", "--class"])
+        self.assertEqual(admitted[3:10], ["admit", "--class", "push", "--local", "--label", "push-gate", "--"])
+        launched = admitted[10:]
+        self.assertEqual(launched[3:5], ["gate", "run"])
         self.assertIn("--race-packages=" + expected, launched)
         verify = next(cmd for cmd in calls if cmd[3:5] == ["gate", "verify"])
         self.assertEqual(verify, [*checks.CLI, "gate", "verify", "--path=."])
