@@ -464,40 +464,52 @@ func addContractPackage(index *FrameworkIndex, pkg *contractPackage) {
 	}
 }
 
-// preferredClaimant returns the claimant declaring capability, else the first in import
-// order, else "".
-func preferredClaimant(idx *FrameworkIndex, claimants []string, capability CapabilityKey) string {
+// preferredClaimant picks the lexically first exact match or the sole claimant.
+// When multiple claimants lack an exact match, it returns their sorted paths.
+func preferredClaimant(idx *FrameworkIndex, claimants []string, capability CapabilityKey) (string, []string) {
+	var best string
 	for _, path := range claimants {
-		if slices.Contains(idx.Packages[path].Capabilities, capability) {
-			return path
+		if slices.Contains(idx.Packages[path].Capabilities, capability) && (best == "" || path < best) {
+			best = path
 		}
 	}
-	if len(claimants) > 0 {
-		return claimants[0]
+	if best != "" {
+		return best, nil
 	}
-	return ""
+	if len(claimants) == 1 {
+		return claimants[0], nil
+	}
+	if len(claimants) == 0 {
+		return "", nil
+	}
+	ambiguous := slices.Clone(claimants)
+	slices.Sort(ambiguous)
+	return "", ambiguous
 }
 
-// contractReplacement resolves a demand through the contract and returns the package and
-// the status it earns. Among the packages whose entries replace the name, one declaring the
-// demanded capability wins, then the first claimant in import order (covered); then the
-// packages that adapt it (adapter available); with no claimant, any package declaring the
-// capability (covered). None of them proves API compatibility.
-func contractReplacement(idx *FrameworkIndex, dep *DependencyDemand) (string, CapabilityStatus, bool) {
+// contractReplacement considers replacements, adaptations, then capability providers.
+// An ambiguous claim leaves a gap and stops resolution at that role.
+func contractReplacement(idx *FrameworkIndex, dep *DependencyDemand) (string, CapabilityStatus, []string) {
 	if idx.Contract == "" {
-		return "", "", false
+		return "", "", nil
 	}
 	key := contractNameKey(idx.Ecosystem, dep.Package)
-	if path := preferredClaimant(idx, idx.Replacements[key], dep.Capability); path != "" {
-		return path, StatusCovered, true
-	}
-	if path := preferredClaimant(idx, idx.Adaptations[key], dep.Capability); path != "" {
-		return path, StatusAdapterAvailable, true
+	for _, role := range [...]struct {
+		claimants []string
+		status    CapabilityStatus
+	}{{idx.Replacements[key], StatusCovered}, {idx.Adaptations[key], StatusAdapterAvailable}} {
+		path, ambiguous := preferredClaimant(idx, role.claimants, dep.Capability)
+		if len(ambiguous) > 0 {
+			return "", StatusGap, ambiguous
+		}
+		if path != "" {
+			return path, role.status, nil
+		}
 	}
 	if paths := idx.Capabilities[dep.Capability]; len(paths) > 0 {
-		return paths[0], StatusCovered, true
+		return paths[0], StatusCovered, nil
 	}
-	return "", "", false
+	return "", "", nil
 }
 
 // reconcileContractDemand marks a demand covered, or adapter-available, by its contract
@@ -506,8 +518,12 @@ func contractReplacement(idx *FrameworkIndex, dep *DependencyDemand) (string, Ca
 // the status or the package changes, so a demand a scan mapped to the configured contract's
 // package and a report re-mapped to a fork's never names the package it no longer maps to.
 func reconcileContractDemand(idx *FrameworkIndex, dep *DependencyDemand) bool {
-	path, status, ok := contractReplacement(idx, dep)
-	if !ok {
+	path, status, ambiguous := contractReplacement(idx, dep)
+	if len(ambiguous) > 0 {
+		markAmbiguousClaimants(idx, dep, ambiguous)
+		return true
+	}
+	if path == "" {
 		return false
 	}
 	pkg := idx.Packages[path]
@@ -521,9 +537,14 @@ func reconcileContractDemand(idx *FrameworkIndex, dep *DependencyDemand) bool {
 	return true
 }
 
+func markAmbiguousClaimants(idx *FrameworkIndex, dep *DependencyDemand, claimants []string) {
+	dep.Status, dep.FrameworkReplacement, dep.Relationship = StatusGap, "", nil
+	dep.Notes = fmt.Sprintf("%s: ambiguous claimants for %s: %s", idx.Contract, dep.Capability, strings.Join(claimants, ", "))
+}
+
 // applyContractRelationship applies the relationship the selected contract declares for a
-// demand: a foundation it retains, or the package that wraps the library or is tooling for
-// it. The library stays either way; it reports false when the contract declares neither.
+// demand: a foundation it retains, or a wrapper or tooling claim. The library stays in all
+// cases. An ambiguous claim records the role without selecting a related package.
 func applyContractRelationship(idx *FrameworkIndex, dep *DependencyDemand) bool {
 	if idx.Contract == "" {
 		return false
@@ -539,7 +560,12 @@ func applyContractRelationship(idx *FrameworkIndex, dep *DependencyDemand) bool 
 		kind   LibraryRelationshipKind
 		claims map[string][]string
 	}{{RelationshipWrappedBy, idx.Wrappers}, {RelationshipTooling, idx.Tooling}} {
-		path := preferredClaimant(idx, role.claims[key], dep.Capability)
+		path, ambiguous := preferredClaimant(idx, role.claims[key], dep.Capability)
+		if len(ambiguous) > 0 {
+			markAmbiguousClaimants(idx, dep, ambiguous)
+			dep.Relationship = &LibraryRelationship{Kind: role.kind, Basis: idx.Basis}
+			return true
+		}
 		if path == "" {
 			continue
 		}

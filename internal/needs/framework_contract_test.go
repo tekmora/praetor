@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -121,7 +123,14 @@ func TestFrameworkContractObservesDeclaredPackagesAndReplacements(t *testing.T) 
 	// httpx/client sorts first among otel's claimants; the claimant declaring the
 	// demanded capability must still win.
 	assertDemand(t, demandFor(t, report, "go.opentelemetry.io/otel"), StatusCovered, contractFrameworkModule+"/otel", "telemetry.otel")
-	assertDemand(t, demandFor(t, report, "github.com/acme/kv/v3"), StatusCovered, contractFrameworkModule+"/db/sqlite", "db.sqlite")
+	ambiguous := demandFor(t, report, "github.com/acme/kv/v3")
+	original := buildGoDemand(ambiguous.Package, ambiguous.Version)
+	assertDemand(t, ambiguous, StatusGap, "", original.Capability)
+	want := "ambiguous claimants for " + string(original.Capability) +
+		": example.com/fw/db/sqlite, example.com/fw/httpx/client"
+	if !strings.Contains(FormatLibraryRelationships(report), want) {
+		t.Errorf("relationship report missing %q", want)
+	}
 	assertDemand(t, demandFor(t, report, contractFrameworkModule), StatusNative, "", FrameworkNativeCapability)
 	assertDemand(t, demandFor(t, report, contractFrameworkModule+"/core"), StatusNative, "", FrameworkNativeCapability)
 	gap := demandFor(t, report, "github.com/unknown/gap-lib")
@@ -129,8 +138,103 @@ func TestFrameworkContractObservesDeclaredPackagesAndReplacements(t *testing.T) 
 	if !strings.HasPrefix(string(gap.Capability), "custom.") {
 		t.Fatalf("an unmapped library keeps its custom capability: %+v", gap)
 	}
-	if report.Readiness.CoveredDeps != 5 || report.Readiness.GapDeps != 1 || report.Readiness.Basis != FrameworkSourceObserved {
-		t.Fatalf("five of six demands map: %+v", report.Readiness)
+	if report.Readiness.CoveredDeps != 4 || report.Readiness.GapDeps != 2 || report.Readiness.Basis != FrameworkSourceObserved {
+		t.Fatalf("four of six demands map: %+v", report.Readiness)
+	}
+}
+
+const (
+	claimantDependency = "example.com/third-party"
+	claimantCapability = CapabilityKey("http.client")
+	claimantOther      = CapabilityKey("db.sqlite")
+	claimantA          = contractFrameworkModule + "/a"
+	claimantB          = contractFrameworkModule + "/b"
+	claimantC          = contractFrameworkModule + "/c"
+	claimantD          = contractFrameworkModule + "/d"
+)
+
+type contractClaimantRole struct {
+	name   string
+	claims map[string][]string
+	status CapabilityStatus
+	kind   LibraryRelationshipKind
+}
+
+func TestFrameworkContractClaimantSelection(t *testing.T) {
+	index := FrameworkIndex{
+		Name: contractFrameworkModule, Basis: FrameworkSourceObserved,
+		Packages: map[string]FrameworkPackage{
+			claimantA: {Capabilities: []CapabilityKey{claimantOther}},
+			claimantB: {Capabilities: []CapabilityKey{claimantOther}},
+			claimantC: {Capabilities: []CapabilityKey{claimantCapability}},
+			claimantD: {Capabilities: []CapabilityKey{claimantCapability}},
+		},
+		Capabilities: map[CapabilityKey][]string{claimantCapability: {claimantC, claimantD}},
+	}
+	beginContractIndex(&index, &frameworkContract{}, FrameworkContractFile)
+	for _, role := range [...]contractClaimantRole{
+		{"replaces", index.Replacements, StatusCovered, ""},
+		{"adapts", index.Adaptations, StatusAdapterAvailable, ""},
+		{"wrapped-by", index.Wrappers, StatusCovered, RelationshipWrappedBy},
+		{"tooling", index.Tooling, StatusCovered, RelationshipTooling},
+	} {
+		t.Run(role.name, func(t *testing.T) {
+			checkContractClaimantCases(t, &index, role)
+			delete(role.claims, claimantDependency)
+		})
+	}
+}
+
+func checkContractClaimantCases(t *testing.T, index *FrameworkIndex, role contractClaimantRole) {
+	t.Helper()
+	for _, tc := range [...]struct {
+		name       string
+		claimants  []string
+		winner     string
+		capability CapabilityKey
+	}{
+		{"no exact match", []string{claimantB, claimantA}, "", claimantCapability},
+		{"exact match", []string{claimantA, claimantC, claimantB}, claimantC, claimantCapability},
+		{"tied exact matches", []string{claimantD, claimantA, claimantC}, claimantC, claimantCapability},
+		{"sole claimant", []string{claimantB}, claimantB, claimantOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := DependencyDemand{Package: claimantDependency, Capability: claimantCapability, Status: StatusGap}
+			role.claims[claimantDependency] = slices.Clone(tc.claimants)
+			forward := original
+			reconcileDependency(index, &forward)
+			if !slices.Equal(role.claims[claimantDependency], tc.claimants) {
+				t.Fatal("reconciliation changed the claimant order in the index")
+			}
+			slices.Reverse(role.claims[claimantDependency])
+			backward := original
+			reconcileDependency(index, &backward)
+			if !reflect.DeepEqual(forward, backward) {
+				t.Errorf("claimant permutation changed the demand: %+v vs %+v", forward, backward)
+			}
+			checkContractClaimantOutcome(t, forward, role, tc.winner, tc.capability)
+		})
+	}
+}
+
+func checkContractClaimantOutcome(t *testing.T, got DependencyDemand, role contractClaimantRole, winner string, capability CapabilityKey) {
+	t.Helper()
+	status, replacement := role.status, winner
+	if winner == "" {
+		status = StatusGap
+		wantNote := "capabilities.yaml: ambiguous claimants for http.client: example.com/fw/a, example.com/fw/b"
+		if got.Notes != wantNote {
+			t.Errorf("ambiguity note = %q, want %q", got.Notes, wantNote)
+		}
+	}
+	var relationship *LibraryRelationship
+	if role.kind != "" {
+		replacement = ""
+		relationship = &LibraryRelationship{Kind: role.kind, FrameworkPackage: winner, Basis: FrameworkSourceObserved}
+	}
+	assertDemand(t, got, status, replacement, capability)
+	if !reflect.DeepEqual(got.Relationship, relationship) {
+		t.Errorf("relationship = %+v, want %+v", got.Relationship, relationship)
 	}
 }
 
