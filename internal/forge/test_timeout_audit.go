@@ -159,7 +159,8 @@ func lineContinuesAtEOL(line string) bool {
 
 // continuationBackslashJoinsWord reports whether an EOL continuation backslash leaves the shell inside
 // a word so the next physical line can continue that token: the byte before the backslash is neither
-// blank nor a shell operator that ends the preceding word.
+// blank nor a shell operator that ends the preceding word, unless that byte is itself escaped
+// (echo a\;\ keeps `a;` as literal word text).
 func continuationBackslashJoinsWord(line string) bool {
 	if !lineContinuesAtEOL(line) {
 		return false
@@ -168,15 +169,19 @@ func continuationBackslashJoinsWord(line string) bool {
 	if spliceAt == 0 {
 		return false
 	}
-	prev := line[spliceAt-1]
-	if prev == ' ' || prev == '\t' {
-		return false
+	if !isShellWordBreak(line[spliceAt-1]) {
+		return true
 	}
-	switch prev {
-	case ';', '&', '|', '(', ')', '<', '>':
-		return false
+	return trailingBackslashCount(line[:spliceAt-1])%2 == 1
+}
+
+// isShellWordBreak reports whether an unescaped byte ends a shell word: a blank or an operator byte.
+func isShellWordBreak(b byte) bool {
+	switch b {
+	case ' ', '\t', ';', '&', '|', '(', ')', '<', '>':
+		return true
 	}
-	return true
+	return false
 }
 
 // recipeHashContinuesContinuedWord reports whether line is a recipe line whose shell payload, after
