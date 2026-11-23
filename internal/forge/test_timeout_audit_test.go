@@ -618,6 +618,28 @@ func TestAuditTestTimeouts_Mutant_ShellQuoteTrackingOff(t *testing.T) {
 	}
 }
 
+const repositoryControlTimeoutRecipe = "\tgo test -timeout 45m ./control/\n"
+
+// copyRepositoryMakefileWithControlTimeout copies the checked-in Makefile from repoRoot into dir,
+// appends a control-timeout target whose recipe exceeds the bound, and returns that recipe's line number.
+func copyRepositoryMakefileWithControlTimeout(t *testing.T, repoRoot, dir string) int {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	recipeLine := strings.Count(body, "\n") + 2
+	body += "control-timeout:\n" + repositoryControlTimeoutRecipe
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return recipeLine
+}
+
 // The checked-in recipe and declaration must exercise the same audit as adopter files.
 func TestAuditTestTimeouts_RepositoryMakefile(t *testing.T) {
 	root := filepath.Join("..", "..")
@@ -627,8 +649,19 @@ func TestAuditTestTimeouts_RepositoryMakefile(t *testing.T) {
 	}
 	// Pin the declaration's entry day; expiry itself is exercised by the negative fixture.
 	today := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
-	out, err := AuditTestTimeouts(t.Context(), TestTimeoutOptions{Root: root, Exceptions: manifest.Exceptions, Today: today})
+	opts := TestTimeoutOptions{Root: root, Exceptions: manifest.Exceptions, Today: today}
+	out, err := AuditTestTimeouts(t.Context(), opts)
 	if err != nil || !strings.Contains(out, "[PASS] test-timeout") {
 		t.Fatalf("repository timeout audit = %q, %v; want the checked-in Makefile within the bound", out, err)
+	}
+	fork := t.TempDir()
+	recipeLine := copyRepositoryMakefileWithControlTimeout(t, root, fork)
+	want := fmt.Sprintf("Makefile:%d sets 45m", recipeLine)
+	_, err = AuditTestTimeouts(t.Context(), TestTimeoutOptions{Root: fork, Exceptions: manifest.Exceptions, Today: today})
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("forked Makefile audit: err = %v; want only %q refused", err, want)
+	}
+	if strings.Count(err.Error(), "Makefile:") != 1 {
+		t.Fatalf("forked Makefile audit: err = %v; want exactly one Makefile finding", err)
 	}
 }
