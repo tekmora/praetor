@@ -496,5 +496,21 @@
   {"name": "deny-r8-quoted-long-skip-before-message", "allow": false,
    "payload": {"tool_input": {"command": "git commit \"--no-verify\" -m x"}}},
   {"name": "deny-r8-quoted-message-then-quoted-skip", "allow": false,
-   "payload": {"tool_input": {"command": "git commit \"-m\" x \"-n\""}}}
+   "payload": {"tool_input": {"command": "git commit \"-m\" x \"-n\""}}},
+  {"name": "allow-r8-s2-ls-brace-operand", "allow": true,
+   "payload": {"tool_input": {"command": "ls file{1,2}"}}},
+  {"name": "allow-r8-s2-cat-brace-operand", "allow": true,
+   "payload": {"tool_input": {"command": "cat a{b,c}.txt"}}},
+  {"name": "allow-r8-s2-cp-brace-operand", "allow": true,
+   "payload": {"tool_input": {"command": "cp src/{a,b}.go dst/"}}},
+  {"name": "allow-r8-s2-grep-semicolon-commit", "allow": true,
+   "payload": {"tool_input": {"command": "grep -n needle file{1,2}; git commit -m docs"}}},
+  {"name": "deny-r8-s2-commit-brace-skip", "allow": false,
+   "payload": {"tool_input": {"command": "git commit -m x {--no-verify,-q}"}}},
+  {"name": "deny-r8-s2-git-brace-subcommand", "allow": false,
+   "payload": {"tool_input": {"command": "git {commit,status} -n -m x"}}},
+  {"name": "deny-r8-s2-brace-command-word", "allow": false,
+   "payload": {"tool_input": {"command": "{git,true} commit -n -m x"}}},
+  {"name": "deny-r8-s2-commit-brace-short-cluster", "allow": false,
+   "payload": {"tool_input": {"command": "git commit -{n,q} -m x"}}}
 ]

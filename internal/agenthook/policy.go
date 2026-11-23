@@ -479,6 +479,8 @@ type shellSpans struct {
 	consumerStateUnknown           bool
 	codeOnly                       bool
 	gitWordStart                   int
+	commandWordStart               int
+	braceConsumerHost              bool
 	gitCommand                     string
 	executionStart, executionDepth int
 	wordExecutions                 []string
@@ -782,9 +784,10 @@ func (s *shellSpans) commandWord(word string) {
 	if s.commandWordSeen || s.redirectData || s.commandPrefix(word) {
 		return
 	}
-	s.commandWordSeen, s.gitWordStart = true, -1
+	s.commandWordStart, s.commandWordSeen, s.gitWordStart = s.wordStart, true, -1
 	word = unquoteShellWord(word)
-	s.consumerStateUnknown = s.consumerStateUnknown || shellStatePattern.MatchString(word) ||
+	s.braceConsumerHost = shellStatePattern.MatchString(word)
+	s.consumerStateUnknown = s.consumerStateUnknown || s.braceConsumerHost ||
 		slices.Contains([]string{"eval", ".", "source"}, word)
 	s.commandUnknown = !knownShellCommand(word)
 	if strings.HasSuffix(word, "git") && shellCommitPattern.MatchString(word+" commit") {
@@ -1073,15 +1076,23 @@ func (s *shellSpans) braceCommand() {
 	if !s.commandWordSeen && s.commandPrefix(word) {
 		return
 	}
-	unknown := !s.commandWordSeen || s.commandUnknown
-	if s.commandWordSeen && s.gitWordStart >= 0 {
-		prefix := string(s.judged[s.gitWordStart:s.wordStart])
-		unknown = shellCommitPrefixPattern.MatchString(prefix+" commit") ||
-			shellCommitPrefixPattern.MatchString(prefix+word+" commit")
-	}
-	if unknown {
+	if s.braceMarksGitUnknown(word) {
 		s.gitCommand, s.argumentsUncertain = "unknown", true
 	}
+}
+
+// braceMarksGitUnknown reports braces in command, launcher or Git syntax words, not plain operands.
+func (s *shellSpans) braceMarksGitUnknown(word string) bool {
+	unknown := !s.commandWordSeen || s.prefixMode != ""
+	if s.commandWordStart >= 0 && s.wordStart > s.commandWordStart && s.braceConsumerHost {
+		unknown = true
+	}
+	if !s.commandWordSeen || s.gitWordStart < 0 {
+		return unknown
+	}
+	prefix := string(s.judged[s.gitWordStart:s.wordStart])
+	return unknown || shellCommitPrefixPattern.MatchString(prefix+" commit") ||
+		shellCommitPrefixPattern.MatchString(prefix+word+" commit")
 }
 
 // commandPrefix reads modeled launcher words and env switch arities; unknown prefixes remain commands.
@@ -1367,6 +1378,8 @@ func (s *shellSpans) split(end, next int) {
 	s.commandWordSeen = false
 	s.commandUnknown, s.prefixValue = false, false
 	s.prefixMode = ""
+	s.commandWordStart = -1
+	s.braceConsumerHost = false
 	s.gitWordStart = -1
 	s.gitCommand = ""
 }

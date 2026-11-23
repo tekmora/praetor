@@ -328,7 +328,8 @@ class CommandSpans:
         self.execution_depth = self.brace_depth = 0
         self.next_data = self.redirect_data = self.word_expansion = False
         self.word_splitting = False
-        self.git_word_start = -1
+        self.git_word_start = self.command_word_start = -1
+        self.brace_consumer_host = False
         self.arguments_uncertain = self.command_word_seen = False
         self.git_command = ""
         self.word_executions, self.nested, self.feeds = [], [], []
@@ -509,11 +510,15 @@ class CommandSpans:
         """Record the first executable word and its Git basename's raw offset."""
         if self.command_word_seen or self.redirect_data or self.command_prefix(word):
             return
+        self.command_word_start = self.word_start
         self.command_word_seen, self.git_word_start = True, -1
         word = shell_unquote_word(word)
-        self.consumer_state_unknown |= bool(
-            re.search(self.state_pattern, word)
-        ) or word in ("eval", ".", "source")
+        self.brace_consumer_host = bool(re.search(self.state_pattern, word))
+        self.consumer_state_unknown |= self.brace_consumer_host or word in (
+            "eval",
+            ".",
+            "source",
+        )
         self.command_unknown = not self.known_command(word)
         if word.endswith("git") and commit_command(
             word + " commit", self.short_pattern
@@ -759,6 +764,25 @@ class CommandSpans:
                 return True
         return True
 
+    def brace_marks_git_unknown(self, word):
+        """Report braces in command, launcher or Git syntax words, not plain operands."""
+        unknown = not self.command_word_seen or bool(self.prefix_mode)
+        if (
+            self.command_word_start >= 0
+            and self.word_start > self.command_word_start
+            and self.brace_consumer_host
+        ):
+            unknown = True
+        if not self.command_word_seen or self.git_word_start < 0:
+            return unknown
+        git_start, word_start = self.git_word_start, self.word_start
+        prefix = "".join(self.judged[git_start:word_start])
+        return (
+            unknown
+            or commit_command(prefix + " commit", self.short_pattern, True)
+            or commit_command(prefix + word + " commit", self.short_pattern, True)
+        )
+
     def brace_command(self):
         """Reuse the Git option grammar to retain unknown command words."""
         if self.git_command or self.word_start < 0:
@@ -767,15 +791,7 @@ class CommandSpans:
         word = self.command[start:stop]
         if not self.command_word_seen and self.command_prefix(word):
             return
-        unknown = not self.command_word_seen or self.command_unknown
-        if self.command_word_seen and self.git_word_start >= 0:
-            git_start, word_start = self.git_word_start, self.word_start
-            prefix = "".join(self.judged[git_start:word_start])
-            unknown = commit_command(prefix + " commit", self.short_pattern, True)
-            unknown |= commit_command(
-                prefix + word + " commit", self.short_pattern, True
-            )
-        if unknown:
+        if self.brace_marks_git_unknown(word):
             self.git_command, self.arguments_uncertain = "unknown", True
 
     def command_prefix(self, word):
@@ -1034,6 +1050,8 @@ class CommandSpans:
         self.command_word_seen = False
         self.command_unknown = self.prefix_value = False
         self.prefix_mode = ""
+        self.command_word_start = -1
+        self.brace_consumer_host = False
         self.git_word_start = -1
         self.git_command = ""
 
