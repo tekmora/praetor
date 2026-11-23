@@ -587,16 +587,29 @@ markers is migrated without `--force`, keeping its checkpoint jobs.
 the line against a stub reuse, and `TestReuseLintCommand_Negative_UnlabelledFileFailsTheJob`
 against the installed one.
 
-The pre-push `gate` job runs `gate run --path=. --admit-unsupported` (`prePushGateArgs`). A root
-with neither `go.mod` nor `Cargo.lock`, such as a Meson, CMake, npm or Python repository, gets no
-receipt, because the gate runs no toolchain for it: the job runs every other stage, names the
-languages it could not verify and admits the push instead of refusing every one. Where such a root's
-makefile declares `verify-all`, the job runs it first, and a failing `verify-all` refuses the push
+The pre-push `gate` job runs the full gate inside `praetorctl admit --class push --local`
+(`prePushGateArgs` in `internal/adopt/hooks.go`): one host push slot is taken first, then load
+admission uses host-capped memory and swap thresholds (`HostCappedPolicy` in
+`internal/admission/admission.go`, applied for `--class push` in `cmd/standardsctl/admit.go`)
+unless the line passes explicit `--min-available-gib`, `--min-swap-free-gib` or `--max-load`
+flags. After `--`, admit executes the same engine launcher the other hook jobs use
+(`sh .config/lefthook/engine.sh`, `engineLauncherFile`) with `gate run --path=.
+--admit-unsupported`, matching the hosted pre-push gate in `.config/lefthook/scripts/checks.py`
+(`run_full_gate`). `gate verify` runs only after the push slot is released, under its own
+deadline. A root with neither `go.mod` nor `Cargo.lock`, such as a Meson, CMake, npm or Python
+repository, gets no receipt, because the gate runs no toolchain for it: the job runs every other
+stage, names the languages it could not verify and admits the push instead of refusing every one.
+Where such a root's makefile declares `verify-all`, the job runs it first, and a failing
+`verify-all` refuses the push
 ([A declared `verify-all` runs where no toolchain stage applies](adoption-verification.md#a-declared-verify-all-runs-where-no-toolchain-stage-applies)).
 A root with either marker still fails the job when its toolchain stages did not run
 ([The pre-push hook admits languages the gate has no runner for](adoption-verification.md#the-pre-push-hook-admits-languages-the-gate-has-no-runner-for)).
-`TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages` in
-`internal/adopt/lefthook_gate_admit_test.go` runs the job line against a stub.
+`TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages` and
+`TestLefthookGate_Positive_PrePushGateRunsGateThroughAdmit` in
+`internal/adopt/lefthook_gate_admit_test.go` run the job line against stubs;
+`TestApplyPushHostPolicy_Positive_NoSwapHostCapped` and
+`TestRunAdmit_PushClass_Boundary_NoSwapHostAdmits_3D` in `cmd/standardsctl/admit_push_policy_test.go`
+cover the push-class policy.
 
 The `rust-systems` and `rust-library` flavors describe this setting as pre-commit clippy and
 rustfmt enforcement, and `flavor audit` holds it to that: `lefthook.yml` satisfies it only when its `pre-commit` run

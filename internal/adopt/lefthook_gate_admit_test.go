@@ -2,6 +2,7 @@ package adopt
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func strictGateFixtureNames(fixture string) []string {
 // flag's own constant, and its header says a root with neither go.mod nor Cargo.lock is admitted
 // without a receipt. Run against a recording stub, the line calls exactly those arguments.
 func TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages(t *testing.T) {
-	want := "admit --class push --local --label push-gate -- gate run --path=. --" + gating.AdmitUnsupportedFlag
+	want := prePushGateArgs
 	for _, languages := range lefthookLanguageSets {
 		for _, checkpoint := range []bool{false, true} {
 			rendered := buildLefthookYAMLFor(lefthookShape{languages: languages}, checkpoint)
@@ -63,6 +64,34 @@ func TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages(t *testing.
 	if got := mustRead(t, log); got != util.PraetorCLI+" "+want+"\n" {
 		t.Fatalf("calls = %q", got)
 	}
+}
+
+// Positive: admit runs the engine launcher and gate subcommand after --; a line that omits the launcher
+// tries to execute a program named gate and fails on a PATH with no gate binary.
+func TestLefthookGate_Positive_PrePushGateRunsGateThroughAdmit(t *testing.T) {
+	stubs, work := t.TempDir(), t.TempDir()
+	log := filepath.Join(work, "calls.log")
+	admitPassthroughStub(t, stubs, util.PraetorCLI, log, 0)
+	if out, code := runHookLine(t, "sh", lefthookGovernedCommand(prePushGateArgs), stubs, work); code != 0 {
+		t.Fatalf("gate hook line exited %d: %s", code, out)
+	}
+	got := mustRead(t, log)
+	if !strings.Contains(got, "admit --class push --local --label push-gate -- sh "+engineLauncherFile+" gate run") {
+		t.Fatalf("admit inner command missing engine gate: %q", got)
+	}
+	if !strings.Contains(got, util.PraetorCLI+" gate run --path=. --"+gating.AdmitUnsupportedFlag) {
+		t.Fatalf("inner gate subcommand not executed: %q", got)
+	}
+}
+
+// admitPassthroughStub is a praetorctl stub that logs every call, runs argv after admit's --, and exits code.
+func admitPassthroughStub(t *testing.T, dir, name, log string, code int) {
+	t.Helper()
+	body := "#!/bin/sh\nset -eu\necho \"" + name + " $*\" >> '" + log + "'\n" +
+		"case \"$1\" in\nadmit)\n  shift\n" +
+		"  while [ $# -gt 0 ]; do [ \"$1\" = \"--\" ] && shift && break; shift; done\n" +
+		"  exec \"$@\"\n  ;;\nesac\nexit " + strconv.Itoa(code) + "\n"
+	writeStub(t, dir, name, body)
 }
 
 // Negative: a rendering whose pre-push gate refused every unsupported root is no current rendering

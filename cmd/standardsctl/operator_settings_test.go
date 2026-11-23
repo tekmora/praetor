@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cordanaLLM/praetor/internal/admission"
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/dedupe"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
@@ -50,7 +51,14 @@ func TestMain(m *testing.M) {
 	}
 	testConfigRoot = root
 
+	pushCleanup, err := admission.IsolatePushSlotForTestProcess()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "isolate push slot: %v\n", err)
+		os.Exit(2)
+	}
+
 	code := m.Run()
+	pushCleanup()
 	cleanup()
 	if err := testsupport.CleanupPinnedGosec(); err != nil {
 		fmt.Fprintf(os.Stderr, "cleanup pinned gosec: %v\n", err)

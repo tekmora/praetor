@@ -48,9 +48,8 @@ func TestRunAdmit_PushClass_TwoConcurrentSerial(t *testing.T) {
 	}
 	needShell(t)
 	admitStubTools(t)
-	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	marker := filepath.Join(dir, "timeline")
+	slotBase := admission.PushSlotTestBase(t)
+	marker := filepath.Join(slotBase, "timeline")
 	runConcurrentPushClassAdmits(t, marker)
 	byTag := parsePushClassTimeline(t, marker)
 	assertPushClassSpansNonOverlapping(t, byTag)
@@ -150,21 +149,8 @@ func TestRunAdmit_PushClass_WaiterDeadline(t *testing.T) {
 	}
 	needShell(t)
 	admitStubTools(t)
-	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	holding := make(chan struct{})
-	go func() {
-		release, err := admission.WaitPushSlot(context.Background(), time.Hour, 20*time.Millisecond, io.Discard)
-		if err != nil {
-			t.Errorf("holder: %v", err)
-			return
-		}
-		close(holding)
-		time.Sleep(time.Hour)
-		if err := release(); err != nil {
-			t.Errorf("holder release: %v", err)
-		}
-	}()
+	admission.PushSlotTestBase(t)
+	holding, waitHolder := startPushSlotHolderForTest(t)
 	select {
 	case <-holding:
 	case <-time.After(2 * time.Second):
@@ -174,6 +160,59 @@ func TestRunAdmit_PushClass_WaiterDeadline(t *testing.T) {
 		"--max-load", "0", "--wait", "500ms", "--poll", "50ms", "--", "sh", "-c", "exit 0"})
 	if err == nil || !errors.Is(err, admission.ErrPushSlotHeld) {
 		t.Fatalf("waiter: %v", err)
+	}
+	waitHolder()
+}
+
+// startPushSlotHolderForTest runs a push-slot holder until t ends or the returned wait function runs.
+func startPushSlotHolderForTest(t *testing.T) (<-chan struct{}, func()) {
+	t.Helper()
+	holderCtx, holderStop := context.WithCancel(context.Background())
+	holding := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		release, err := admission.WaitPushSlot(holderCtx, time.Hour, 20*time.Millisecond, io.Discard)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("holder: %v", err)
+			}
+			return
+		}
+		close(holding)
+		<-holderCtx.Done()
+		if err := release(); err != nil {
+			t.Errorf("holder release: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		holderStop()
+		<-holderDone
+	})
+	return holding, func() {
+		holderStop()
+		<-holderDone
+	}
+}
+
+// TestRunAdmit_PushClass_Boundary_ImmediateAcquireAfterHolder proves the slot is free once a test holder is torn down.
+func TestRunAdmit_PushClass_Boundary_ImmediateAcquireAfterHolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("push slot leases require Unix advisory file locks")
+	}
+	needShell(t)
+	admitStubTools(t)
+	admission.PushSlotTestBase(t)
+	holding, waitHolder := startPushSlotHolderForTest(t)
+	select {
+	case <-holding:
+	case <-time.After(2 * time.Second):
+		t.Fatal("holder blocked")
+	}
+	waitHolder()
+	if err := runAdmit([]string{"--class", "push", "--local", "--min-available-gib", "0", "--min-swap-free-gib", "0",
+		"--max-load", "0", "--wait", "10s", "--poll", "50ms", "--", "sh", "-c", "exit 0"}); err != nil {
+		t.Fatalf("immediate acquire after holder cleanup: %v", err)
 	}
 }
 

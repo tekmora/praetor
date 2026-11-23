@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/admission"
+	"github.com/cordanaLLM/praetor/internal/sentinel"
 )
 
 // admitUsage is the usage line `admit` prints on a malformed call.
@@ -24,21 +25,26 @@ const admitClassPush = "push"
 const admitExecutorEnv = "PRAETOR_ADMIT_EXECUTOR"
 const admitExecutorsEnv = "PRAETOR_ADMIT_EXECUTORS"
 
+// admitHostStatsReader samples the local host for push-class policy capping; tests replace it with a stub.
+var admitHostStatsReader = admission.HostReader(".")
+
 // maxAdmitGiB bounds the memory thresholds a call may ask for, far above any workstation.
 const maxAdmitGiB = 1 << 20
 
 // admitOptions are the flags of one `admit` call.
 type admitOptions struct {
-	label        string
-	admitClass   string
-	policy       admission.Policy
-	limits       admission.Limits
-	wait, poll   time.Duration
-	timeout      time.Duration
-	argv         []string
-	local        bool
-	defaultLoad  bool
-	fallbackMode string
+	label            string
+	admitClass       string
+	policy           admission.Policy
+	limits           admission.Limits
+	wait, poll       time.Duration
+	timeout          time.Duration
+	argv             []string
+	local            bool
+	defaultLoad      bool
+	explicitMinAvail bool
+	explicitMinSwap  bool
+	fallbackMode     string
 }
 
 // runAdmit is `praetorctl admit`: it holds a heavy step until the host has the memory, swap and
@@ -50,6 +56,7 @@ func runAdmit(args []string) (resultErr error) {
 	if err != nil {
 		return err
 	}
+	opts.policy = resolveAdmitPolicy(opts)
 	releasePush, err := acquirePushSlotIfNeeded(opts)
 	if err != nil {
 		return err
@@ -214,23 +221,70 @@ func parseAdmit(args []string) (admitOptions, error) {
 	if err != nil {
 		return admitOptions{}, err
 	}
-	if *fallback != "" && *fallback != "local" {
-		return admitOptions{}, fmt.Errorf("--fallback %q is invalid, use local", *fallback)
-	}
-	if *admitClass != "" && *admitClass != admitClassPush {
-		return admitOptions{}, fmt.Errorf("--class %q is invalid, use push", *admitClass)
+	if err := validateAdmitClassAndFallback(*admitClass, *fallback); err != nil {
+		return admitOptions{}, err
 	}
 	opts := admitOptions{label: *label, admitClass: *admitClass, policy: policy, limits: admission.Limits{MemoryHigh: *high, MemoryMax: *limit, MemorySwapMax: *swapMax},
 		wait: *wait, poll: *poll, timeout: *timeout, argv: argv, local: *local, defaultLoad: true, fallbackMode: *fallback}
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "max-load" {
-			opts.defaultLoad = false
-		}
-	})
+	applyAdmitExplicitFlags(fs, &opts)
 	if opts.label == "" {
 		opts.label = argv[0]
 	}
 	return opts, opts.validate()
+}
+
+// resolveAdmitPolicy applies host-capped thresholds for push-class admission unless the caller set them.
+func resolveAdmitPolicy(opts admitOptions) admission.Policy {
+	if opts.admitClass != admitClassPush {
+		return opts.policy
+	}
+	stats, err := admitHostStatsReader()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%s push-class host-capped thresholds not applied: %v\n",
+			time.Now().Format("15:04:05"), err)
+		return opts.policy
+	}
+	return applyPushHostPolicy(opts.policy, stats, opts.explicitMinAvail, opts.explicitMinSwap, opts.defaultLoad)
+}
+
+// applyPushHostPolicy caps push-class load thresholds to the host, keeping fields the caller set explicitly.
+func applyPushHostPolicy(base admission.Policy, stats sentinel.HostStats, explicitMinAvail, explicitMinSwap, defaultLoad bool) admission.Policy {
+	capped := admission.HostCappedPolicy(stats)
+	if !explicitMinAvail {
+		base.MinAvailableBytes = capped.MinAvailableBytes
+	}
+	if !explicitMinSwap {
+		base.MinSwapFreeBytes = capped.MinSwapFreeBytes
+	}
+	if defaultLoad {
+		base.MaxLoad1 = capped.MaxLoad1
+	}
+	return base
+}
+
+// validateAdmitClassAndFallback refuses unknown --class and --fallback values before options are built.
+func validateAdmitClassAndFallback(admitClass, fallback string) error {
+	if fallback != "" && fallback != "local" {
+		return fmt.Errorf("--fallback %q is invalid, use local", fallback)
+	}
+	if admitClass != "" && admitClass != admitClassPush {
+		return fmt.Errorf("--class %q is invalid, use push", admitClass)
+	}
+	return nil
+}
+
+// applyAdmitExplicitFlags marks push-class host-cap fields the caller set on the flag set.
+func applyAdmitExplicitFlags(fs *flag.FlagSet, opts *admitOptions) {
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "max-load":
+			opts.defaultLoad = false
+		case "min-available-gib":
+			opts.explicitMinAvail = true
+		case "min-swap-free-gib":
+			opts.explicitMinSwap = true
+		}
+	})
 }
 
 // admitPolicy constructs an admission policy from GiB thresholds and load average, refusing values exceeding maxAdmitGiB or negative loads.
