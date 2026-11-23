@@ -498,6 +498,21 @@ var makefileGNUContinuationCases = []struct {
 		wantErr: "Makefile:2 sets 45m",
 	},
 	{
+		name:    "recipe make-variable ref before continuation backslash",
+		body:    "NOTE := a\n" + "test:\n\techo $(NOTE)\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:3 sets 45m",
+	},
+	{
+		name:    "recipe dollar-paren command sub before continuation backslash",
+		body:    "test:\n\techo $$(cmd)\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:     "recipe subshell open-paren before continuation backslash",
+		body:     "test:\n\t(echo a)\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
 		name:    "recipe escaped space before continuation backslash",
 		body:    "test:\n\techo a\\ \\\n\t#b; go test -timeout 45m ./pkg/\n",
 		wantErr: "Makefile:2 sets 45m",

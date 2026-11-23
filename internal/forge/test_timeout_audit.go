@@ -157,6 +157,32 @@ func lineContinuesAtEOL(line string) bool {
 	return trailingBackslashCount(line)%2 == 1
 }
 
+// openParenStartsSubstitution reports whether `(` at openIdx begins a make `$(` reference or a shell
+// `$(` / `$((` substitution after make turns recipe `$$` into `$`; a plain subshell `(` has no `$` prefix.
+func openParenStartsSubstitution(line string, openIdx int) bool {
+	return openIdx >= 1 && line[openIdx-1] == '$'
+}
+
+// closingParenBeforeBackslashIsSubst reports whether `)` at closeIdx closes a make or shell substitution
+// group on the same line: `$(`, `$$(`, or `$$((`. A `)` that closes a plain subshell `(` is false; an
+// orphan `)` with no matching `(` on the line stays a word-break operator (HISS-02: scan at most
+// len(line) steps backward from closeIdx-1).
+func closingParenBeforeBackslashIsSubst(line string, closeIdx int) bool {
+	depth := 0
+	for i := closeIdx - 1; i >= 0; i-- {
+		switch line[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth == 0 {
+				return openParenStartsSubstitution(line, i)
+			}
+			depth--
+		}
+	}
+	return false
+}
+
 // continuationBackslashJoinsWord reports whether an EOL continuation backslash leaves the shell inside
 // a word so the next physical line can continue that token: the byte before the backslash is neither
 // blank nor a shell operator that ends the preceding word, unless that byte is itself escaped
@@ -169,7 +195,11 @@ func continuationBackslashJoinsWord(line string) bool {
 	if spliceAt == 0 {
 		return false
 	}
-	if !isShellWordBreak(line[spliceAt-1]) {
+	before := line[spliceAt-1]
+	if !isShellWordBreak(before) {
+		return true
+	}
+	if before == ')' && closingParenBeforeBackslashIsSubst(line, spliceAt-1) {
 		return true
 	}
 	return trailingBackslashCount(line[:spliceAt-1])%2 == 1
