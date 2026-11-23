@@ -384,50 +384,66 @@ func TestAuditTestTimeouts_Mutant_ContinuedCommentJoined(t *testing.T) {
 	}
 }
 
+// makefileCommentSemanticsCases covers top-level GNU make comment continuation, recipe comments
+// with open shell quotes, and shell-comment EOL flush (PR 2034 CR11).
+var makefileCommentSemanticsCases = []struct {
+	name     string
+	body     string
+	wantErr  string
+	wantPass bool
+}{
+	{
+		name: "top-level continued comment hides go test",
+		body: "# Disabled command: \\\n" +
+			"go test -timeout 45m ./pkg/\n" +
+			"test:\n\t@true\n",
+		wantPass: true,
+	},
+	{
+		name: "top-level comment two backslash lines then go test",
+		body: "# note \\\n# also \\\n# end\n" +
+			"go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:4 sets 45m",
+	},
+	{
+		name: "top-level comment without continuation then go test",
+		body: "# disabled\n" +
+			"go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "quoted hash in continued recipe",
+		body:    "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "single-quoted hash continuation",
+		body:    "test:\n\tNOTE='a \\\n\t# b' go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:    "quote closed before hash comment line",
+		body:    "test:\n\tNOTE=\"a\" \\\n\t# note\n\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:4 sets 45m",
+	},
+	{
+		name: "double-quoted hash line then shell comment ends command",
+		body: "test:\n\tNOTE=\"a \\\n\t# b\" go test #c\\\n" +
+			"\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:4 sets 45m",
+	},
+	{
+		name: "single-quoted hash line then shell comment ends command",
+		body: "test:\n\techo 'x \\\n\t#y' #c\\\n" +
+			"\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:4 sets 45m",
+	},
+}
+
 // TestAuditTestTimeouts_MakefileCommentSemantics covers top-level GNU make comment continuation,
 // recipe comments with open shell quotes, and scanner mutants.
 func TestAuditTestTimeouts_MakefileCommentSemantics(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		body     string
-		wantErr  string
-		wantPass bool
-	}{
-		{
-			name: "top-level continued comment hides go test",
-			body: "# Disabled command: \\\n" +
-				"go test -timeout 45m ./pkg/\n" +
-				"test:\n\t@true\n",
-			wantPass: true,
-		},
-		{
-			name: "top-level comment two backslash lines then go test",
-			body: "# note \\\n# also \\\n# end\n" +
-				"go test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:4 sets 45m",
-		},
-		{
-			name: "top-level comment without continuation then go test",
-			body: "# disabled\n" +
-				"go test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:2 sets 45m",
-		},
-		{
-			name:    "quoted hash in continued recipe",
-			body:    "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n",
-			wantErr: "Makefile:2 sets 45m",
-		},
-		{
-			name:    "single-quoted hash continuation",
-			body:    "test:\n\tNOTE='a \\\n\t# b' go test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:2 sets 45m",
-		},
-		{
-			name:    "quote closed before hash comment line",
-			body:    "test:\n\tNOTE=\"a\" \\\n\t# note\n\tgo test -timeout 45m ./pkg/\n",
-			wantErr: "Makefile:4 sets 45m",
-		},
-	} {
+	for _, tc := range makefileCommentSemanticsCases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(tc.body), 0o600); err != nil {
@@ -444,6 +460,25 @@ func TestAuditTestTimeouts_MakefileCommentSemantics(t *testing.T) {
 				t.Fatalf("err = %v; want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// Mutant: without recipeEOLCommentEndsCommand, a recipe line whose shell comment runs to the
+// continuation backslash still splices the next physical line, pinning -timeout to the comment line.
+func TestAuditTestTimeouts_Mutant_RecipeEOLCommentContinuationJoined(t *testing.T) {
+	body := "test:\n\techo a #c\\\n\tgo test -timeout 45m ./pkg/\n"
+	got, err := scanMakefileTimeouts(body, makefileScanOptions{
+		splitAtComments:             true,
+		topLevelCommentContinue:     true,
+		trackShellQuotes:            true,
+		recipeEOLCommentEndsCommand: false,
+	})
+	if err != nil || len(got) != 1 || !strings.Contains(got[0], "Makefile:2 sets 45m") {
+		t.Fatalf("mutant recipeEOLCommentEndsCommand off: got %v, %v; want Makefile:2 45m", got, err)
+	}
+	kept, err := makefileTimeouts(body)
+	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:3 sets 45m") {
+		t.Fatalf("with recipe EOL comment flush: got %v, %v; want Makefile:3 45m", kept, err)
 	}
 }
 
@@ -596,6 +631,21 @@ var makefileGNUContinuationCases = []struct {
 		body:    "test:\n\techo a\\\\\n\tgo test -timeout 45m ./pkg/\n",
 		wantErr: "Makefile:3 sets 45m",
 	},
+	{
+		name:    "recipe shell comment on same line before continuation backslash",
+		body:    "test:\n\techo a #c\\\n\tgo test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:3 sets 45m",
+	},
+	{
+		name:    "recipe go test with trailing shell comment before continuation backslash",
+		body:    "test:\n\tgo test -timeout 45m ./a/ #c\\\n\tgo test -timeout 30m ./b/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:     "recipe shell comment on same line hides following within-bound go test",
+		body:     "test:\n\techo a #c\\\n\tgo test -timeout 30m ./pkg/\n",
+		wantPass: true,
+	},
 }
 
 func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
@@ -648,55 +698,84 @@ func TestHashStartsShellComment(t *testing.T) {
 	}
 }
 
+var shellCommentRunsToEOLBeforeContinuationCases = []struct {
+	name          string
+	line          string
+	startsInWord  bool
+	quoteInSingle bool
+	quoteInDouble bool
+	want          bool
+}{
+	{
+		name:         "payload hash continues word",
+		line:         "\t#x\\",
+		startsInWord: true,
+		want:         false,
+	},
+	{
+		name:         "payload hash at command start",
+		line:         "\t#x\\",
+		startsInWord: false,
+		want:         true,
+	},
+	{
+		name:         "comment after word break before continuation",
+		line:         "\techo a #c\\",
+		startsInWord: true,
+		want:         true,
+	},
+	{
+		name:         "word continues without comment hash",
+		line:         "\techo a\\",
+		startsInWord: false,
+		want:         false,
+	},
+	{
+		name:         "empty line boundary",
+		line:         "",
+		startsInWord: false,
+		want:         false,
+	},
+	{
+		name:         "no continuation backslash",
+		line:         "\techo a",
+		startsInWord: false,
+		want:         false,
+	},
+	{
+		name:          "hash inside carried double quote not comment",
+		line:          "\t# b\" go test \\",
+		startsInWord:  false,
+		quoteInDouble: true,
+		want:          false,
+	},
+	{
+		name:          "comment after quote closes before continuation backslash",
+		line:          "\t# b\" go test #c\\",
+		startsInWord:  false,
+		quoteInDouble: true,
+		want:          true,
+	},
+	{
+		name:          "comment after quote closes on same line",
+		line:          "\t#y' #c\\",
+		startsInWord:  true,
+		quoteInSingle: true,
+		want:          true,
+	},
+}
+
 func TestShellCommentRunsToEOLBeforeContinuation(t *testing.T) {
-	tests := []struct {
-		name         string
-		line         string
-		startsInWord bool
-		want         bool
-	}{
-		{
-			name:         "payload hash continues word",
-			line:         "\t#x\\",
-			startsInWord: true,
-			want:         false,
-		},
-		{
-			name:         "payload hash at command start",
-			line:         "\t#x\\",
-			startsInWord: false,
-			want:         true,
-		},
-		{
-			name:         "comment after word break before continuation",
-			line:         "\techo a #c\\",
-			startsInWord: true,
-			want:         true,
-		},
-		{
-			name:         "word continues without comment hash",
-			line:         "\techo a\\",
-			startsInWord: false,
-			want:         false,
-		},
-		{
-			name:         "empty line boundary",
-			line:         "",
-			startsInWord: false,
-			want:         false,
-		},
-		{
-			name:         "no continuation backslash",
-			line:         "\techo a",
-			startsInWord: false,
-			want:         false,
-		},
-	}
-	for _, tc := range tests {
+	for _, tc := range shellCommentRunsToEOLBeforeContinuationCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shellCommentRunsToEOLBeforeContinuation(tc.line, tc.startsInWord)
+			got := shellCommentRunsToEOLBeforeContinuation(
+				tc.line, tc.startsInWord, tc.quoteInSingle, tc.quoteInDouble,
+			)
 			if got != tc.want {
-				t.Fatalf("shellCommentRunsToEOLBeforeContinuation(%q, %v) = %v; want %v", tc.line, tc.startsInWord, got, tc.want)
+				t.Fatalf(
+					"shellCommentRunsToEOLBeforeContinuation(%q, %v, %v, %v) = %v; want %v",
+					tc.line, tc.startsInWord, tc.quoteInSingle, tc.quoteInDouble, got, tc.want,
+				)
 			}
 		})
 	}

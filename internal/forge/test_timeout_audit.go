@@ -119,9 +119,10 @@ func physicalLines(text string) int {
 // makefileScanOptions tunes makefileScanner; only scanMakefileTimeouts supplies non-defaults
 // for the mutant tests.
 type makefileScanOptions struct {
-	splitAtComments         bool
-	topLevelCommentContinue bool
-	trackShellQuotes        bool
+	splitAtComments             bool
+	topLevelCommentContinue     bool
+	trackShellQuotes            bool
+	recipeEOLCommentEndsCommand bool
 }
 
 // makefileScanner accumulates continued physical Makefile lines into logical commands. Recipe
@@ -195,9 +196,14 @@ func hashStartsShellComment(line string, i, start int, startsInWord, prevEscaped
 
 // shellCommentRunsToEOLBeforeContinuation reports whether an unquoted shell # begins a comment
 // at recipe payload start (only when startsInWord is false) or after a word break and runs through
-// the EOL continuation backslash.
+// the EOL continuation backslash. quoteInSingle and quoteInDouble are the shell quote state at the
+// start of the physical line (carried from the logical command so far).
 // Each step advances at least one byte, so the loop reads at most spliceAt - start bytes (HISS-02).
-func shellCommentRunsToEOLBeforeContinuation(line string, startsInWord bool) bool {
+func shellCommentRunsToEOLBeforeContinuation(
+	line string,
+	startsInWord bool,
+	quoteInSingle, quoteInDouble bool,
+) bool {
 	if !lineContinuesAtEOL(line) {
 		return false
 	}
@@ -206,7 +212,7 @@ func shellCommentRunsToEOLBeforeContinuation(line string, startsInWord bool) boo
 	if len(line) > 0 && line[0] == '\t' {
 		start = 1
 	}
-	inSingle, inDouble := false, false
+	inSingle, inDouble := quoteInSingle, quoteInDouble
 	prevEscaped := false
 	for i := start; i < spliceAt; {
 		if !inSingle && !inDouble && line[i] == '#' {
@@ -225,12 +231,10 @@ func shellCommentRunsToEOLBeforeContinuation(line string, startsInWord bool) boo
 // continuationBackslashJoinsWord reports whether an EOL continuation backslash leaves the shell inside
 // a word so the next physical line can continue that token: the byte before the backslash is neither
 // blank nor a shell operator that ends the preceding word, unless that byte is itself escaped
-// (echo a\;\ keeps `a;` as literal word text). A shell comment that runs to the backslash does not splice.
-func continuationBackslashJoinsWord(line string, startsInWord bool) bool {
+// (echo a\;\ keeps `a;` as literal word text). A recipe line whose shell comment runs to the backslash
+// never reaches this check: handleContinuationPhysicalLine ends its logical command first.
+func continuationBackslashJoinsWord(line string) bool {
 	if !lineContinuesAtEOL(line) {
-		return false
-	}
-	if shellCommentRunsToEOLBeforeContinuation(line, startsInWord) {
 		return false
 	}
 	spliceAt := len(line) - 1
@@ -311,15 +315,29 @@ func advanceShellQuoteState(text string, i int, inSingle, inDouble *bool) int {
 	return i + 1
 }
 
-// hasOpenShellQuote reports whether text ends inside an unclosed single- or double-quoted span,
-// using sh quoting rules. Each step advances at least one byte, so the loop reads at most
-// len(text) bytes (HISS-02): the logical command is already bounded by the snapshot reader.
-func hasOpenShellQuote(text string) bool {
-	inSingle, inDouble := false, false
+// shellQuoteStateAtEnd returns the shell single- and double-quote state after scanning text.
+// Each step advances at least one byte, so the loop reads at most len(text) bytes (HISS-02).
+func shellQuoteStateAtEnd(text string) (inSingle, inDouble bool) {
 	for i := 0; i < len(text); {
 		i = advanceShellQuoteState(text, i, &inSingle, &inDouble)
 	}
+	return inSingle, inDouble
+}
+
+// hasOpenShellQuote reports whether text ends inside an unclosed single- or double-quoted span,
+// using sh quoting rules.
+func hasOpenShellQuote(text string) bool {
+	inSingle, inDouble := shellQuoteStateAtEnd(text)
 	return inSingle || inDouble
+}
+
+// quoteStateAtLineStart is the shell quote state at the start of the next physical line in the
+// open logical command; when trackShellQuotes is off, every line starts unquoted.
+func (s *makefileScanner) quoteStateAtLineStart() (inSingle, inDouble bool) {
+	if !s.opts.trackShellQuotes {
+		return false, false
+	}
+	return shellQuoteStateAtEnd(s.logical.String())
 }
 
 // recipeCommentEndsCommand reports whether line is a recipe full-line comment that ends the
@@ -345,16 +363,41 @@ func trimContinuationSuffix(line string) string {
 	return line[:len(line)-1]
 }
 
+// recipeShellCommentEndsAtEOL reports whether line ends a recipe logical command because an
+// unquoted shell comment runs through its EOL continuation backslash.
+func (s *makefileScanner) recipeShellCommentEndsAtEOL(
+	line string,
+	lineStart bool,
+	quoteInSingle, quoteInDouble bool,
+) bool {
+	if !s.opts.recipeEOLCommentEndsCommand || !s.recipeCommand {
+		return false
+	}
+	return shellCommentRunsToEOLBeforeContinuation(line, lineStart, quoteInSingle, quoteInDouble)
+}
+
+// handleContinuationPhysicalLine splices line onto the open logical command when it ends with an
+// odd backslash count. Quote state is read before append; the flushed command always includes the
+// line whose shell comment ended it.
+func (s *makefileScanner) handleContinuationPhysicalLine(line string, lineStart bool) bool {
+	quoteInSingle, quoteInDouble := s.quoteStateAtLineStart()
+	s.logical.WriteString(trimContinuationSuffix(line))
+	s.logical.WriteByte(' ')
+	if s.recipeShellCommentEndsAtEOL(line, lineStart, quoteInSingle, quoteInDouble) {
+		s.flush()
+		return true
+	}
+	s.startsInWord = continuationBackslashJoinsWord(line)
+	return false
+}
+
 // appendPhysicalLine adds one physical line to the open logical command.
 func (s *makefileScanner) appendPhysicalLine(line string) {
 	if !s.continued {
 		return
 	}
-	lineStart := s.startsInWord
 	if lineContinuesAtEOL(line) {
-		s.logical.WriteString(trimContinuationSuffix(line))
-		s.logical.WriteByte(' ')
-		s.startsInWord = continuationBackslashJoinsWord(line, lineStart)
+		s.handleContinuationPhysicalLine(line, s.startsInWord)
 		return
 	}
 	s.logical.WriteString(line)
@@ -366,12 +409,11 @@ func (s *makefileScanner) startPhysicalLine(n int, line string) {
 	s.start = n
 	s.recipeCommand = isRecipeLine(line)
 	s.startsInWord = false
-	lineStart := false
 	if lineContinuesAtEOL(line) {
-		s.logical.WriteString(trimContinuationSuffix(line))
-		s.logical.WriteByte(' ')
+		if s.handleContinuationPhysicalLine(line, false) {
+			return
+		}
 		s.continued = true
-		s.startsInWord = continuationBackslashJoinsWord(line, lineStart)
 		return
 	}
 	s.logical.WriteString(line)
@@ -427,14 +469,16 @@ func unfinishedContinuation(lines []string, n int) bool {
 // makefileScanner for recipe versus top-level comment rules and the open-quote exception.
 func makefileTimeouts(text string) ([]string, error) {
 	return scanMakefileTimeouts(text, makefileScanOptions{
-		splitAtComments:         true,
-		topLevelCommentContinue: true,
-		trackShellQuotes:        true,
+		splitAtComments:             true,
+		topLevelCommentContinue:     true,
+		trackShellQuotes:            true,
+		recipeEOLCommentEndsCommand: true,
 	})
 }
 
 // scanMakefileTimeouts implements makefileTimeouts; non-default option fields exist only for
-// mutant tests (splitAtComments, topLevelCommentContinue, trackShellQuotes).
+// mutant tests (splitAtComments, topLevelCommentContinue, trackShellQuotes,
+// recipeEOLCommentEndsCommand).
 func scanMakefileTimeouts(text string, opts makefileScanOptions) ([]string, error) {
 	lines := strings.Split(text, "\n")
 	scanner := makefileScanner{opts: opts}
