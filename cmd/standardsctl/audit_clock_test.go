@@ -11,9 +11,15 @@ import (
 	"github.com/cordanaLLM/praetor/internal/forge"
 )
 
-// auditTodayBeforeJobTimeoutFail is the last day the job-timeout gate warns instead of failing.
+// auditTodayBeforeJobTimeoutFail is the wall clock, held at the last day the job-timeout gate warns
+// instead of failing once that day has passed. Other dated audit checks (exception expiry) keep
+// reading today until then, so the repository dogfood audit does not judge them on a future day.
 func auditTodayBeforeJobTimeoutFail() time.Time {
-	return forge.JobTimeoutFailFrom.AddDate(0, 0, -1)
+	lastWarnDay := forge.JobTimeoutFailFrom.AddDate(0, 0, -1)
+	if now := time.Now(); now.Before(lastWarnDay) {
+		return now
+	}
+	return lastWarnDay
 }
 
 // pinAuditToday fixes the calendar day audit gates read as Today until the test ends.
