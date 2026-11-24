@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -385,16 +386,20 @@ func skipAttributesAbove(lines []string, idx int) (int, bool) {
 // closesAttributeGroup reports whether a trimmed line ends with a closing bracket or parenthesis
 // that may terminate a multi-line attribute or decorator.
 func closesAttributeGroup(trimmed string) bool {
-	code := stripAttributeLine(trimmed)
-	return countParenDelta(code) < 0 && (strings.HasSuffix(code, "]") || strings.HasSuffix(code, ")"))
+	code, closed := stripAttributeLine(trimmed)
+	return closed && countParenDelta(code) < 0 && (strings.HasSuffix(code, "]") || strings.HasSuffix(code, ")"))
 }
 
 // stepAttributeGroup consumes one balanced attribute or decorator ending at idx within remaining lines.
 func stepAttributeGroup(lines []string, idx, remaining int) (int, int, bool) {
 	trimmed := strings.TrimSpace(lines[idx])
-	delta := countParenDelta(stripAttributeLine(trimmed))
+	code, closed := stripAttributeLine(trimmed)
+	if !closed {
+		return -1, 0, false
+	}
+	delta := countParenDelta(code)
 	if isAttributeOrDecorator(trimmed) {
-		if delta == 0 {
+		if delta == 0 && onlyCompleteAttributes(code) {
 			return idx - 1, 1, true
 		}
 		return -1, 0, false
@@ -402,28 +407,85 @@ func stepAttributeGroup(lines []string, idx, remaining int) (int, int, bool) {
 	if delta >= 0 {
 		return -1, 0, false
 	}
-	return scanAttributeStart(lines, idx, remaining, -delta)
+	return scanAttributeStart(lines, idx, remaining, -delta, code)
 }
 
 // scanAttributeStart walks backwards from idx-1 until bracket depth reaches zero on an attribute header.
-func scanAttributeStart(lines []string, idx, remaining, depth int) (int, int, bool) {
-	for step := 1; step < remaining && idx-step >= 0; step++ {
+func scanAttributeStart(lines []string, idx, remaining, depth int, tail string) (int, int, bool) {
+	parts := make([]string, 1, remaining)
+	parts[0] = tail
+	for step := 1; step < remaining && idx-step >= 0 && depth > 0; step++ {
 		trimmed := strings.TrimSpace(lines[idx-step])
 		if trimmed == "" || isCommentBoundary(trimmed) {
-			return -1, 0, false
+			break
 		}
-		depth -= countParenDelta(stripAttributeLine(trimmed))
-		if depth < 0 {
-			return -1, 0, false
+		code, closed := stripAttributeLine(trimmed)
+		if !closed {
+			break
 		}
+		parts = append(parts, code)
+		depth -= countParenDelta(code)
 		if depth == 0 {
-			if isAttributeOrDecorator(trimmed) {
+			slices.Reverse(parts)
+			if onlyCompleteAttributes(strings.Join(parts, "\n")) {
 				return idx - step - 1, step + 1, true
 			}
-			return -1, 0, false
 		}
 	}
 	return -1, 0, false
+}
+
+// attributePrefix includes an opening delimiter when the annotation has a body.
+var attributePrefix = regexp.MustCompile(`^(?:#\[|\[\[|__attribute__[ \t]*\(|@(?:[\pL_$][\pL\pN_$]*:)?[\pL_$][\pL\pN_$]*(?:\.[\pL_$][\pL\pN_$]*)*[ \t]*\(?)`)
+
+// onlyCompleteAttributes verifies that each top-level token belongs to an annotation.
+func onlyCompleteAttributes(code string) bool {
+	for len(code) > 0 {
+		prefix := attributePrefix.FindString(code)
+		if prefix == "" {
+			return false
+		}
+		end := len(prefix)
+		switch prefix[end-1] {
+		case '[', '(':
+			start := end - 1
+			if prefix == "[[" {
+				start = 0
+			}
+			width := attributeBodyWidth(code[start:])
+			if width == 0 {
+				return false
+			}
+			end = start + width
+		}
+		code = strings.TrimSpace(code[end:])
+	}
+	return true
+}
+
+// attributeBodyWidth returns the width of one matched delimiter group, or zero for malformed input.
+func attributeBodyWidth(code string) int {
+	const opens, closes = "([{", ")]}"
+	var expected []byte
+	for i := 0; i < len(code); i++ {
+		ch := code[i]
+		if at := strings.IndexByte(opens, ch); at >= 0 {
+			expected = append(expected, closes[at])
+			continue
+		}
+		if strings.IndexByte(closes, ch) < 0 {
+			continue
+		}
+		last := len(expected) - 1
+		if last < 0 || expected[last] != ch {
+			return 0
+		}
+		if last == 0 {
+			return i + 1
+		}
+		expected = expected[:last]
+	}
+	return 0
 }
 
 // isCommentBoundary reports whether a trimmed line is a standalone comment that cannot be part of an attribute.
@@ -431,8 +493,8 @@ func isCommentBoundary(trimmed string) bool {
 	return strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasSuffix(trimmed, "*/")
 }
 
-// stripAttributeLine removes quoted string contents and any trailing // comment from one line.
-func stripAttributeLine(line string) string {
+// stripAttributeLine removes literal contents and trailing // comments, and reports whether its quotes close.
+func stripAttributeLine(line string) (string, bool) {
 	var b strings.Builder
 	var inQuote byte
 	for i := 0; i < len(line); i++ {
@@ -446,16 +508,15 @@ func stripAttributeLine(line string) string {
 			}
 			continue
 		}
-		if ch == '"' {
-			inQuote = ch
-			continue
-		}
 		if strings.HasPrefix(line[i:], "//") {
 			break
 		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inQuote = ch
+		}
 		b.WriteByte(ch)
 	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(b.String()), inQuote == 0
 }
 
 // isAttributeOrDecorator reports whether a trimmed line is an attribute or decorator annotation.

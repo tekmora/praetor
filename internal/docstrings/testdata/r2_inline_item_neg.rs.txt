@@ -1,0 +1,5 @@
+/// Returns one.
+#[inline] fn a() -> u8 { 1 }
+pub fn b(
+    x: u8,
+) -> u8 { x }

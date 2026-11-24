@@ -1,0 +1,9 @@
+/// Precedes an attribute with mismatched delimiters.
+#[cfg_attr(
+    feature = [)
+)]
+pub fn mismatched() {}
+
+/// Precedes an attribute with an unclosed quote.
+#[inline] "unterminated
+pub fn open_quote() {}

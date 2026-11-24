@@ -1,0 +1,4 @@
+[[nodiscard]] [[maybe_unused]]
+int pair(int x) {
+    return x;
+}

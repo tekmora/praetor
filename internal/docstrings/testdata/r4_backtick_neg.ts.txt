@@ -1,0 +1,6 @@
+class View {
+  @Component(`a)b`)
+  render() {
+    return 1;
+  }
+}

@@ -1,0 +1,6 @@
+class Routes {
+  @first() @second()
+  pair() {
+    return 1;
+  }
+}

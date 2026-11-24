@@ -589,6 +589,30 @@ func TestCheck_WrappedSignaturesAcrossLanguages_3D(t *testing.T) {
 	}
 }
 
+// TestCheck_AttributeRegressions_3D checks annotation runs and pins each uncovered function's header.
+func TestCheck_AttributeRegressions_3D(t *testing.T) {
+	cases := []docstringFixtureCase{
+		{"r1_single_quote_documented", "r1_single_quote_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"r1_single_quote_undocumented", "r1_single_quote_neg.ts.txt", "web/routes.ts", false, 1, 0, "route", 3},
+		{"r2_inline_item_documented", "r2_inline_item_pos.rs.txt", "src/lib.rs", true, 2, 2, "", 0},
+		{"r2_inline_item_undocumented", "r2_inline_item_neg.rs.txt", "src/lib.rs", false, 2, 1, "b", 3},
+		{"r3_rust_pair_documented", "r3_pair_pos.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"r3_rust_pair_undocumented", "r3_pair_neg.rs.txt", "src/lib.rs", false, 1, 0, "pair", 2},
+		{"r3_decorator_pair_documented", "r3_pair_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"r3_decorator_pair_undocumented", "r3_pair_neg.ts.txt", "web/routes.ts", false, 1, 0, "pair", 3},
+		{"r3_cpp_pair_documented", "r3_pair_pos.cpp.txt", "src/pair.cpp", true, 1, 1, "", 0},
+		{"r3_cpp_pair_undocumented", "r3_pair_neg.cpp.txt", "src/pair.cpp", false, 1, 0, "pair", 2},
+		{"r4_backtick_documented", "r4_backtick_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"r4_backtick_undocumented", "r4_backtick_neg.ts.txt", "web/routes.ts", false, 1, 0, "render", 3},
+		{"malformed_attributes", "malformed_attributes.rs.txt", "src/lib.rs", false, 2, 0, "mismatched", 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDocstringFixtureCase(t, tc)
+		})
+	}
+}
+
 // TestCheck_Boundary_MaxAttributeLines_3D verifies the exact 32-line scalar bound on attribute
 // skipping: a 32-line balanced attribute passes, a 33-line attribute fails as undocumented, and
 // quoted brackets or trailing // comments inside attributes do not desynchronise the delimiter walk.

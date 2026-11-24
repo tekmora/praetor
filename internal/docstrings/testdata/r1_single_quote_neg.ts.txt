@@ -1,0 +1,6 @@
+class Routes {
+  @app.route('/a)b')
+  route() {
+    return 1;
+  }
+}

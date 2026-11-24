@@ -1,0 +1,7 @@
+class Routes {
+  // Returns the decorated response.
+  @first() @second()
+  pair() {
+    return 1;
+  }
+}
