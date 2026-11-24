@@ -17,9 +17,11 @@ import (
 )
 
 // reconcileDeclaredLintersExceptions measures which declared linters under the effective policy
-// are not run by any workflow after workflows are rendered, and records or updates exception
-// entries in .standards.yaml (#1289). The same write records the HISS-11 entry a first adoption
-// records, when an existing manifest declares none (withSupplyChainException, #1069).
+// are not run by any workflow after workflows are rendered, and reconciles declared-linters
+// exception entries in .standards.yaml (#1289): scaffolding missing entries, keeping existing
+// live or expired entries as written, and dropping entries whose linters now run. The same write
+// records the HISS-11 entry a first adoption records, when an existing manifest declares none
+// (withSupplyChainException, #1069).
 func (s *adoptSession) reconcileDeclaredLintersExceptions(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("reconcile declared linters exceptions requires a context")
@@ -137,12 +139,17 @@ func (s *adoptSession) applyLiveManifestExceptions(ctx context.Context, full str
 	return nil
 }
 
+// reconcileLintersExceptionsList reconciles existing manifest exceptions against the declared
+// linters still missing from workflows. Existing declared-linters entries for still-missing tools
+// stand as written, live or expired, so re-adoption never renews an expired waiver; entries for
+// tools that now run and repeated entries for one tool are removed, and newly missing tools get
+// a category-D entry anchored at today.
 func reconcileLintersExceptionsList(existing []config.Exception, missing []config.DeclaredLinter, today time.Time) ([]config.Exception, bool) {
 	missingMap := make(map[string]config.DeclaredLinter, len(missing))
 	for i := 0; i < len(missing) && i < config.MaxExceptions; i++ {
 		missingMap[missing[i].Name] = missing[i]
 	}
-	result, kept, changed := filterExistingExceptions(existing, missingMap, today)
+	result, kept, changed := filterExistingExceptions(existing, missingMap)
 	for i := 0; i < len(missing) && i < config.MaxExceptions; i++ {
 		linter := missing[i]
 		if kept[linter.Name] {
@@ -155,7 +162,10 @@ func reconcileLintersExceptionsList(existing []config.Exception, missing []confi
 	return result, changed
 }
 
-func filterExistingExceptions(existing []config.Exception, missingMap map[string]config.DeclaredLinter, today time.Time) ([]config.Exception, map[string]bool, bool) {
+// filterExistingExceptions retains non-declared-linters entries and the first declared-linters
+// entry for each still-missing tool, whether live or expired, dropping entries whose tool is no
+// longer missing and collapsing repeated entries for the same tool.
+func filterExistingExceptions(existing []config.Exception, missingMap map[string]config.DeclaredLinter) ([]config.Exception, map[string]bool, bool) {
 	kept := make(map[string]bool, len(missingMap))
 	result := make([]config.Exception, 0, len(existing)+len(missingMap))
 	var changed bool
@@ -169,7 +179,7 @@ func filterExistingExceptions(existing []config.Exception, missingMap map[string
 			changed = true
 			continue
 		}
-		if entry.Expired(today) || kept[entry.Tool] {
+		if kept[entry.Tool] {
 			changed = true
 			continue
 		}

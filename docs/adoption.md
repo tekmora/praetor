@@ -852,9 +852,11 @@ A re-adoption keeps the manifest it finds, but it records the dated exceptions a
 records, in the same `exceptions` list. When the release workflows fall short of the supply chain
 the policy declares and the manifest holds no `HISS-11` entry, as a manifest an older engine wrote
 does not, the run adds the entry a first adoption adds and warns that it did. An entry the
-manifest already declares, renewed or narrowed by hand, stands. The `declared-linters` entries for
-declared linters no workflow runs are recorded the same way (`syncDeclaredLintersExceptions` and
-`withSupplyChainException` in `internal/adopt`, `TestAdopt_Readoption_RecordsTheSupplyChainGap`).
+manifest already declares, renewed or narrowed by hand, or expired, stands without renewal; a
+`declared-linters` entry is recorded the same way while its linter is missing and removed once a
+workflow runs the linter (`syncDeclaredLintersExceptions` and `withSupplyChainException` in
+`internal/adopt`, `TestAdopt_Readoption_RecordsTheSupplyChainGap`,
+`TestAdopt_DeclaredLintersReAdoptKeepsExpiredEntry`).
 
 ### The baseline on a re-adoption
 

@@ -85,9 +85,10 @@ To schedule a missing CI job instead of failing today, add a dated `declared-lin
 the exceptions list ([Exceptions](clang-tidy-coverage.md#exceptions)). An expired entry fails like
 a missing one, and an entry for a linter a workflow now runs is stale and fails until it is
 removed (`TestAuditDeclaredLinters_ExceptionsLifecycle`). `praetorctl adopt` writes such an entry
-for every declared linter that no workflow it scaffolds runs, keeps live entries on re-adoption
-and drops one once a workflow runs the linter
+for every declared linter that no workflow it scaffolds runs, keeps existing entries as written on
+re-adoption without renewing expired ones, and drops an entry once a workflow runs the linter
 (`internal/adopt/linters_exception.go`, `TestAdopt_DeclaredLintersExceptionsFreshAdoption`,
+`TestAdopt_DeclaredLintersReAdoptKeepsExpiredEntry`,
 `TestAdopt_DeclaredLintersReAdoptDropsWhenWorkflowAdded`).
 
 ### Per-file linter exclusions
