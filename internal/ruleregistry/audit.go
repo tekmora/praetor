@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/gating"
+	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 	"github.com/cordanaLLM/praetor/internal/util"
 	"go.yaml.in/yaml/v3"
 )
@@ -19,10 +20,32 @@ const (
 	maxEvidencePointers = 32
 )
 
+// Status describes what the registry audit observed for one rule's declared evidence.
+type Status string
+
+const (
+	// StatusPresent reports that every declared local pointer resolved structurally and no forge pointer was declared.
+	StatusPresent Status = "present"
+	// StatusForgeObserved reports that every declared pointer resolved, no forge setting is pending, and a forge pointer matched on live read-back.
+	StatusForgeObserved Status = "forge-observed"
+	// StatusForgePending reports that every local pointer resolved and a required forge setting is asserted without live read-back.
+	StatusForgePending Status = "forge-pending"
+	// StatusUnresolved reports that a declared pointer failed resolution, lacked evidence, or mismatched live forge state.
+	StatusUnresolved Status = "unresolved"
+	// StatusGuidance reports a guidance or unregistered prose-only rule with no declared enforcement pointers.
+	StatusGuidance Status = "guidance"
+)
+
 // Row is one known rule's audit result.
+// Status separates local structural resolution ("present"), pending forge assertions ("forge-pending"),
+// live forge verification ("forge-observed"), failed resolution ("unresolved"), and prose ("guidance").
+// Enforced is true only when the registry directly observed enforcement (every declared pointer resolved,
+// at least one forge setting was read back and matched, and no required forge pointer of the rule is pending);
+// local structural pointer resolution alone never sets Enforced.
 type Row struct {
 	ID        string            `json:"id"`
 	Class     Class             `json:"class"`
+	Status    Status            `json:"status"`
 	Evidence  string            `json:"evidence"`
 	Enforced  bool              `json:"enforced"`
 	ProseOnly bool              `json:"prose_only"`
@@ -51,6 +74,18 @@ func (r *Report) Counts() map[Class]int {
 	return counts
 }
 
+// StatusCounts returns the number of known rules in each audit status.
+func (r *Report) StatusCounts() map[Status]int {
+	counts := map[Status]int{}
+	if r == nil {
+		return counts
+	}
+	for i := 0; i < len(r.Rows) && i < maxAuditRules; i++ {
+		counts[r.Rows[i].Status]++
+	}
+	return counts
+}
+
 // ProseOnlyIDs returns every rule that currently has no executable enforcement claim.
 func (r *Report) ProseOnlyIDs() []string {
 	ids := []string{}
@@ -65,7 +100,8 @@ func (r *Report) ProseOnlyIDs() []string {
 	return ids
 }
 
-// UnenforcedIDs returns every rule without a resolved executable enforcement path.
+// UnenforcedIDs returns every rule whose enforcement was not directly observed by the audit
+// (Enforced is false, including rules whose status is "present" or "forge-pending").
 func (r *Report) UnenforcedIDs() []string {
 	ids := []string{}
 	if r == nil {
@@ -107,6 +143,7 @@ func AuditWithOptions(ctx context.Context, root string, opts AuditOptions) (*Rep
 	return report, fmt.Errorf("rules audit: %d invalid declaration(s)", len(report.Problems))
 }
 
+// indexEntries validates registry entries against known rules and returns them keyed by rule ID.
 func indexEntries(registry *Registry, known []Rule, report *Report) map[string]*Entry {
 	knownIDs := make(map[string]bool, len(known))
 	for i := 0; i < len(known) && i < maxAuditRules; i++ {
@@ -132,6 +169,7 @@ func indexEntries(registry *Registry, known []Rule, report *Report) map[string]*
 	return entries
 }
 
+// validateEntry records structural schema violations for one registry entry.
 func validateEntry(entry *Entry, report *Report) {
 	if !validClass(entry.Class) {
 		report.Problems = append(report.Problems, fmt.Sprintf("%s: unknown class %q", entry.ID, entry.Class))
@@ -149,6 +187,7 @@ func validateEntry(entry *Entry, report *Report) {
 	}
 }
 
+// auditRule classifies one rule and resolves its declared local and forge evidence pointers.
 func auditRule(
 	ctx context.Context,
 	root string,
@@ -158,11 +197,14 @@ func auditRule(
 	report *Report,
 ) Row {
 	if entry == nil {
-		return proseRow(rule, "guidance")
+		return proseRow(rule, ClassGuidance)
 	}
-	row := Row{ID: rule.ID, Class: entry.Class}
 	if entry.Class == ClassGuidance {
-		row = proseRow(rule, entry.Class)
+		return proseRow(rule, entry.Class)
+	}
+	row := Row{ID: rule.ID, Class: entry.Class, Status: StatusUnresolved}
+	if !validClass(entry.Class) {
+		row.Evidence = "unresolved: invalid class"
 		return row
 	}
 	if len(entry.Evidence) == 0 {
@@ -178,15 +220,26 @@ func auditRule(
 		report:      report,
 	}
 	resolution := resolver.resolve(entry.Evidence)
-	row.Enforced = row.Enforced || resolution.localPointers > 0 && resolution.localResolved
-	row.Evidence = evidenceSummary(row, resolution.localResolved, resolution.forgePending)
+	row.Status = resolveRowStatus(resolution)
+	row.Enforced = row.Status == StatusForgeObserved
+	row.Evidence = evidenceSummary(row.Evidence, resolution)
 	return row
 }
+
+type forgeOutcome int
+
+const (
+	forgePointerFailed forgeOutcome = iota
+	forgePointerPending
+	forgePointerMatched
+)
 
 type evidenceResolution struct {
 	localPointers int
 	localResolved bool
+	forgeMatched  int
 	forgePending  bool
+	forgeFailed   bool
 }
 
 type evidenceResolver struct {
@@ -198,37 +251,51 @@ type evidenceResolver struct {
 	report      *Report
 }
 
+// resolve checks every declared pointer of one rule and tallies local and forge outcomes.
 func (r evidenceResolver) resolve(pointers []string) evidenceResolution {
 	result := evidenceResolution{localResolved: true}
 	for i := 0; i < len(pointers) && i < maxEvidencePointers; i++ {
 		pointer := pointers[i]
 		if strings.HasPrefix(pointer, "forge:") {
-			matched, pending := r.resolveForgePointer(pointer)
-			r.row.Enforced = r.row.Enforced || matched
-			result.forgePending = result.forgePending || pending
+			r.recordForgeOutcome(&result, r.resolveForgePointer(pointer))
 			continue
 		}
 		result.localPointers++
 		if err := resolve(r.ctx, r.root, pointer); err != nil {
+			if result.localResolved {
+				r.row.Evidence = "unresolved: " + pointer
+			}
 			result.localResolved = false
-			r.row.Evidence = "unresolved: " + pointer
 			r.report.Problems = append(r.report.Problems, fmt.Sprintf("%s: %v", r.ruleID, err))
 		}
 	}
 	return result
 }
 
-func (r evidenceResolver) resolveForgePointer(pointer string) (bool, bool) {
+// recordForgeOutcome updates result with the outcome of one forge evidence pointer.
+func (r evidenceResolver) recordForgeOutcome(result *evidenceResolution, outcome forgeOutcome) {
+	switch outcome {
+	case forgePointerMatched:
+		result.forgeMatched++
+	case forgePointerPending:
+		result.forgePending = true
+	default:
+		result.forgeFailed = true
+	}
+}
+
+// resolveForgePointer evaluates one forge: pointer against the loaded forge states.
+func (r evidenceResolver) resolveForgePointer(pointer string) forgeOutcome {
 	setting, ok := forgeSetting(pointer)
 	if !ok {
 		r.report.Problems = append(r.report.Problems, fmt.Sprintf("%s: unresolved evidence pointer %q", r.ruleID, pointer))
-		return false, false
+		return forgePointerFailed
 	}
 	state, ok := r.forgeStates[setting]
 	if !ok || state.Asserted == "" {
 		r.report.Problems = append(r.report.Problems,
 			fmt.Sprintf("%s: forge setting %s has no committed assertion", r.ruleID, setting))
-		return false, false
+		return forgePointerFailed
 	}
 	comparison := ForgeComparison{Setting: setting, Asserted: state.Asserted, Observed: state.Observed,
 		Match: state.Match, ReadBack: state.ReadBack}
@@ -236,38 +303,67 @@ func (r evidenceResolver) resolveForgePointer(pointer string) (bool, bool) {
 	if !state.AssertedEnforced {
 		r.report.Problems = append(r.report.Problems,
 			fmt.Sprintf("%s: forge setting %s is asserted as %s", r.ruleID, setting, state.Asserted))
-		return false, false
+		return forgePointerFailed
 	}
 	if !state.ReadBack {
-		return false, true
+		return forgePointerPending
 	}
 	if state.Match {
-		return true, false
+		return forgePointerMatched
 	}
 	r.report.Problems = append(r.report.Problems, fmt.Sprintf(
 		"%s: forge setting %s mismatch: asserted %s, observed %s", r.ruleID, setting, state.Asserted, state.Observed))
-	return false, false
+	return forgePointerFailed
 }
 
-func evidenceSummary(row Row, localResolved, forgePending bool) string {
+// resolveRowStatus maps resolved local and forge pointer outcomes to one Row Status.
+func resolveRowStatus(res evidenceResolution) Status {
 	switch {
-	case !localResolved:
-		return row.Evidence
-	case row.Enforced && forgePending:
+	case !res.localResolved || res.forgeFailed:
+		return StatusUnresolved
+	case res.forgePending:
+		return StatusForgePending
+	case res.forgeMatched > 0:
+		return StatusForgeObserved
+	case res.localPointers > 0:
+		return StatusPresent
+	default:
+		return StatusUnresolved
+	}
+}
+
+// evidenceSummary formats the evidence summary string for a non-prose rule row.
+func evidenceSummary(current string, res evidenceResolution) string {
+	hasResolved := res.localPointers > 0 || res.forgeMatched > 0
+	switch {
+	case !res.localResolved:
+		return current
+	case res.forgeFailed:
+		return "unresolved"
+	case hasResolved && res.forgePending:
 		return "resolved; forge asserted, not read back"
-	case row.Enforced:
+	case hasResolved:
 		return "resolved"
-	case forgePending:
+	case res.forgePending:
 		return "asserted, not read back"
 	default:
 		return "unresolved"
 	}
 }
 
+// proseRow builds the Row for a guidance or unregistered prose-only rule.
 func proseRow(rule Rule, class Class) Row {
-	return Row{ID: rule.ID, Class: class, Evidence: "prose-only", ProseOnly: true, Candidate: prohibited(rule.Text)}
+	return Row{
+		ID:        rule.ID,
+		Class:     class,
+		Status:    StatusGuidance,
+		Evidence:  "prose-only",
+		ProseOnly: true,
+		Candidate: prohibited(rule.Text),
+	}
 }
 
+// resolve checks that one non-forge evidence pointer resolves structurally below root.
 func resolve(ctx context.Context, root, pointer string) error {
 	kind, value, ok := strings.Cut(pointer, ":")
 	if !ok || value == "" || len(pointer) > maxPointerLength {
@@ -290,6 +386,7 @@ func resolve(ctx context.Context, root, pointer string) error {
 	return fmt.Errorf("unresolved evidence pointer %q", pointer)
 }
 
+// resolveTest checks that a Go *_test.go file in the named package directory defines TestX.
 func resolveTest(ctx context.Context, root, value string) error {
 	index := strings.LastIndex(value, ".")
 	if index < 1 || index == len(value)-1 {
@@ -304,7 +401,7 @@ func resolveTest(ctx context.Context, root, value string) error {
 		return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
 	}
 	matcher := regexp.MustCompile(`(?m)^func\s+` + regexp.QuoteMeta(name) + `\s*\(`)
-	for i := 0; i < len(files); i++ {
+	for i := 0; i < len(files) && i < maxTestFiles; i++ {
 		data, readErr := readFile(ctx, root, filepath.ToSlash(strings.TrimPrefix(files[i], root+string(filepath.Separator))))
 		if readErr == nil && matcher.Match(data) {
 			return nil
@@ -313,29 +410,176 @@ func resolveTest(ctx context.Context, root, value string) error {
 	return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
 }
 
+// resolveMake checks that Makefile declares target with at least one prerequisite or non-empty recipe line.
 func resolveMake(ctx context.Context, root, target string) error {
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(target) {
 		return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
 	}
 	data, err := readFile(ctx, root, "Makefile")
-	if err == nil && regexp.MustCompile(`(?m)^`+regexp.QuoteMeta(target)+`\s*:`).Match(data) {
+	if err == nil && hasMakeTargetBody(string(data), target) {
 		return nil
 	}
 	return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
 }
 
+// hasMakeTargetBody reports whether raw declares Make target with a non-empty recipe or prerequisite.
+func hasMakeTargetBody(raw, target string) bool {
+	norm := strings.ReplaceAll(raw, "\r\n", "\n")
+	if !util.MakefileHasTarget(norm, target) {
+		return false
+	}
+	if recipe, ok := util.MakefileTargetRecipe(norm, target); ok && strings.TrimSpace(recipe) != "" {
+		return true
+	}
+	return scanMakeRulesForBody(joinMakeContinuations(strings.Split(norm, "\n")), target)
+}
+
+// joinMakeContinuations joins backslash-continued non-recipe lines up to MaxMakefileLines.
+func joinMakeContinuations(physical []string) []string {
+	out := make([]string, 0, min(len(physical), util.MaxMakefileLines))
+	for i := 0; i < len(physical) && i < util.MaxMakefileLines; i++ {
+		line := physical[i]
+		if !strings.HasPrefix(line, "\t") {
+			line, i = extendMakeContinuation(physical, line, i)
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// extendMakeContinuation appends continued physical lines onto line starting from index i.
+func extendMakeContinuation(physical []string, line string, i int) (string, int) {
+	for steps := 0; steps < util.MaxMakefileContinuations && i+1 < len(physical) && hasOddTrailingBackslashes(line); steps++ {
+		i++
+		line = strings.TrimSuffix(line, "\\") + " " + strings.TrimSpace(physical[i])
+	}
+	return line, i
+}
+
+// hasOddTrailingBackslashes reports whether line ends in an odd number of backslashes.
+func hasOddTrailingBackslashes(line string) bool {
+	count := 0
+	for i := len(line) - 1; i >= 0 && count < util.MaxMakefileLineBytes && line[i] == '\\'; i-- {
+		count++
+	}
+	return count%2 == 1
+}
+
+// scanMakeRulesForBody checks all rules for target across lines for prerequisites, inline recipes, or tab recipes.
+func scanMakeRulesForBody(lines []string, target string) bool {
+	openRecipe := false
+	for i := 0; i < len(lines) && i < util.MaxMakefileLines; i++ {
+		nextOpen, found := stepMakeRuleScan(lines[i], target, openRecipe)
+		if found {
+			return true
+		}
+		openRecipe = nextOpen
+	}
+	return false
+}
+
+// stepMakeRuleScan advances openRecipe over one logical Makefile line and reports whether target gained a body.
+func stepMakeRuleScan(line, target string, openRecipe bool) (bool, bool) {
+	if strings.HasPrefix(line, "\t") {
+		return openRecipe, openRecipe && strings.TrimSpace(line) != ""
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return openRecipe, false
+	}
+	return matchMakeRuleBody(line, target)
+}
+
+// matchMakeRuleBody reports whether line is a rule declaring target and whether it carries prerequisites or an inline recipe.
+func matchMakeRuleBody(line, target string) (bool, bool) {
+	rulePart, inlineRecipe := cutMakeRuleAndInline(line)
+	head, rest, ok := strings.Cut(rulePart, ":")
+	if !ok || !validMakeRuleTargets(head, target) {
+		return false, false
+	}
+	rest = strings.TrimPrefix(rest, ":")
+	if strings.HasPrefix(rest, "=") || hasTopLevelEquals(rest) {
+		return false, false
+	}
+	return true, strings.TrimSpace(rest) != "" || strings.TrimSpace(inlineRecipe) != ""
+}
+
+// validMakeRuleTargets reports whether head names target in a non-assignment, non-export rule header.
+func validMakeRuleTargets(head, target string) bool {
+	if strings.ContainsAny(head, "=+?!") {
+		return false
+	}
+	targets := strings.Fields(head)
+	if len(targets) == 0 || targets[0] == "export" || targets[0] == "unexport" {
+		return false
+	}
+	return slices.Contains(targets, target)
+}
+
+// cutMakeRuleAndInline splits a Makefile line at its first unescaped '#' comment or ';' inline recipe.
+func cutMakeRuleAndInline(line string) (string, string) {
+	for i := 0; i < len(line) && i < util.MaxMakefileLineBytes; i++ {
+		switch line[i] {
+		case '\\':
+			i++
+		case '#':
+			return line[:i], ""
+		case ';':
+			return line[:i], line[i+1:]
+		}
+	}
+	return line, ""
+}
+
+// hasTopLevelEquals reports whether text contains an '=' outside $(...) or ${...} variable references.
+func hasTopLevelEquals(text string) bool {
+	depth := 0
+	for i := 0; i < len(text) && i < util.MaxMakefileLineBytes; i++ {
+		switch text[i] {
+		case '(', '{':
+			depth++
+		case ')', '}':
+			depth = max(0, depth-1)
+		case '=':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveWorkflow checks that .github/workflows/<file> defines job and its if: condition is not literal false.
 func resolveWorkflow(ctx context.Context, root, value string) error {
 	file, job, ok := strings.Cut(value, "#")
 	if !ok || !safeWorkflow(file) || !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(job) {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
 	data, err := readFile(ctx, root, filepath.ToSlash(filepath.Join(".github/workflows", file)))
-	if err != nil || !hasYAMLMember(data, "jobs", job) {
+	if err != nil || !hasActiveWorkflowJob(data, job) {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
 	return nil
 }
 
+// hasActiveWorkflowJob reports whether data defines jobs.<job> as a mapping whose if: is not literal false.
+func hasActiveWorkflowJob(data []byte, job string) bool {
+	var document yaml.Node
+	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {
+		return false
+	}
+	jobNode := util.YAMLMappingValue(util.YAMLMappingValue(document.Content[0], "jobs"), job)
+	if jobNode == nil || jobNode.Kind != yaml.MappingNode {
+		return false
+	}
+	ifNode := util.YAMLMappingValue(jobNode, "if")
+	if ifNode == nil {
+		return true
+	}
+	return ifNode.Kind == yaml.ScalarNode && !ghworkflow.NeverRuns(ifNode.Value)
+}
+
+// resolveHook checks that lefthook.yml or an extended lefthook config defines hook.command.
 func resolveHook(ctx context.Context, root, value string) error {
 	hook, command, ok := strings.Cut(value, ".")
 	if !ok || !validHookName(hook) || !validHookName(command) {
@@ -345,7 +589,7 @@ func resolveHook(ctx context.Context, root, value string) error {
 	if err != nil {
 		return fmt.Errorf("unresolved evidence pointer %q", "hook:"+value)
 	}
-	for i := 0; i < len(files); i++ {
+	for i := 0; i < len(files) && i < 16; i++ {
 		data, readErr := readFile(ctx, root, files[i])
 		if readErr == nil && hasHookCommand(data, hook, command) {
 			return nil
@@ -354,18 +598,22 @@ func resolveHook(ctx context.Context, root, value string) error {
 	return fmt.Errorf("unresolved evidence pointer %q", "hook:"+value)
 }
 
+// safeRelative reports whether value is a non-empty local relative path.
 func safeRelative(value string) bool {
 	return value != "" && !filepath.IsAbs(value) && filepath.IsLocal(filepath.FromSlash(value))
 }
 
+// safeWorkflow reports whether file is a safe relative YAML filename.
 func safeWorkflow(file string) bool {
 	return safeRelative(file) && (strings.HasSuffix(file, ".yml") || strings.HasSuffix(file, ".yaml"))
 }
 
+// validHookName reports whether value is an allowed lefthook hook or command identifier.
 func validHookName(value string) bool {
 	return regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(value)
 }
 
+// hookFiles collects lefthook.yml and up to 16 extended configs below .config/lefthook/, rejecting cycles.
 func hookFiles(ctx context.Context, root string) ([]string, error) {
 	queue, files := []string{"lefthook.yml"}, []string{}
 	seen := map[string]bool{}
@@ -398,7 +646,7 @@ func checkedExtensions(data []byte, queued int) ([]string, error) {
 	if queued+len(extends) > 16 {
 		return nil, fmt.Errorf("lefthook extensions exceed 16 files")
 	}
-	for j := 0; j < len(extends); j++ {
+	for j := 0; j < len(extends) && j < 16; j++ {
 		if !safeRelative(extends[j]) || !strings.HasPrefix(extends[j], ".config/lefthook/") {
 			return nil, fmt.Errorf("unsafe lefthook extension")
 		}
@@ -406,6 +654,7 @@ func checkedExtensions(data []byte, queued int) ([]string, error) {
 	return extends, nil
 }
 
+// lefthookExtends decodes the extends list from a lefthook YAML file.
 func lefthookExtends(data []byte) ([]string, error) {
 	var document struct {
 		Extends []string `yaml:"extends"`
@@ -416,15 +665,7 @@ func lefthookExtends(data []byte) ([]string, error) {
 	return document.Extends, nil
 }
 
-func hasYAMLMember(data []byte, parent, child string) bool {
-	var document yaml.Node
-	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {
-		return false
-	}
-	parentNode := util.YAMLMappingValue(document.Content[0], parent)
-	return util.YAMLMappingValue(parentNode, child) != nil
-}
-
+// hasHookCommand reports whether a lefthook YAML document declares command under hook's commands, scripts, or jobs.
 func hasHookCommand(data []byte, hook, command string) bool {
 	var document yaml.Node
 	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {

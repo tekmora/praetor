@@ -1,0 +1,4 @@
+empty:
+
+verify-all:
+	@true

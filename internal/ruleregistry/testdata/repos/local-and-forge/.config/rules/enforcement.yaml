@@ -1,0 +1,7 @@
+version: 1
+rules:
+  - id: HISS-01
+    class: ci-gate
+    evidence:
+      - make:verify-all
+      - forge:required_checks

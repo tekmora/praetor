@@ -785,32 +785,47 @@ With `adoption.decline: [labels]` adoption writes none, and both audits pass wit
 
 `standardsctl rules audit` reads `.config/rules/enforcement.yaml`, which gives every HISS rule and
 every AGENTS.md operational rule an enforcement class (`ci-gate`, `hook`, `review-gate`,
-`guidance` or `staged`) and evidence pointers, and checks that each pointer resolves: `test:` to a
-Go test function, `hook:` to a lefthook hook command, `make:` to a Makefile target, `workflow:` to
-a workflow job, `gate:` to a stage of `praetorctl gate run`, and `forge:` to a closed branch
-protection setting: `required_signatures`, `linear_history`, `required_reviews` or
-`required_checks`. An unknown setting fails like an unknown pointer kind. The stage names come from
-`gating.StageNames()`, which reads the same list the pipeline executes (`pipelineStages` in
+`guidance` or `staged`) and evidence pointers, and checks that each pointer resolves (`internal/ruleregistry/audit.go`): `test:` to a
+Go test function, `hook:` to a lefthook hook command, `make:` to a Makefile target that declares at
+least one prerequisite or non-empty recipe line (an empty `target:` rule fails resolution),
+`workflow:` to a workflow job whose `if:` condition is not literal `false` (`false` or
+`${{ false }}`, `ghworkflow.NeverRuns` in `internal/ghworkflow/ghworkflow.go`), `gate:` to a stage
+of `praetorctl gate run`, and `forge:` to a closed branch protection setting:
+`required_signatures`, `linear_history`, `required_reviews` or `required_checks`. An unknown
+setting fails like an unknown pointer kind. The stage names come from `gating.StageNames()`, which
+reads the same list the pipeline executes (`pipelineStages` in
 [`internal/gating/pipeline.go`](https://github.com/cordanaLLM/praetor/blob/main/internal/gating/pipeline.go)),
 so a stage the pipeline drops stops resolving and fails the audit
-(`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`). Rules with class `guidance`,
-or without an entry, are reported as prose-only; this slice reports them and does not fail.
+(`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`).
 
-A committed branch-protection policy is an assertion, not evidence that the forge applies it.
-Without `--remote`, a `forge:` pointer therefore appears under `asserted, not read back` and does
-not count as an enforced path. Another resolved pointer on the same rule still enforces that rule.
-With `standardsctl rules audit --remote`, the command resolves the same effective policy and status
+Each rule row in text and `standardsctl rules audit --json` carries a `status` alongside `enforced`:
+
+| Status | `enforced` | Meaning |
+| :--- | :--- | :--- |
+| `present` | `false` | every declared pointer is local and resolved structurally in the working tree |
+| `forge-observed` | `true` | every declared pointer resolved, no required forge setting is pending, and at least one `forge:` setting matched live read-back |
+| `forge-pending` | `false` | every local pointer resolved and at least one required `forge:` setting is asserted without live read-back |
+| `unresolved` | `false` | a declared pointer failed structural resolution, lacked evidence, or mismatched live forge read-back |
+| `guidance` | `false` | the rule has class `guidance` or no registry entry (`prose-only`); reported without failing |
+
+The registry runs no local gate and reads no receipt, so structural pointer resolution alone reports
+`status` `present` with `enforced: false`. A committed branch-protection policy is an assertion, not
+evidence that the forge applies it: without `--remote`, a rule carrying any required `forge:`
+pointer appears under `asserted, not read back` and reports `status` `forge-pending` with
+`enforced: false`, even when local pointers on the same rule resolve. With
+`standardsctl rules audit --remote`, the command resolves the same effective policy and status
 contexts as `plan --remote`, reads the live branch protection once through the shared forge reader,
-and uses `forge.EvaluateBranchProtection` for the comparison. Text and JSON report the setting's
-asserted value, observed value and match result for each rule. Drift fails with the rule ID and all
-three values; a failed live read fails by name instead of falling back to the offline result. The
-remote flags use the same token, endpoint, origin-identity check and bounded command context as
-`plan --remote`.
+and uses `forge.EvaluateBranchProtection` for the comparison. When every declared pointer of a rule
+resolves and every required `forge:` pointer on it matches live read-back, the row reports `status`
+`forge-observed` and `enforced: true`. Text and JSON report the setting's asserted value, observed
+value and match result for each rule. Drift fails with the rule ID and all three values; a failed
+live read fails by name instead of falling back to the offline result. The remote flags use the same
+token, endpoint, origin-identity check and bounded command context as `plan --remote`.
 
 The report also lists guidance or unregistered rules containing the allow-listed instruction-only
 phrases `is told not to`, `must not` or `never` under `instruction-only prohibitions`. This is a
-non-failing conversion list; a rule with executable enforcement is not listed. Computing forge-app
-permissions as the intersection of task needs and policy remains outside this slice.
+non-failing conversion list; a rule with declared evidence pointers is not listed. Computing
+forge-app permissions as the intersection of task needs and policy remains outside this slice.
 
 ### Stages that do not apply are skipped, not failed
 

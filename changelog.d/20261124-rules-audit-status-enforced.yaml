@@ -1,0 +1,4 @@
+type: changed
+title: "Separate structural pointer resolution from live enforcement in `standardsctl rules audit` (`status` reports `present`, `forge-observed`, `forge-pending`, `unresolved`, or `guidance`, empty Make targets and `if: false` workflow jobs fail resolution, and `enforced` is true only when live forge read-back matches with no pending forge pointer); read `status` for local pointer presence or pass `--remote` when checking `enforced`"
+issue: "#1134"
+breaking: true
