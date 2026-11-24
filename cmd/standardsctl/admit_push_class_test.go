@@ -199,7 +199,6 @@ func TestReview2044HookPushSlotWaitsPastFiveMinutes(t *testing.T) {
 // hookPushSlotWaitFixture prints the duration passed to admit for a 25-minute gate deadline.
 const hookPushSlotWaitFixture = `
 from pathlib import Path
-from unittest.mock import patch
 import checks
 
 def run(argv, **kwargs):

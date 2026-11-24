@@ -32,19 +32,40 @@ func runHookDeadlineFixture(t *testing.T, script string) string {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	dir := filepath.Join("..", "..", ".config", "lefthook", "scripts")
-	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", script)
+	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", hookFixturePrelude+script)
 	if err != nil {
 		t.Fatalf("stubbed hook budget: %v\n%s\n%s", err, out.Stdout, out.Stderr)
 	}
 	return string(out.Stdout)
 }
 
+// hookFixturePrelude gives the hook fixtures patch.object without unittest: the gate's toolchain container
+// ships a python3 without the unittest package (push gate of PR 2044, 2026-11-24).
+const hookFixturePrelude = `
+class _Patch:
+    def __init__(self, target, name, value):
+        self.target, self.name, self.value = target, name, value
+
+    def __enter__(self):
+        self.saved = getattr(self.target, self.name)
+        setattr(self.target, self.name, self.value)
+
+    def __exit__(self, *exc):
+        setattr(self.target, self.name, self.saved)
+        return False
+
+
+class patch:
+    @staticmethod
+    def object(target, name, value):
+        return _Patch(target, name, value)
+`
+
 // hookDeadlineFixture spends time in both admission and gate work, using only stand-in processes.
 const hookDeadlineFixture = `
 from pathlib import Path
 import subprocess
 import sys
-from unittest.mock import patch
 import checks
 
 calls = []
