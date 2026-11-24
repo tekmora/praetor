@@ -46,8 +46,33 @@ const (
 // (engineLauncherFile, #906). The "before merge-check gate" entries, one per language set with
 // and without checkpoint jobs, REUSE job, and tool-module scanner, are the renderings before the
 // pre-push merge-check gate refused merge commits dropping first-parent work
-// (Order: engine-dropped-hunk-gate-20261027).
+// (Order: engine-dropped-hunk-gate-20261027). The "before push slot" entries cover every
+// language, REUSE, tool-module and checkpoint rendering of the direct pre-push gate.
 var priorLefthookDigests = map[string]string{
+	"76a2e58143c17cab6dd8fdc77deb090c1087abce5d8c558a8fdfbbd495c655d3": "before push slot, governance",
+	"3cc7590395ab2b7ea71f3d0c62f373d5a18058d6727957ef05031ac48bcd34bb": "before push slot, governance, checkpoint",
+	"afdb5f48d8fddc7ed87226d507d2460870984a66eff8ac6a94331606c6008ef1": "before push slot, governance, reuse",
+	"70992fc26bf1f205cebe00ac7de20d0e603753b8ff9dd454123388fb06f6b900": "before push slot, governance, reuse, checkpoint",
+	"9635bd8277da7b99723f2014ef318c79e93f6c275a07d3a53c0c78900185d5bc": "before push slot, go",
+	"e4fc64d46ca3c0b185a1ad0f7f6e18401e6661ed861b2db38dee0c3b92d2ed81": "before push slot, go, checkpoint",
+	"1b9754b3f376209fd180fa8f4f98defd1cac84074dba290ff1c697636e6aa2c1": "before push slot, go, tool",
+	"ee90fd8f4aff00e3852d4b1f6339561bc7f112031421edb05608be1995185774": "before push slot, go, tool, checkpoint",
+	"9331936c47d641e5de808385b876c7666d822c4ed60cabbf0974870f0d6fd216": "before push slot, go, reuse",
+	"08a25a0fde1c1d33aca38435566af2db40702f73566fc0b6d073ff6cfde9885c": "before push slot, go, reuse, checkpoint",
+	"c0a63f0f7f1c1717bb66e4e196fbb009d1e43d0d86cd679c750a14a7207eacf7": "before push slot, go, reuse, tool",
+	"653894d97d750ee28312c65f7ad1d6b0e932b474f2733467bc40e7b567a7ff62": "before push slot, go, reuse, tool, checkpoint",
+	"440947f1b36d9c7d284858a9dd4e761cde1593299da5e56aeac3855187a29155": "before push slot, rust",
+	"59a342d3929e316e6496aa7f20652ad86715dfcf9a7d0bec76450124208b11eb": "before push slot, rust, checkpoint",
+	"342fcaaf7de8cd822b3b393bef460d47fe97be88e111afe010d4b144b5c780fd": "before push slot, rust, reuse",
+	"b2d3f9d6aa81d01392d197d45663a357e739bc15707b00d81a3a158b1132413e": "before push slot, rust, reuse, checkpoint",
+	"f8e7f156c8aec7038849b9b58ee16976b1bb86fa8a1a1edcb7038e1fccfca322": "before push slot, go-rust",
+	"8bc8c3f25ad4edb8b73b99e4483f26cde5b389ec14d2ace6e88d4ddc4c872dcc": "before push slot, go-rust, checkpoint",
+	"bef2c9dd28196b9c57cc6e831fa9aa387633fe9d895bfaaca4d20ae0a0ff512a": "before push slot, go-rust, tool",
+	"9ac2a2d9c431fa6fb46cec53ccd0980a06c64dffb1f2d1fb42a4a54dbfb78142": "before push slot, go-rust, tool, checkpoint",
+	"bac8a19622e776fad876af0ec4af3cfff7325007bd6c34844da74b3384f0aec1": "before push slot, go-rust, reuse",
+	"411467e88678cf0f74692832f08a59143a1fd9a03df3f35284bee7d1d79051f7": "before push slot, go-rust, reuse, checkpoint",
+	"99a2329550262bc124ceb11495cccfe0026b9cba8a7ae23cb87b5ddd51a26f50": "before push slot, go-rust, reuse, tool",
+	"18a888310e9d2daa8556388cf565082b3076c2aa2916cbbbf46d3c8ffd145329": "before push slot, go-rust, reuse, tool, checkpoint",
 	"b42730d0163c379cbd04622339fd63bc3cd9715599f256c85c12ea94d19be984": "before docstrings job, governance jobs only",
 	"3b94e71702d2bbcdbedc9880ccc3d627895eb1251a437277842cea5b8a05f017": "before docstrings job, governance jobs only, checkpoint jobs",
 	"606a44b0f9e3795c30be284d5f24d369e8d60a0238541314363f7b0deab0bcdf": "before docstrings job, governance jobs only, REUSE job",

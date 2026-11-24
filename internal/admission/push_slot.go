@@ -49,6 +49,9 @@ func WaitPushSlot(ctx context.Context, maxWait, poll time.Duration, log io.Write
 	if err != nil {
 		return nil, errors.Join(err, releaseLease())
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(fmt.Errorf("push slot: %w", err), releaseHolder(), releaseLease())
+	}
 	return func() error {
 		return errors.Join(releaseHolder(), releaseLease())
 	}, nil
@@ -66,62 +69,53 @@ func createPushSlotLease(dir string, root *os.Root) (string, func() error, error
 
 // waitForPushSlotGrant polls until this lease is oldest, acquires the slot holder lock, or maxWait ends.
 func waitForPushSlotGrant(ctx context.Context, ownName string, root *os.Root, maxWait, poll time.Duration, log io.Writer) (func() error, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
-	defer cancel()
-	deadline, err := pushSlotWaitDeadline(waitCtx)
-	if err != nil {
-		return nil, err
-	}
-	for i := 0; i < maxPolls; i++ {
-		release, done, err := pushSlotGrantPollOnce(waitCtx, ownName, root, deadline, poll, log)
+	deadline := time.Now().Add(maxWait)
+	for i := 0; i < maxPolls && time.Until(deadline) > 0; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("push slot: %w", err)
+		}
+		release, err := pushSlotGrantPollOnce(ownName, root, log)
 		if err != nil || release != nil {
 			return release, err
 		}
-		if done {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			break
 		}
+		if err := SleepContext(ctx, min(poll, remaining)); err != nil {
+			return nil, fmt.Errorf("push slot: %w", err)
+		}
 	}
-	return finalPushSlotGrantAttempt(ownName, root, maxWait)
+	if time.Until(deadline) > 0 {
+		return nil, fmt.Errorf("push slot: poll limit reached: %w", ErrPushSlotHeld)
+	}
+	return finalPushSlotGrantAttempt(ctx, ownName, root, maxWait)
 }
 
-// pushSlotWaitDeadline returns the wait context deadline or an error when none is set.
-func pushSlotWaitDeadline(waitCtx context.Context) (time.Time, error) {
-	deadline, ok := waitCtx.Deadline()
-	if !ok {
-		return time.Time{}, fmt.Errorf("push slot: wait context has no deadline")
-	}
-	return deadline, nil
-}
-
-// pushSlotGrantPollOnce tries one grant and, on failure, sleeps until the next poll when time remains. It returns
-// a release on a grant, an error, or done=true without either when the deadline ends polling; the caller then makes
-// the final grant attempt.
-func pushSlotGrantPollOnce(waitCtx context.Context, ownName string, root *os.Root, deadline time.Time, poll time.Duration, log io.Writer) (func() error, bool, error) {
-	if err := waitCtx.Err(); err != nil {
-		return nil, true, fmt.Errorf("push slot: %w", err)
-	}
+// pushSlotGrantPollOnce tries one grant and logs queue position when the slot is held.
+func pushSlotGrantPollOnce(ownName string, root *os.Root, log io.Writer) (func() error, error) {
 	granted, release, err := tryGrantPushSlot(ownName, root)
-	if err != nil {
-		return nil, true, err
+	if err != nil || granted {
+		return release, err
 	}
-	if granted {
-		return release, true, nil
+	if log == nil {
+		return nil, nil
 	}
 	head, queueErr := oldestLivePushSlotLease(root, ownName)
 	if queueErr != nil {
-		if logErr := pushSlotLogQueueProbe(log, queueErr); logErr != nil {
-			return nil, true, logErr
-		}
-		head = ""
+		return nil, pushSlotLogQueueProbe(log, queueErr)
 	}
-	if !pushSlotSleepBeforeRetry(waitCtx, deadline, poll, log, head) {
-		return nil, true, nil
+	if _, err := fmt.Fprintf(log, "%s push slot wait: queued after %s\n", time.Now().Format("15:04:05"), head); err != nil {
+		return nil, fmt.Errorf("push slot: queue log: %w", err)
 	}
-	return nil, false, nil
+	return nil, nil
 }
 
-// finalPushSlotGrantAttempt grants the slot after polling ends or refuses when still blocked.
-func finalPushSlotGrantAttempt(ownName string, root *os.Root, maxWait time.Duration) (func() error, error) {
+// finalPushSlotGrantAttempt checks the slot once at its wait deadline unless the caller stopped waiting.
+func finalPushSlotGrantAttempt(ctx context.Context, ownName string, root *os.Root, maxWait time.Duration) (func() error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("push slot: %w", err)
+	}
 	granted, release, err := tryGrantPushSlot(ownName, root)
 	if err != nil {
 		return nil, err
@@ -164,26 +158,9 @@ func tryGrantPushSlot(ownName string, root *os.Root) (bool, func() error, error)
 
 const pushSlotHolderLabel = "host push slot holder"
 
-// pushSlotSleepBeforeRetry logs queue position and sleeps until the next poll or the wait deadline.
-func pushSlotSleepBeforeRetry(ctx context.Context, deadline time.Time, poll time.Duration, log io.Writer, head string) bool {
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return false
-	}
-	if log != nil {
-		if _, err := fmt.Fprintf(log, "%s push slot wait: queued after %s\n", time.Now().Format("15:04:05"), head); err != nil {
-			return false
-		}
-	}
-	if err := SleepContext(ctx, min(poll, remaining)); err != nil {
-		return false
-	}
-	return time.Until(deadline) > 0
-}
-
 // oldestLivePushSlotLease returns the oldest lease whose flock is still held; dead holders are skipped.
 func oldestLivePushSlotLease(root *os.Root, ownName string) (string, error) {
-	entries, err := readExecutorLeaseEntries(PushSlotLeaseResource, root)
+	entries, err := readLeaseEntries("push slot", root)
 	if err != nil {
 		return "", err
 	}

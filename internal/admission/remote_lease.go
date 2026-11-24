@@ -53,14 +53,7 @@ func executorLeaseDir(name string) (string, error) {
 	if !validExecutorName(name) {
 		return "", fmt.Errorf("executor %s: invalid or reserved executor name", name)
 	}
-	return leaseResourceDir(name, "executor "+name)
-}
-
-// leaseResourceDir returns <runtime>/praetor-admit-leases/<resource>/ for a named lease resource.
-func leaseResourceDir(resource, label string) (string, error) {
-	if !validAdmissionLeaseName(resource) {
-		return "", fmt.Errorf("%s: invalid or reserved lease name", label)
-	}
+	label := "executor " + name
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
 		uid := os.Getuid()
@@ -69,8 +62,8 @@ func leaseResourceDir(resource, label string) (string, error) {
 			return "", fmt.Errorf("%s: lease directory: %w", label, err)
 		}
 	}
-	dir := filepath.Join(base, executorLeasesDir, resource)
-	// #nosec G703 -- resource matches validAdmissionLeaseName (no path separators) under the user's runtime directory.
+	dir := filepath.Join(base, executorLeasesDir, name)
+	// #nosec G703 -- name matches validExecutorName (no path separators) under the user's runtime directory.
 	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a lease directory needs the owner search bit; 0o700 is least privilege
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("%s: lease directory: %w", label, err)
@@ -158,7 +151,7 @@ func countExecutorLeases(name, ownName string, root *os.Root) (int, error) {
 
 // peerExecutorLeaseNames lists peer .lock filenames in root and refuses when total .lock files exceed maxExecutorLeaseFiles.
 func peerExecutorLeaseNames(name, ownName string, root *os.Root) ([]string, error) {
-	entries, err := readExecutorLeaseEntries(name, root)
+	entries, err := readLeaseEntries("executor "+name, root)
 	if err != nil {
 		return nil, err
 	}
@@ -180,21 +173,21 @@ func peerExecutorLeaseNames(name, ownName string, root *os.Root) ([]string, erro
 	return peers, nil
 }
 
-// readExecutorLeaseEntries reads up to maxExecutorLeaseDirEntries plus one directory entries from the lease root.
-func readExecutorLeaseEntries(name string, root *os.Root) ([]os.DirEntry, error) {
+// readLeaseEntries reads a bounded number of directory entries from the lease root.
+func readLeaseEntries(label string, root *os.Root) ([]os.DirEntry, error) {
 	f, err := root.Open(".")
 	if err != nil {
-		return nil, fmt.Errorf("executor %s: lease directory: %w", name, err)
+		return nil, fmt.Errorf("%s: lease directory: %w", label, err)
 	}
 	entries, readErr := f.ReadDir(maxExecutorLeaseDirEntries + 1)
 	if errors.Is(readErr, io.EOF) {
 		readErr = nil
 	}
 	if err := errors.Join(readErr, f.Close()); err != nil {
-		return nil, fmt.Errorf("executor %s: lease directory: %w", name, err)
+		return nil, fmt.Errorf("%s: lease directory: %w", label, err)
 	}
 	if len(entries) > maxExecutorLeaseDirEntries {
-		return nil, fmt.Errorf("executor %s: %w (%d)", name, ErrExecutorLeaseCap, maxExecutorLeaseFiles)
+		return nil, fmt.Errorf("%s: %w (%d)", label, ErrExecutorLeaseCap, maxExecutorLeaseFiles)
 	}
 	return entries, nil
 }

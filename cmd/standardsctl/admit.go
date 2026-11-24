@@ -56,7 +56,6 @@ func runAdmit(args []string) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	opts.policy = resolveAdmitPolicy(opts)
 	releasePush, err := acquirePushSlotIfNeeded(opts)
 	if err != nil {
 		return err
@@ -78,6 +77,7 @@ func runAdmit(args []string) (resultErr error) {
 
 // runLocalAdmit waits for local host admission and runs the step on the workstation.
 func runLocalAdmit(opts admitOptions) error {
+	opts.policy = resolveAdmitPolicy(opts)
 	ctx, cancel := commandContext(opts.wait)
 	defer cancel()
 	label := opts.label + " on local (named)"
@@ -153,9 +153,7 @@ func acquirePushSlotIfNeeded(opts admitOptions) (func() error, error) {
 	if opts.admitClass != admitClassPush {
 		return nil, nil
 	}
-	ctx, cancel := commandContext(opts.wait)
-	defer cancel()
-	release, err := admission.WaitPushSlot(ctx, opts.wait, opts.poll, os.Stderr)
+	release, err := admission.WaitPushSlot(rootContext(), opts.wait, opts.poll, os.Stderr)
 	if err != nil {
 		return nil, err
 	}

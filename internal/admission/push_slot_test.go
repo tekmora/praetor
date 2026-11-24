@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,6 +23,7 @@ import (
 )
 
 const holdPushSlotEnv = "PRAETOR_TEST_HOLD_PUSH_SLOT"
+const childPushSlotBaseEnv = "PRAETOR_TEST_HOLD_PUSH_SLOT_BASE"
 
 // TestPushSlot_Positive_SingleGrant proves one published queue lease can take the holder lock.
 func TestPushSlot_Positive_SingleGrant(t *testing.T) {
@@ -227,38 +227,24 @@ func TestPushSlot_TestMain_IsolatedFromHostRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostBase, err := hostPushSlotRuntimeBase(os.Getuid())
-	if err != nil {
-		t.Fatal(err)
+	base := os.Getenv(pushSlotTestBaseEnv)
+	if base == "" || got != filepath.Join(base, pushSlotQueueDir) {
+		t.Fatalf("push slot dir %q is outside test runtime %q", got, base)
 	}
-	if pushSlotDirUnderHostRuntime(got, hostBase) {
-		t.Fatalf("push slot dir %q lies under host runtime %q", got, hostBase)
-	}
-}
-
-// pushSlotDirUnderHostRuntime reports whether dir is the host runtime base or a path beneath it.
-func pushSlotDirUnderHostRuntime(dir, hostBase string) bool {
-	if dir == hostBase {
-		return true
-	}
-	rel, err := filepath.Rel(hostBase, dir)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // TestPushSlot_Positive_SameDirIgnoresRuntimeEnv proves XDG_RUNTIME_DIR and TMPDIR do not fork the push slot queue.
 func TestPushSlot_Positive_SameDirIgnoresRuntimeEnv(t *testing.T) {
-	t.Setenv(pushSlotTestBaseEnv, "")
+	root := t.TempDir()
+	makePushSlotFixtureDir(t, filepath.Join(root, systemTempRoot))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	first, err := pushSlotLeaseDir()
+	first, err := hostPushSlotRuntimeBaseAt(root, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "other-xdg"))
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "other-tmp"))
-	second, err := pushSlotLeaseDir()
+	second, err := hostPushSlotRuntimeBaseAt(root, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,18 +342,117 @@ func TestPushSlot_Negative_WaitShorterThanPollRefuses(t *testing.T) {
 	}
 }
 
-// TestPushSlot_Boundary_KilledHolderFreesSlot proves SIGKILL on the holder admits the next waiter.
-func TestPushSlot_Boundary_KilledHolderFreesSlot(t *testing.T) {
+// TestReview2044ExecutorPreservesPushHolderInode proves a valid host-push executor cannot remove the persistent holder.
+func TestReview2044ExecutorPreservesPushHolderInode(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", pushSlotTestDir(t))
+	releaseHolder := holdPushSlotForTest(t)
+	if err := releaseHolder(); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := pushSlotLeaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, pushSlotHolderName)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, releaseExecutor, err := AdmitExecutorLease("host-push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseExecutor(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("host-push executor count = %d, want 1", count)
+	}
+	if after, err := os.Stat(path); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("host-push executor changed the holder inode: %v", err)
+	}
+}
+
+// TestReview2044CanceledWaiterDoesNotAcquire cancels a queued waiter while releasing the current holder.
+func TestReview2044CanceledWaiterDoesNotAcquire(t *testing.T) {
+	pushSlotTestDir(t)
+	releaseHolder := holdPushSlotForTest(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	log := pushSlotWriterFunc(func(p []byte) (int, error) {
+		cancel()
+		return len(p), releaseHolder()
+	})
+	release, err := WaitPushSlot(ctx, time.Second, time.Second, log)
+	if release != nil {
+		t.Fatalf("canceled waiter acquired the slot: error %v, release %v", err, release())
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context.Canceled", err)
+	}
+	assertPushSlotEmpty(t)
+}
+
+// TestReview2044QueueLogFailurePreserved proves a queue writer error reaches the caller.
+func TestReview2044QueueLogFailurePreserved(t *testing.T) {
+	pushSlotTestDir(t)
+	holdPushSlotForTest(t)
+	logErr := errors.New("queue writer failed")
+	log := pushSlotWriterFunc(func([]byte) (int, error) { return 0, logErr })
+	release, err := WaitPushSlot(t.Context(), time.Second, time.Second, log)
+	if release != nil {
+		t.Fatalf("waiter acquired the held slot: error %v, release %v", err, release())
+	}
+	if !errors.Is(err, logErr) {
+		t.Fatalf("wait error = %v, want %v", err, logErr)
+	}
+}
+
+// pushSlotWriterFunc adapts a synchronous test callback to the queue log writer.
+type pushSlotWriterFunc func([]byte) (int, error)
+
+// Write calls the callback with the bytes written to the queue log.
+func (write pushSlotWriterFunc) Write(p []byte) (int, error) {
+	return write(p)
+}
+
+// holdPushSlotForTest takes a slot and registers its idempotent release with the test.
+func holdPushSlotForTest(t *testing.T) func() error {
+	t.Helper()
+	release, err := WaitPushSlot(t.Context(), time.Second, time.Millisecond, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseOnce := sync.OnceValue(release)
+	t.Cleanup(func() {
+		if err := releaseOnce(); err != nil {
+			t.Error(err)
+		}
+	})
+	return releaseOnce
+}
+
+// TestReview2044KilledFixtureSharesParentQueue proves the parent is blocked until SIGKILL frees the child's slot.
+func TestReview2044KilledFixtureSharesParentQueue(t *testing.T) {
 	dir := pushSlotTestDir(t)
-	kill := startPushSlotHolderSubprocess(t, dir)
+	kill := sync.OnceFunc(startPushSlotHolderSubprocess(t, dir))
+	t.Cleanup(kill)
+	release, err := WaitPushSlot(t.Context(), 100*time.Millisecond, 10*time.Millisecond, io.Discard)
+	if release != nil {
+		t.Fatalf("parent acquired while child held the slot: error %v, release %v", err, release())
+	}
+	if !errors.Is(err, ErrPushSlotHeld) {
+		t.Fatalf("parent wait error = %v, want ErrPushSlotHeld", err)
+	}
 	kill()
-	release, err := WaitPushSlot(context.Background(), 5*time.Second, 50*time.Millisecond, io.Discard)
+	release, err = WaitPushSlot(t.Context(), 5*time.Second, 50*time.Millisecond, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := release(); err != nil {
 		t.Fatal(err)
 	}
+	assertPushSlotEmpty(t)
 }
 
 // startPushSlotHolderSubprocess runs this test binary as a push-slot holder (TestPushSlotSubprocessHolder)
@@ -386,7 +471,7 @@ func startPushSlotHolderSubprocess(t *testing.T, runtimeDir string) func() {
 	done := make(chan error, 1)
 	go func() {
 		runErr := util.RunCommandPassthrough(ctx, "", "env", nil, readyW, &stderr,
-			holdPushSlotEnv+"=1", pushSlotTestBaseEnv+"="+runtimeDir, self, "-test.run=^TestPushSlotSubprocessHolder$", "-test.count=1")
+			holdPushSlotEnv+"=1", childPushSlotBaseEnv+"="+runtimeDir, self, "-test.run=^TestPushSlotSubprocessHolder$", "-test.count=1")
 		done <- errors.Join(runErr, readyW.Close())
 	}()
 	var ack [1]byte
@@ -411,6 +496,11 @@ func TestPushSlotSubprocessHolder(t *testing.T) {
 	if os.Getenv(holdPushSlotEnv) != "1" {
 		return
 	}
+	base := os.Getenv(childPushSlotBaseEnv)
+	if base == "" {
+		t.Fatal("missing shared push slot fixture directory")
+	}
+	t.Setenv(pushSlotTestBaseEnv, base)
 	release, err := WaitPushSlot(context.Background(), time.Hour, time.Second, io.Discard)
 	if err != nil {
 		t.Fatalf("holder: %v", err)
@@ -429,7 +519,7 @@ func TestPushSlotSubprocessHolder(t *testing.T) {
 // TestPushSlot_Boundary_LeaseDirMatchesLayout proves push slot uses the uid-scoped lease tree.
 func TestPushSlot_Boundary_LeaseDirMatchesLayout(t *testing.T) {
 	runtimeDir := pushSlotTestDir(t)
-	want := filepath.Join(runtimeDir, executorLeasesDir, PushSlotLeaseResource)
+	want := filepath.Join(runtimeDir, pushSlotQueueDir)
 	got, err := pushSlotLeaseDir()
 	if err != nil || got != want {
 		t.Fatalf("push slot dir = %q, want %q (%v)", got, want, err)

@@ -587,16 +587,13 @@ markers is migrated without `--force`, keeping its checkpoint jobs.
 the line against a stub reuse, and `TestReuseLintCommand_Negative_UnlabelledFileFailsTheJob`
 against the installed one.
 
-The pre-push `gate` job runs the full gate inside `praetorctl admit --class push --local`
-(`prePushGateArgs` in `internal/adopt/hooks.go`): one host push slot is taken first, then load
-admission uses host-capped memory and swap thresholds (`HostCappedPolicy` in
-`internal/admission/admission.go`, applied for `--class push` in `cmd/standardsctl/admit.go`)
-unless the line passes explicit `--min-available-gib`, `--min-swap-free-gib` or `--max-load`
-flags. After `--`, admit executes the same engine launcher the other hook jobs use
-(`sh .config/lefthook/engine.sh`, `engineLauncherFile`) with `gate run --path=.
---admit-unsupported`, matching the hosted pre-push gate in `.config/lefthook/scripts/checks.py`
-(`run_full_gate`). `gate verify` runs only after the push slot is released, under its own
-deadline. A root with neither `go.mod` nor `Cargo.lock`, such as a Meson, CMake, npm or Python
+The pre-push `gate` job runs `sh .config/lefthook/engine.sh gate run --path=. --admit-unsupported`.
+On Unix, when the resolved engine advertises `--class`, the launcher runs the gate through
+`admit --class push --local --wait 300s`. The slot and load admission each get five minutes.
+Local load admission uses host-capped defaults from `HostCappedPolicy` in
+`internal/admission/admission.go`. The resolved engine runs `gate run --path=. --admit-unsupported`
+directly on other platforms or when its version predates the class flag.
+A root with neither `go.mod` nor `Cargo.lock`, such as a Meson, CMake, npm or Python
 repository, gets no receipt, because the gate runs no toolchain for it: the job runs every other
 stage, names the languages it could not verify and admits the push instead of refusing every one.
 Where such a root's makefile declares `verify-all`, the job runs it first, and a failing
@@ -1051,16 +1048,16 @@ checks tracked Go package directories; a file in or below one conservatively
 selects Go tests, covering testdata and embedded inputs of any extension. Unknown
 file kinds still fail closed.
 
-The hook bounds the `gate run` and `gate verify` subprocesses by the gate's own run deadline,
-not by a figure of its own. `run_full_gate` in
+The canonical hook budgets for admission and the gate's full runtime. `run_full_gate` in
 [`checks.py`](https://github.com/cordanaLLM/praetor/blob/main/.config/lefthook/scripts/checks.py) first runs `gate deadline --json`, which
 resolves `PRAETOR_TEST_STAGE_TIMEOUT` through the pipeline's parser: the race-stage bound, clamped
 to its 30-minute ceiling, once per test suite the repository holds, plus the allowance for the
 other stages. It runs from the repository root, so a root holding both a `go.mod` and a
-`Cargo.lock` gets the two-suite deadline `gate run` grants itself. It then adds a two-minute
-launch margin (`GATE_LAUNCH_MARGIN`) for `go run` to rebuild the CLI. With the variable unset that
-is 8 + 2 = 10 minutes; at the ceiling it is 37 minutes, so a raised bound takes effect on a push
-(#314). A deadline report the hook cannot use fails the
+`Cargo.lock` gets the two-suite deadline `gate run` grants itself. It adds a two-minute
+launch margin (`GATE_LAUNCH_MARGIN`) for `go run` to rebuild the CLI. On Unix the outer
+`gate run` timeout also reserves five minutes for the push slot and five for load admission.
+`gate verify` runs separately after slot release with the gate deadline and launch margin.
+A deadline report the hook cannot use fails the
 push rather than running the gate under a guessed bound. The deadline itself is described in
 [adoption verification](adoption-verification.md#the-whole-runs-deadline).
 

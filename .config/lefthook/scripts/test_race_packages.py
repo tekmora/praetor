@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -53,9 +54,14 @@ class RacePackages(unittest.TestCase):
                 patch("checks.golangci_lint_command", return_value=["lint"]), \
                 patch("checks.run", side_effect=process):
             self.assertTrue(checks.source_checks(root, names))
-        admitted = next(cmd for cmd in calls if cmd[3:5] == ["admit", "--class"])
-        self.assertEqual(admitted[3:10], ["admit", "--class", "push", "--local", "--label", "push-gate", "--"])
-        launched = admitted[10:]
+        if sys.platform.startswith(checks.PUSH_SLOT_PLATFORMS):
+            admitted = next(cmd for cmd in calls if cmd[3:5] == ["admit", "--class"])
+            self.assertEqual(admitted[3:14], ["admit", "--class", "push", "--local", "--label", "push-gate",
+                                             "--wait", f"{checks.PUSH_ADMISSION_WAIT_SECONDS}s", "--timeout",
+                                             f"{1500 + checks.GATE_LAUNCH_MARGIN}s", "--"])
+            launched = admitted[14:]
+        else:
+            launched = next(cmd for cmd in calls if cmd[3:5] == ["gate", "run"])
         self.assertEqual(launched[3:5], ["gate", "run"])
         self.assertIn("--race-packages=" + expected, launched)
         verify = next(cmd for cmd in calls if cmd[3:5] == ["gate", "verify"])

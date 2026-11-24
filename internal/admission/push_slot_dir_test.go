@@ -7,9 +7,14 @@
 package admission
 
 import (
+	"errors"
+	"io"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPushSlotEnvTestBase proves the test runtime override applies only in a test binary.
@@ -31,6 +36,75 @@ func TestPushSlotEnvTestBase(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReview2044RuntimeRootTransitionDoesNotForkSlot checks that login cannot create a second live holder.
+func TestReview2044RuntimeRootTransitionDoesNotForkSlot(t *testing.T) {
+	hostRoot := t.TempDir()
+	uid := os.Getuid()
+	makePushSlotFixtureDir(t, filepath.Join(hostRoot, systemTempRoot))
+	selectFixturePushSlotBase(t, hostRoot, uid)
+	release, err := WaitPushSlot(t.Context(), time.Second, time.Millisecond, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := release(); err != nil {
+			t.Error(err)
+		}
+	})
+	makePushSlotFixtureDir(t, filepath.Join(hostRoot, "run", "user", strconv.Itoa(uid)))
+	selectFixturePushSlotBase(t, hostRoot, uid)
+	second, err := WaitPushSlot(t.Context(), 25*time.Millisecond, time.Millisecond, io.Discard)
+	if second != nil {
+		t.Error("runtime directory creation produced a second live holder")
+		if err := second(); err != nil {
+			t.Error(err)
+		}
+	}
+	if !errors.Is(err, ErrPushSlotHeld) {
+		t.Fatalf("contending admission: %v", err)
+	}
+}
+
+// TestPushSlotRuntimeRefusesSymlink checks that an unusable canonical root blocks admission.
+func TestPushSlotRuntimeRefusesSymlink(t *testing.T) {
+	hostRoot := t.TempDir()
+	uid := os.Getuid()
+	makePushSlotFixtureDir(t, filepath.Join(hostRoot, systemTempRoot))
+	makePushSlotFixtureDir(t, filepath.Join(hostRoot, "run", "user", strconv.Itoa(uid)))
+	dir, err := hostPushSlotRuntimeBaseAt(hostRoot, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := hostPushSlotRuntimeBaseAt(hostRoot, uid); got != "" || err == nil {
+		t.Fatalf("unusable root admitted: %q, %v", got, err)
+	}
+}
+
+// makePushSlotFixtureDir creates a private directory below the simulated host root.
+func makePushSlotFixtureDir(t *testing.T, path string) {
+	t.Helper()
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- private fixture directory needs owner search
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// selectFixturePushSlotBase resolves the host root and points the test binary at that result.
+func selectFixturePushSlotBase(t *testing.T, root string, uid int) {
+	t.Helper()
+	dir, err := hostPushSlotRuntimeBaseAt(root, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pushSlotTestBaseEnv, dir)
 }
 
 // TestPushSlotEnvTestBase_Negative_DroppingInTest proves dropping the inTest guard would honor the env outside tests.

@@ -6,6 +6,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +15,24 @@ import (
 	"github.com/cordanaLLM/praetor/internal/admission"
 	"github.com/cordanaLLM/praetor/internal/sentinel"
 )
+
+// TestReview2044RemotePolicyUsesExecutorHeadroom keeps a nearly full remote swap pool held.
+func TestReview2044RemotePolicyUsesExecutorHeadroom(t *testing.T) {
+	admitStubTools(t)
+	admission.PushSlotTestBase(t)
+	withAdmitHostStatsReader(t, func() (sentinel.HostStats, error) {
+		return sentinel.HostStats{RAMTotalBytes: 8 * gib, SwapMeasured: true}, nil
+	})
+	t.Setenv(admitExecutorEnv, "")
+	admitFixture{root: t.TempDir()}.inventory(t, "adequate")
+	bin := filepath.SplitList(os.Getenv("PATH"))[0]
+	writeAdmitExecutable(t, bin, "ssh", strings.Replace(admitFakeSSH, "SwapFree: 33554432", "SwapFree: 1048576", 1))
+	writeAdmitExecutable(t, bin, "git", "#!/bin/sh\necho 'executor admitted unexpectedly' >&2\nexit 9\n")
+	_, log, code := runAdmitCaptured(t, "--class", "push", "--wait", "250ms", "--poll", "100ms", "--", "true")
+	if code != 75 || !strings.Contains(log, "adequate held: swap free 1.0 GiB < 15.0 GiB") {
+		t.Fatalf("admission with low executor swap: exit %d, %s", code, log)
+	}
+}
 
 const gib = 1 << 30
 

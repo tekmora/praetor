@@ -41,6 +41,8 @@ from checks import (
     FIXTURE_DIRECTORY,
     GATE_LAUNCH_MARGIN,
     GATE_QUERY_TIMEOUT,
+    PUSH_ADMISSION_WAIT_SECONDS,
+    PUSH_SLOT_PLATFORMS,
     SEMGREP_LANGUAGE_EXTENSIONS,
     SEMGREP_SUFFIXES,
     audit_scope,
@@ -3241,9 +3243,11 @@ class ScopeAndGuard(unittest.TestCase):
         with mock.patch("checks.run", side_effect=process) as spawned:
             self.assertTrue(run_full_gate(Path(".")))
         calls = [(call.args[0][3:5], call.kwargs["timeout"]) for call in spawned.call_args_list]
+        timeout = 2100 + GATE_LAUNCH_MARGIN
+        execution = (["admit", "--class"], timeout + 2 * PUSH_ADMISSION_WAIT_SECONDS) \
+            if sys.platform.startswith(PUSH_SLOT_PLATFORMS) else (["gate", "run"], timeout)
         self.assertEqual(calls, [(["gate", "deadline"], GATE_QUERY_TIMEOUT),
-                                 (["admit", "--class"], 2100 + GATE_LAUNCH_MARGIN),
-                                 (["gate", "verify"], 2100 + GATE_LAUNCH_MARGIN)])
+                                 execution, (["gate", "verify"], timeout)])
 
     def test_full_gate_refuses_an_unusable_deadline(self):
         # Negative: without a usable deadline the gate does not run under a guessed bound.
@@ -4240,12 +4244,15 @@ class ScopeAndGuard(unittest.TestCase):
                 return b'{"timeout_seconds": 480}' if argv[3:5] == ["gate", "deadline"] else b""
             with mock.patch("checks.parallel"), mock.patch("checks.run", side_effect=process):
                 self.assertTrue(source_checks(root, [".standards.yaml"], base=base))
+                cli = ["go", "run", "./cmd/standardsctl"]
+                gate = [*cli, "gate", "run", "--path=.", "--race-packages=none"]
+                if sys.platform.startswith(PUSH_SLOT_PLATFORMS):
+                    gate = [*cli, "admit", "--class", "push", "--local", "--label", "push-gate",
+                            "--wait", f"{PUSH_ADMISSION_WAIT_SECONDS}s", "--timeout", f"{480 + GATE_LAUNCH_MARGIN}s",
+                            "--", *gate]
                 self.assertEqual(calls, [[toolchain.make_program(), "--no-print-directory", "state-audit"],
-                                        ["go", "run", "./cmd/standardsctl", "gate", "deadline", "--json"],
-                                        ["go", "run", "./cmd/standardsctl", "admit", "--class", "push", "--local",
-                                         "--label", "push-gate", "--",
-                                         "go", "run", "./cmd/standardsctl", "gate", "run", "--path=.", "--race-packages=none"],
-                                        ["go", "run", "./cmd/standardsctl", "gate", "verify", "--path=."]])
+                                         [*cli, "gate", "deadline", "--json"],
+                                         gate, [*cli, "gate", "verify", "--path=."]])
             def reject_pin(argv, **kwargs):
                 if argv[:5] == ["go", "run", "./cmd/standardsctl", "gate", "verify"]:
                     raise HookError("pin mismatch")

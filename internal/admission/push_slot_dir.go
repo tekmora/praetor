@@ -11,15 +11,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 )
 
-// systemTempRoot is the host temporary directory root for push-slot fallbacks.
+// systemTempRoot is the fixed temporary directory for the per-UID push slot.
 // Push slot resolution never uses os.TempDir() or TMPDIR so callers cannot fork queues.
 const systemTempRoot = "/tmp"
+
+// pushSlotQueueDir is the private lease directory inside the per-UID push-slot base.
+const pushSlotQueueDir = "queue"
 
 // pushSlotTestBaseEnv names the optional push-slot runtime override for test binaries only.
 const pushSlotTestBaseEnv = "PRAETOR_TEST_PUSH_SLOT_BASE"
@@ -83,10 +85,8 @@ func ensurePrivateValidatedRuntimeDir(base pushSlotValidatedBase, uid int) error
 
 // pushSlotRuntimeBase returns the per-user runtime directory for the host push slot.
 //
-// Resolution is fixed per uid and ignores XDG_RUNTIME_DIR and TMPDIR: when /run/user/<uid>
-// exists, is a directory, and is owned by the uid, that path is used; otherwise
-// /tmp/praetor-admit-<uid> is created with mode 0700. Executor lease directories keep using
-// leaseResourceDir (which may follow XDG_RUNTIME_DIR).
+// The host queue always uses /tmp/praetor-push-slot-<uid>, regardless of XDG_RUNTIME_DIR,
+// TMPDIR or the existence of /run/user/<uid>.
 func pushSlotRuntimeBase() (string, error) {
 	if base := pushSlotEnvTestBase(testing.Testing(), os.Getenv(pushSlotTestBaseEnv)); base != "" {
 		validated, err := validatePushSlotTestBase(base)
@@ -99,32 +99,26 @@ func pushSlotRuntimeBase() (string, error) {
 		}
 		return validated.path(), nil
 	}
-	return hostPushSlotRuntimeBase(os.Getuid())
+	return hostPushSlotRuntimeBaseAt("/", os.Getuid())
 }
 
-// hostPushSlotRuntimeBase is the production per-uid push-slot runtime root (no test override).
-func hostPushSlotRuntimeBase(uid int) (string, error) {
-	runUser := filepath.Join("/run", "user", strconv.Itoa(uid))
-	if err := ensurePrivateRuntimeDir(runUser, uid); err == nil {
-		return runUser, nil
-	}
-	fallback := filepath.Join(systemTempRoot, fmt.Sprintf("praetor-admit-%d", uid))
-	if err := ensurePrivateRuntimeDir(fallback, uid); err != nil {
+// hostPushSlotRuntimeBaseAt resolves host paths below root, which tests redirect to a private fixture.
+func hostPushSlotRuntimeBaseAt(root string, uid int) (string, error) {
+	dir := filepath.Join(root, systemTempRoot, fmt.Sprintf("praetor-push-slot-%d", uid))
+	if err := ensurePrivateRuntimeDir(dir, uid); err != nil {
 		return "", fmt.Errorf("push slot: runtime base: %w", err)
 	}
-	return fallback, nil
+	return dir, nil
 }
 
-// pushSlotLeaseDir returns <runtime>/praetor-admit-leases/host-push for the push slot queue.
+// pushSlotLeaseDir returns the queue in the push slot's own namespace.
 func pushSlotLeaseDir() (string, error) {
 	base, err := pushSlotRuntimeBase()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(base, executorLeasesDir, PushSlotLeaseResource)
-	// #nosec G703 -- PushSlotLeaseResource matches validAdmissionLeaseName under the uid runtime base.
-	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- lease directory needs owner search; 0o700 is least privilege
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir := filepath.Join(base, pushSlotQueueDir)
+	if err := ensurePrivateRuntimeDir(dir, os.Getuid()); err != nil {
 		return "", fmt.Errorf("push slot: lease directory: %w", err)
 	}
 	return dir, nil

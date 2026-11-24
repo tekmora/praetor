@@ -52,6 +52,11 @@ SEMGREP_SUFFIXES = frozenset().union(*SEMGREP_LANGUAGE_EXTENSIONS.values())
 # deadline itself; this margin only keeps the hook from killing it before it can report
 # which deadline fired.
 GATE_LAUNCH_MARGIN = 120
+# Admit gives the slot and load waits this budget independently.
+PUSH_ADMISSION_WAIT_SECONDS = 300
+# The engine builds its slot implementation only on Go's Unix targets.
+PUSH_SLOT_PLATFORMS = ("aix", "android", "darwin", "dragonfly", "freebsd", "gnu",
+                       "illumos", "ios", "linux", "netbsd", "openbsd", "sunos")
 # Bounds `gate deadline --json`: a build of the CLI and one environment read.
 GATE_QUERY_TIMEOUT = 300
 # The repository's own CLI, built from the checked snapshot.
@@ -678,15 +683,20 @@ def gate_timeout(report):
 
 
 def run_full_gate(directory, packages=None):
+    """Run the gate with the available push admission, then verify its receipt separately."""
     command = [*CLI, "gate"]
     report = run([*command, "deadline", "--json"], cwd=directory, env=clean_env(),
                  timeout=GATE_QUERY_TIMEOUT)
     timeout = gate_timeout(report)
     scope = [] if packages is None else ["--race-packages=" + (",".join(packages) or "none")]
-    # The gate run holds the one host push slot (praetorctl admit --class push); verify only
-    # reads the signed receipt, so it runs after the slot is released, under its own deadline.
-    run([*CLI, "admit", "--class", "push", "--local", "--label", "push-gate", "--",
-         *command, "run", "--path=.", *scope], cwd=directory, env=clean_env(), timeout=timeout, capture=False)
+    gate = [*command, "run", "--path=.", *scope]
+    run_timeout = timeout
+    if sys.platform.startswith(PUSH_SLOT_PLATFORMS):
+        wait = PUSH_ADMISSION_WAIT_SECONDS
+        gate = [*CLI, "admit", "--class", "push", "--local", "--label", "push-gate",
+                "--wait", f"{wait}s", "--timeout", f"{timeout}s", "--", *gate]
+        run_timeout += 2 * wait
+    run(gate, cwd=directory, env=clean_env(), timeout=run_timeout, capture=False)
     run([*command, "verify", "--path=."], cwd=directory, env=clean_env(), timeout=timeout, capture=False)
     return True
 

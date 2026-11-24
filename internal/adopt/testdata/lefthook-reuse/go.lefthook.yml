@@ -8,6 +8,7 @@
 # (go.mod) or Cargo (Cargo.lock) toolchain stage ran. A root with neither
 # gets no receipt: the job names the languages it could not verify and
 # admits the push; a root with either fails when its stages did not run.
+# The launcher uses push admission when the platform and engine support it.
 # REUSE.toml or LICENSES/ was present at adoption: the reuse-lint job runs
 # reuse lint at the release line fsfe/reuse-action@v6 runs in CI.
 # It skips where reuse is not installed and fails on another reuse major.
@@ -78,7 +79,4 @@ pre-push:
     audit:
       run: sh .config/lefthook/engine.sh audit
     gate:
-      run: >-
-        sh .config/lefthook/engine.sh admit --class push --local --label
-        push-gate -- sh .config/lefthook/engine.sh gate run --path=.
-        --admit-unsupported
+      run: sh .config/lefthook/engine.sh gate run --path=. --admit-unsupported

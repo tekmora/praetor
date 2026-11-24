@@ -7,12 +7,67 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/gating"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
+
+// TestReview2044HookDeadlineReservesGateRuntime executes the hook budget against a stand-in gate.
+func TestReview2044HookDeadlineReservesGateRuntime(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required to exercise the hook budget")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	dir := filepath.Join("..", "..", ".config", "lefthook", "scripts")
+	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", hookDeadlineFixture)
+	if err != nil {
+		t.Fatalf("stubbed hook budget: %v\n%s\n%s", err, out.Stdout, out.Stderr)
+	}
+}
+
+// hookDeadlineFixture spends time in both admission and gate work, using only stand-in processes.
+const hookDeadlineFixture = `
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+import checks
+
+calls = []
+
+def run(argv, *, timeout, **kwargs):
+    if argv[3:5] == ["gate", "deadline"]:
+        return b'{"timeout_seconds": 1}'
+    calls.append((argv[3:5], timeout))
+    if argv[3] == "gate":
+        return b""
+    child = "import time; time.sleep(0.65); time.sleep(0.65); print('gate complete')"
+    result = subprocess.run([sys.executable, "-B", "-c", child],
+                            timeout=timeout, capture_output=True, check=True)
+    assert result.stdout.strip() == b"gate complete", result.stdout
+    assert argv[argv.index("--wait") + 1] == "1s", argv
+    assert argv[argv.index("--timeout") + 1] == "1.1s", argv
+    return b""
+
+with patch.object(checks.sys, "platform", "linux"), \
+     patch.object(checks, "GATE_LAUNCH_MARGIN", 0.1), \
+     patch.object(checks, "PUSH_ADMISSION_WAIT_SECONDS", 1, create=True), \
+     patch.object(checks, "run", run):
+    assert checks.run_full_gate(Path("."))
+assert calls == [(["admit", "--class"], 3.1), (["gate", "verify"], 1.1)], calls
+
+calls.clear()
+with patch.object(checks.sys, "platform", "win32"), patch.object(checks, "run", run):
+    assert checks.run_full_gate(Path("."))
+assert calls == [(["gate", "run"], 121), (["gate", "verify"], 121)], calls
+`
 
 // pipelineCall is what a stubbed gating pipeline was handed.
 type pipelineCall struct {
