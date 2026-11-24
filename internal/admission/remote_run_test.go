@@ -91,6 +91,19 @@ kill -TERM "$parent"
 	}
 }
 
+// skipUnlessWorkspaceHost skips the full wrapper fixture off its executor platform. The wrapper targets
+// Linux executors with GNU coreutils and Bash (docs/guides/admission.md); BSD head refuses the zero-byte
+// bundle read (`head -c 0`), so the fixture runs on Linux only, and it needs sh on the PATH.
+func skipUnlessWorkspaceHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("workspace wrapper targets Linux executors with GNU coreutils, not %s", runtime.GOOS)
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("workspace wrapper requires sh: %v", err)
+	}
+}
+
 // replaceWorkspaceLine inserts fixture behavior at a specific point in the remote wrapper.
 func replaceWorkspaceLine(t *testing.T, script, original, replacement string) string {
 	t.Helper()
@@ -103,14 +116,7 @@ func replaceWorkspaceLine(t *testing.T, script, original, replacement string) st
 // runWorkspaceFixture runs the real workspace wrapper with stub Git and a live stdin lease.
 func runWorkspaceFixture(t *testing.T, script, step string) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		// The wrapper targets Linux executors with GNU coreutils and Bash (docs/guides/admission.md); BSD head
-		// refuses the zero-byte bundle read (`head -c 0`), so the full wrapper fixture runs on Linux only.
-		t.Skipf("workspace wrapper targets Linux executors with GNU coreutils, not %s", runtime.GOOS)
-	}
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skipf("workspace wrapper requires sh: %v", err)
-	}
+	skipUnlessWorkspaceHost(t)
 	root, fixture := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(fixture, "memory.max"), []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
