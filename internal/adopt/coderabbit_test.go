@@ -406,7 +406,8 @@ func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 				{"null", "instructions: null", "instructions must be a string"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					assertAdoptCodeRabbitValidation(t, mode.dryRun, !mode.dryRun && tc.name == "custom", tc.field, tc.wantError)
+					whole := (!mode.dryRun && tc.name == "custom") || (mode.dryRun && tc.name == "over limit")
+					assertAdoptCodeRabbitValidation(t, mode.dryRun, whole, tc.field, tc.wantError)
 				})
 			}
 		})
@@ -430,8 +431,8 @@ func assertAdoptCodeRabbitValidation(t *testing.T, dryRun, whole bool, field, wa
 	initial := codeRabbitUserPolicy(field)
 	mustWrite(t, file, initial)
 	before := snapshotTree(t, repo)
-	// One fixture runs a whole adoption; every other one runs the coderabbit step alone on
-	// the prepared session (#1381).
+	// Representative fixtures (valid apply, invalid dry-run) run a whole adoption; every other
+	// one runs the coderabbit step alone on the prepared session (#1381).
 	report, err := adoptOrStep(t, AdoptOptions{Path: repo, DryRun: dryRun,
 		LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true}, whole, runCodeRabbitStep)
 	if wantError == "" {

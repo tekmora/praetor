@@ -103,7 +103,7 @@ func fileTimeouts(file workflowFile) ([]string, error) {
 	if file.Name == "Makefile" {
 		return makefileTimeouts(string(file.Data))
 	}
-	return longTimeouts(file.Name, string(file.Data), timeoutInputDefaults(file.Data)), nil
+	return workflowTimeouts(file.Name, file.Data), nil
 }
 
 // physicalLines counts the lines of text; a final newline ends the last line instead of starting
@@ -266,6 +266,35 @@ func judgeTimeout(where, raw string, defaults map[string]exprValue) string {
 		return fmt.Sprintf("[FAIL] %s: %s sets %s, above the %dm bound", testTimeoutGate, where, shown, testTimeoutBoundMinutes)
 	}
 	return ""
+}
+
+// workflowTimeouts reads a workflow document's run: steps through ghworkflow.RunSteps,
+// auditing each decoded script for long or unreadable timeouts.
+func workflowTimeouts(rel string, data []byte) []string {
+	if !goTestCommand.MatchString(string(data)) {
+		return nil
+	}
+	spec, err := ghworkflow.Parse(data)
+	if err != nil {
+		return longTimeouts(rel, string(data), nil)
+	}
+	defaults := timeoutInputDefaults(data)
+	steps, err := ghworkflow.RunSteps(&spec)
+	if err != nil {
+		return longTimeouts(rel, string(data), defaults)
+	}
+	var out []string
+	for _, run := range steps {
+		lines := strings.Split(run.Step.Run, "\n")
+		for k := 0; k < len(lines) && k < maxTimeoutWorkflowLines; k++ {
+			lineNum := run.Step.RunLine
+			if run.Step.RunLiteral {
+				lineNum = run.Step.RunLine + 1 + k
+			}
+			out = append(out, checkGoTestTimeouts(rel, max(lineNum-1, 0), lines[k], defaults)...)
+		}
+	}
+	return out
 }
 
 // longTimeouts returns one line per go test -timeout above the bound or unreadable in rel; a job's

@@ -465,6 +465,21 @@ var makefileGNUContinuationCases = []struct {
 		wantErr: "Makefile:2 sets 45m",
 	},
 	{
+		name:    "recipe continuation line without tab starting with hash",
+		body:    "test:\n\t@echo a\\\n#b; go test -timeout 45m ./pkg/\n",
+		wantErr: "Makefile:2 sets 45m",
+	},
+	{
+		name:     "recipe comment after space before continuation backslash without tab",
+		body:     "test:\n\techo a \\\n#b; go test -timeout 45m ./pkg/\n",
+		wantPass: true,
+	},
+	{
+		name:     "top-level tab-indented continued comment before rule",
+		body:     "\t# comment \\\n\tgo test -timeout 45m ./pkg/\ntest:\n\t@true\n",
+		wantPass: true,
+	},
+	{
 		name:     "recipe shell comment on continued hash line ends command",
 		body:     "test:\n\techo a\\\n\t#x #c\\\n\t#b; go test -timeout 45m ./pkg/\n",
 		wantPass: true,
@@ -732,6 +747,26 @@ var makefileShellReaderCases = []struct {
 		want: "Makefile:1 sets 45m",
 	},
 	{
+		name: "recipe inline rule continuation with hash",
+		body: "test: ; @echo a\\\n#b; go test -timeout 45m ./pkg/\n",
+		want: "Makefile:1 sets 45m",
+	},
+	{
+		name: "recipe continuation empty payload preserves word across tab",
+		body: "test:\n\t@echo a\\\n\t\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "recipe substitution continuation preserves word across tab",
+		body: "test:\n\t@echo $$(printf '%s' \\\n\ta)\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "recipe quoted paren substitution preserves word across tab",
+		body: "test:\n\t@echo $$(printf '%s' ')')\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
 		name: "tab alone does not open a recipe",
 		body: "\tgo test -timeout 99m ./pkg/\n",
 	},
@@ -809,5 +844,25 @@ func TestAuditTestTimeouts_RepositoryMakefile(t *testing.T) {
 	}
 	if strings.Count(err.Error(), "Makefile:") != 1 {
 		t.Fatalf("forked Makefile audit: err = %v; want exactly one Makefile finding", err)
+	}
+}
+
+// Negative: raw YAML physical line starting with # inside a quoted run scalar decodes to shell code.
+func TestAuditTestTimeouts_Negative_YAMLQuotedRunContinuationWithHash(t *testing.T) {
+	wf := "name: test\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" +
+		"      - run: \"echo a\\\n    #b; go test -timeout 45m ./pkg/\"\n"
+	_, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
+	if err == nil || !strings.Contains(err.Error(), ".github/workflows/ci.yml:7 sets 45m") {
+		t.Fatalf("yaml quoted run: err = %v; want .github/workflows/ci.yml:7 sets 45m", err)
+	}
+}
+
+// Boundary: raw YAML physical line with hash inside a within-bound quoted run scalar passes.
+func TestAuditTestTimeouts_Boundary_YAMLQuotedRunContinuationWithHashPasses(t *testing.T) {
+	wf := "name: test\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" +
+		"      - run: \"echo a\\\n    #b; go test -timeout 30m ./pkg/\"\n"
+	out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
+	if err != nil || !strings.Contains(out, "[PASS]") {
+		t.Fatalf("yaml quoted run within bound: %q, %v; want [PASS]", out, err)
 	}
 }
