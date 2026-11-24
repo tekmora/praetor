@@ -38,11 +38,9 @@ const (
 	jobTimeoutFail              = "[FAIL]"
 )
 
-// JobTimeoutFailFrom ends the warn-only rollout of the job-timeout gate: findings warn before
-// this day and fail the audit from it on. The operator chose a dated 14-day warn period from
-// 2026-11-06 (decision engine-job-timeouts-fail-mode), so adopters see every finding before it
-// blocks.
-var JobTimeoutFailFrom = time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+// JobTimeoutFailFrom ends the job-timeout gate's 14-day warn period from its landing day,
+// 2026-11-24 (decision engine-job-timeouts-fail-mode). Findings fail the audit from this day on.
+var JobTimeoutFailFrom = time.Date(2026, 12, 8, 0, 0, 0, 0, time.UTC)
 
 // JobTimeoutOptions is what AuditJobTimeouts reads: the repository root, the manifest's
 // exceptions list (the check reads the entries of config.ExceptionRuleJobTimeout), the day
@@ -290,8 +288,9 @@ func applyExceptions(findings []jobTimeoutFinding, staticOnly []string, entries 
 			if entries[i].Fingerprint != "" {
 				why = "the workflow it names has none of kind " + entries[i].Fingerprint
 			}
-			lines = append(lines, fmt.Sprintf("%s %s: the exceptions entry (rule %s, %s) excuses no finding, because %s; remove it.",
-				severity, jobTimeoutGate, entries[i].Rule, entries[i].Target(), why))
+			detail := fmt.Sprintf("the exceptions entry (rule %s, %s) excuses no finding, because %s; remove it.",
+				entries[i].Rule, entries[i].Target(), why)
+			lines = append(lines, formatJobTimeoutFindingLine(severity, detail))
 			count++
 		}
 	}
@@ -342,8 +341,8 @@ func judgeWorkflowFindings(byWorkflow map[string][]jobTimeoutFinding, wfOrder []
 				excused[live] = append(excused[live], f)
 				continue
 			}
-			lines = append(lines, fmt.Sprintf("%s %s: %s:%d job %s: %s",
-				severity, jobTimeoutGate, f.Workflow, f.Line, auditJobID(f.JobID), f.Reason))
+			detail := fmt.Sprintf("%s:%d job %s: %s", f.Workflow, f.Line, auditJobID(f.JobID), f.Reason)
+			lines = append(lines, formatJobTimeoutFindingLine(severity, detail))
 			count++
 		}
 		for _, live := range order {
@@ -352,6 +351,16 @@ func judgeWorkflowFindings(byWorkflow map[string][]jobTimeoutFinding, wfOrder []
 		}
 	}
 	return lines, count
+}
+
+// formatJobTimeoutFindingLine renders one finding line at severity; a [WARN] line names the day the
+// gate starts to fail, so an adopter reading a warning knows its deadline.
+func formatJobTimeoutFindingLine(severity, detail string) string {
+	line := severity + " " + jobTimeoutGate + ": " + detail
+	if severity == jobTimeoutWarn {
+		line += " (fails the audit from " + JobTimeoutFailFrom.Format(time.DateOnly) + ")"
+	}
+	return line
 }
 
 // staticOnlyExceptionLines marks static-ceiling entries used when measurements pass jobs

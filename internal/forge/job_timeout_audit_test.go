@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,8 @@ func TestJobTimeout_Finite_MissingReusableExpression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "[WARN] job-timeout: .github/workflows/ci.yml:3 job missing: declares no timeout-minutes") {
+	wantWarn := "[WARN] job-timeout: .github/workflows/ci.yml:3 job missing: declares no timeout-minutes" + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(out, "\n"), wantWarn) {
 		t.Errorf("missing timeout-minutes must warn; output:\n%s", out)
 	}
 	if strings.Contains(out, "job reuse") {
@@ -205,7 +207,7 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 	root := t.TempDir()
 	writeWorkflow(t, root, "fail.yml", "on: push\njobs:\n  j:\n    timeout-minutes: 300\n    steps:\n      - run: echo 1\n")
 	writeWorkflow(t, root, "clean.yml", "on: push\njobs:\n  j:\n    timeout-minutes: 30\n    steps:\n      - run: echo 2\n")
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	today := beforeFailFrom()
 	liveEx := []config.Exception{{
 		Rule: config.ExceptionRuleJobTimeout, Path: ".github/workflows/fail.yml", Reason: "waived", Category: "A", Expires: "2026-12-31",
 	}}
@@ -228,7 +230,8 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(outExp, "[WARN] job-timeout: .github/workflows/fail.yml:4 job j: timeout-minutes 300 is above 120m bound") {
+	wantFinding := "[WARN] job-timeout: .github/workflows/fail.yml:4 job j: timeout-minutes 300 is above 120m bound" + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(outExp, "\n"), wantFinding) {
 		t.Errorf("expired exception must not silence finding; got:\n%s", outExp)
 	}
 	staleEx := []config.Exception{{
@@ -240,7 +243,8 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(outStale, "[WARN] job-timeout: the exceptions entry (rule job-timeout, .github/workflows/clean.yml) excuses no finding") {
+	wantStale := "[WARN] " + jobTimeoutUnusedException + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(outStale, "\n"), wantStale) {
 		t.Errorf("stale exception must warn; got:\n%s", outStale)
 	}
 }
@@ -249,6 +253,15 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 // when the wall clock passes JobTimeoutFailFrom.
 func beforeFailFrom() time.Time {
 	return JobTimeoutFailFrom.AddDate(0, 0, -1)
+}
+
+const (
+	jobTimeoutMissingFinding  = "job-timeout: .github/workflows/ci.yml:3 job build: declares no timeout-minutes"
+	jobTimeoutUnusedException = "job-timeout: the exceptions entry (rule job-timeout, .github/workflows/clean.yml) excuses no finding, because the workflow it names has none; remove it."
+)
+
+func jobTimeoutWarningSuffix() string {
+	return " (fails the audit from " + JobTimeoutFailFrom.Format(time.DateOnly) + ")"
 }
 
 // The dated switch: a workflow job without timeout-minutes warns the day before
@@ -261,11 +274,12 @@ func TestJobTimeout_FailFrom_SwitchBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the day before the switch must warn, not fail: %v", err)
 	}
-	if !strings.Contains(before, "[WARN] job-timeout: .github/workflows/ci.yml:3 job build: declares no timeout-minutes") ||
-		!strings.Contains(before, "[INFO] job-timeout: findings warn until 2026-11-20 and fail the audit from that day on") {
+	wantWarn := "[WARN] " + jobTimeoutMissingFinding + jobTimeoutWarningSuffix()
+	wantInfo := "[INFO] job-timeout: findings warn until " + JobTimeoutFailFrom.Format(time.DateOnly) + " and fail the audit from that day on"
+	if !strings.HasSuffix(before, wantWarn+"\n"+wantInfo+"\n[PASS] job-timeout") {
 		t.Errorf("warn-period output must name the finding and the switch day; got:\n%s", before)
 	}
-	for _, day := range []time.Time{JobTimeoutFailFrom, JobTimeoutFailFrom.AddDate(0, 0, 30)} {
+	for _, day := range [...]time.Time{JobTimeoutFailFrom, JobTimeoutFailFrom.AddDate(0, 0, 1)} {
 		assertJobTimeoutFailsOnDay(t, root, day)
 	}
 	clean := t.TempDir()
@@ -279,7 +293,7 @@ func TestJobTimeout_FailFrom_SwitchBoundary(t *testing.T) {
 func assertJobTimeoutFailsOnDay(t *testing.T, root string, day time.Time) {
 	t.Helper()
 	_, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{Root: root, Today: day, OfflineReason: "--offline"})
-	if err == nil || !strings.Contains(err.Error(), "[FAIL] job-timeout: .github/workflows/ci.yml:3 job build: declares no timeout-minutes") {
+	if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), "[FAIL] "+jobTimeoutMissingFinding) {
 		t.Errorf("on %s a job without timeout-minutes must fail the gate; got %v", day.Format(time.DateOnly), err)
 	}
 	if err != nil && !strings.Contains(err.Error(), "[INFO] job-timeout: static path only (--offline)") {
@@ -595,10 +609,9 @@ func assertExcusedJobTimeoutPass(t *testing.T, name, content string, reader Acti
 	t.Helper()
 	root := t.TempDir()
 	writeWorkflow(t, root, name, content)
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
 	opts := JobTimeoutOptions{
 		Root:          root,
-		Today:         today,
+		Today:         beforeFailFrom(),
 		Exceptions:    liveJobTimeoutException(".github/workflows/"+name, reason),
 		Reader:        reader,
 		OfflineReason: offlineReason,
@@ -656,12 +669,12 @@ func TestJobTimeout_ExcusedKind_StaticCeiling(t *testing.T) {
 	assertExcusedJobTimeoutPass(t, "static.yml", content, nil, "--offline", "waived", want)
 }
 
-// Negative: an unexcused workflow's [WARN] line carries no "excuses", and an expired exception keeps today's [WARN] lines.
+// An unexcused workflow keeps its [WARN] line when an expired exception names it.
 func TestJobTimeout_ExcusedKind_Negative_UnexcusedAndExpired(t *testing.T) {
 	root := t.TempDir()
 	content := "on: push\njobs:\n  gate:\n    name: Standards\n    timeout-minutes: 45\n    steps:\n      - run: echo gate\n"
 	writeWorkflow(t, root, "ci.yml", content)
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	today := beforeFailFrom()
 	reader := singleRunJobTimeoutReader("ci.yml", jobDurationRecord("Standards", 44.8))
 
 	outUnexcused, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
@@ -670,8 +683,8 @@ func TestJobTimeout_ExcusedKind_Negative_UnexcusedAndExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexcused AuditJobTimeouts failed: %v", err)
 	}
-	wantWarn := "[WARN] job-timeout: .github/workflows/ci.yml:5 job gate: timeout-minutes 45 is below 1.25 x measured duration 44.8m (cancel risk)"
-	if !strings.Contains(outUnexcused, wantWarn) || strings.Contains(outUnexcused, "excuses") {
+	wantWarn := "[WARN] job-timeout: .github/workflows/ci.yml:5 job gate: timeout-minutes 45 is below 1.25 x measured duration 44.8m (cancel risk)" + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(outUnexcused, "\n"), wantWarn) || strings.Contains(outUnexcused, "excuses") {
 		t.Errorf("unexcused workflow must emit [WARN] without excuses; got:\n%s", outUnexcused)
 	}
 
@@ -684,7 +697,7 @@ func TestJobTimeout_ExcusedKind_Negative_UnexcusedAndExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expired AuditJobTimeouts failed: %v", err)
 	}
-	if !strings.Contains(outExpired, wantWarn) || strings.Contains(outExpired, "excuses") {
+	if !slices.Contains(strings.Split(outExpired, "\n"), wantWarn) || strings.Contains(outExpired, "excuses") {
 		t.Errorf("expired exception must keep [WARN] line without excuses; got:\n%s", outExpired)
 	}
 }
@@ -767,25 +780,32 @@ func TestFormatExcusedFindings_Boundary_MaxJobsPerFile(t *testing.T) {
 	}
 }
 
-// Boundary: a workflow with an exception but zero findings keeps today's unused-entry [WARN] line and prints no excused-job text.
+// An unused exception warns with the fail date before the switch and fails on and after it.
 func TestJobTimeout_ExcusedKind_Boundary_UnusedException(t *testing.T) {
 	root := t.TempDir()
 	writeWorkflow(t, root, "clean.yml", "on: push\njobs:\n  ok:\n    timeout-minutes: 30\n    steps:\n      - run: echo ok\n")
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
-	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+	opts := JobTimeoutOptions{
 		Root:          root,
-		Today:         today,
+		Today:         beforeFailFrom(),
 		Exceptions:    liveJobTimeoutException(".github/workflows/clean.yml", "waived"),
 		OfflineReason: "--offline",
-	})
+	}
+	out, err := AuditJobTimeouts(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("AuditJobTimeouts failed: %v", err)
 	}
-	wantUnused := "[WARN] job-timeout: the exceptions entry (rule job-timeout, .github/workflows/clean.yml) excuses no finding, because the workflow it names has none; remove it."
-	if !strings.Contains(out, wantUnused) {
-		t.Errorf("unused exception must keep today's [WARN] line; got:\n%s", out)
+	wantWarn := "[WARN] " + jobTimeoutUnusedException + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(out, "\n"), wantWarn) {
+		t.Errorf("unused exception warning must end with the fail date; got:\n%s", out)
 	}
 	if strings.Contains(out, "; excuses ") || strings.Contains(out, "excuses job ") || strings.Contains(out, "excepted until") {
 		t.Errorf("zero-finding workflow must print no excused-job text; got:\n%s", out)
+	}
+	for _, day := range [...]time.Time{JobTimeoutFailFrom, JobTimeoutFailFrom.AddDate(0, 0, 1)} {
+		opts.Today = day
+		_, err := AuditJobTimeouts(t.Context(), opts)
+		if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), "[FAIL] "+jobTimeoutUnusedException) {
+			t.Errorf("on %s an unused exception must fail with its original line; got %v", day.Format(time.DateOnly), err)
+		}
 	}
 }

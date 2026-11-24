@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/dedupe"
@@ -18,7 +19,9 @@ var testConfigRoot string
 
 // TestMain keeps every test off the operator's own settings: no install manifest and no
 // settings or framework environment variable reaches a command unless a test sets one, and no
-// forge token, so the audit's live Actions checks never ask the real forge.
+// forge token, so the audit's live Actions checks never ask the real forge. It also pins
+// auditToday to the day before forge.JobTimeoutFailFrom so dated audit gates do not read the wall
+// clock unless a test overrides the day.
 // It also clears ambient GitHub Actions runner variables so tests run in isolation from CI.
 // It points the user configuration directory at a fresh temporary directory across
 // Linux (XDG_CONFIG_HOME/HOME), macOS (HOME), and Windows (AppData/APPDATA) so tests never touch
@@ -49,6 +52,9 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	testConfigRoot = root
+
+	// Every audit gate reads auditToday instead of the wall clock unless a test pins another day.
+	auditToday = func() time.Time { return auditTodayBeforeJobTimeoutFail() }
 
 	code := m.Run()
 	cleanup()
