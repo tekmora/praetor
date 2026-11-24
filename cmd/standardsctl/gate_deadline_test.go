@@ -7,8 +7,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,11 +34,40 @@ func runHookDeadlineFixture(t *testing.T, script string) string {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	dir := filepath.Join("..", "..", ".config", "lefthook", "scripts")
+	skipWithoutHookStdlib(ctx, t, dir, python)
 	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", hookFixturePrelude+script)
 	if err != nil {
 		t.Fatalf("stubbed hook budget: %v\n%s\n%s", err, out.Stdout, out.Stderr)
 	}
 	return string(out.Stdout)
+}
+
+// skipWithoutHookStdlib skips when python lacks a standard-library module the hook module checks.py imports: the gate's
+// toolchain container ships a python3 without concurrent and unittest, while the hooks run on the host python. A missing
+// module that lives beside checks.py, or any other import failure, fails the test.
+func skipWithoutHookStdlib(ctx context.Context, t *testing.T, dir, python string) {
+	t.Helper()
+	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", "import checks")
+	if err == nil {
+		return
+	}
+	stderr := string(out.Stderr)
+	const marker = "No module named '"
+	at := strings.LastIndex(stderr, marker)
+	if at < 0 {
+		t.Fatalf("import checks: %v\n%s", err, stderr)
+	}
+	name, _, ok := strings.Cut(stderr[at+len(marker):], "'")
+	top, _, _ := strings.Cut(name, ".")
+	if !ok || top == "" {
+		t.Fatalf("import checks: unreadable module name: %v\n%s", err, stderr)
+	}
+	for _, local := range []string{top + ".py", top} {
+		if _, statErr := os.Stat(filepath.Join(dir, local)); statErr == nil {
+			t.Fatalf("import checks: hook module %s is missing a local import %q: %v\n%s", dir, name, err, stderr)
+		}
+	}
+	t.Skipf("%s has no standard-library module %q that checks.py imports (minimal toolchain python); the hooks run on the host python", python, name)
 }
 
 // hookFixturePrelude gives the hook fixtures patch.object without unittest: the gate's toolchain container
