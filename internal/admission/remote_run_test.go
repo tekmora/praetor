@@ -103,6 +103,11 @@ func replaceWorkspaceLine(t *testing.T, script, original, replacement string) st
 // runWorkspaceFixture runs the real workspace wrapper with stub Git and a live stdin lease.
 func runWorkspaceFixture(t *testing.T, script, step string) {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		// The wrapper targets Linux executors with GNU coreutils and Bash (docs/guides/admission.md); BSD head
+		// refuses the zero-byte bundle read (`head -c 0`), so the full wrapper fixture runs on Linux only.
+		t.Skipf("workspace wrapper targets Linux executors with GNU coreutils, not %s", runtime.GOOS)
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skipf("workspace wrapper requires sh: %v", err)
 	}
