@@ -29,6 +29,8 @@ const (
 	maxContractFoundations = 64
 	// maxContractNameBytes bounds one third-party name (npm's own limit).
 	maxContractNameBytes = 214
+	// maxAmbiguityNoteBytes bounds the per-demand cost of repeating claimant paths.
+	maxAmbiguityNoteBytes = 1024
 	// contractEcosystemGo is the ecosystem of a contract that names none.
 	contractEcosystemGo = "go"
 )
@@ -465,51 +467,82 @@ func addContractPackage(index *FrameworkIndex, pkg *contractPackage) {
 }
 
 // preferredClaimant picks the lexically first exact match or the sole claimant.
-// When multiple claimants lack an exact match, it returns their sorted paths.
-func preferredClaimant(idx *FrameworkIndex, claimants []string, capability CapabilityKey) (string, []string) {
+// It returns a gap note for an ambiguous or oversized list.
+func preferredClaimant(idx *FrameworkIndex, claimants []string, capability CapabilityKey) (string, string) {
+	if len(claimants) > maxFrameworkPackages {
+		return "", fmt.Sprintf("%s: claimant limit of %d exceeded (%d claims)", idx.Contract, maxFrameworkPackages, len(claimants))
+	}
+	if len(claimants) == 0 {
+		return "", ""
+	}
+	if len(claimants) == 1 {
+		return claimants[0], ""
+	}
 	var best string
-	for _, path := range claimants {
+	for i := 0; i < len(claimants) && i < maxFrameworkPackages; i++ {
+		path := claimants[i]
 		if slices.Contains(idx.Packages[path].Capabilities, capability) && (best == "" || path < best) {
 			best = path
 		}
 	}
 	if best != "" {
-		return best, nil
+		return best, ""
 	}
-	if len(claimants) == 1 {
-		return claimants[0], nil
+	sorted := slices.Clone(claimants)
+	slices.Sort(sorted)
+	return "", ambiguityNote(idx.Contract, capability, sorted)
+}
+
+// ambiguityNote fits complete paths from the sorted prefix and counts the omitted claimants.
+func ambiguityNote(contract string, capability CapabilityKey, sorted []string) string {
+	const description = ": ambiguous claimants for "
+	count := len(sorted)
+	heading := "ambiguous claimants"
+	if len(contract)+len(description)+len(capability)+len(fmt.Sprintf(" (%d omitted)", count)) <= maxAmbiguityNoteBytes {
+		heading = contract + description + string(capability)
 	}
-	if len(claimants) == 0 {
-		return "", nil
+	var note strings.Builder
+	note.WriteString(heading)
+	separator := ": "
+	for i := 0; i < count && i < maxFrameworkPackages; i++ {
+		reserve := 0
+		if remaining := count - i - 1; remaining > 0 {
+			reserve = len(fmt.Sprintf(" (%d omitted)", remaining))
+		}
+		if note.Len()+len(separator)+len(sorted[i])+reserve > maxAmbiguityNoteBytes {
+			writef(&note, " (%d omitted)", count-i)
+			break
+		}
+		note.WriteString(separator)
+		note.WriteString(sorted[i])
+		separator = ", "
 	}
-	ambiguous := slices.Clone(claimants)
-	slices.Sort(ambiguous)
-	return "", ambiguous
+	return note.String()
 }
 
 // contractReplacement considers replacements, adaptations, then capability providers.
 // An ambiguous claim leaves a gap and stops resolution at that role.
-func contractReplacement(idx *FrameworkIndex, dep *DependencyDemand) (string, CapabilityStatus, []string) {
+func contractReplacement(idx *FrameworkIndex, dep *DependencyDemand) (string, CapabilityStatus, string) {
 	if idx.Contract == "" {
-		return "", "", nil
+		return "", "", ""
 	}
 	key := contractNameKey(idx.Ecosystem, dep.Package)
 	for _, role := range [...]struct {
 		claimants []string
 		status    CapabilityStatus
 	}{{idx.Replacements[key], StatusCovered}, {idx.Adaptations[key], StatusAdapterAvailable}} {
-		path, ambiguous := preferredClaimant(idx, role.claimants, dep.Capability)
-		if len(ambiguous) > 0 {
-			return "", StatusGap, ambiguous
+		path, gapNote := preferredClaimant(idx, role.claimants, dep.Capability)
+		if gapNote != "" {
+			return "", StatusGap, gapNote
 		}
 		if path != "" {
-			return path, role.status, nil
+			return path, role.status, ""
 		}
 	}
 	if paths := idx.Capabilities[dep.Capability]; len(paths) > 0 {
-		return paths[0], StatusCovered, nil
+		return paths[0], StatusCovered, ""
 	}
-	return "", "", nil
+	return "", "", ""
 }
 
 // reconcileContractDemand marks a demand covered, or adapter-available, by its contract
@@ -518,9 +551,9 @@ func contractReplacement(idx *FrameworkIndex, dep *DependencyDemand) (string, Ca
 // the status or the package changes, so a demand a scan mapped to the configured contract's
 // package and a report re-mapped to a fork's never names the package it no longer maps to.
 func reconcileContractDemand(idx *FrameworkIndex, dep *DependencyDemand) bool {
-	path, status, ambiguous := contractReplacement(idx, dep)
-	if len(ambiguous) > 0 {
-		markAmbiguousClaimants(idx, dep, ambiguous)
+	path, status, gapNote := contractReplacement(idx, dep)
+	if gapNote != "" {
+		markClaimGap(dep, gapNote)
 		return true
 	}
 	if path == "" {
@@ -537,10 +570,10 @@ func reconcileContractDemand(idx *FrameworkIndex, dep *DependencyDemand) bool {
 	return true
 }
 
-// markAmbiguousClaimants keeps the demand a gap and names the claimants that could not be told apart.
-func markAmbiguousClaimants(idx *FrameworkIndex, dep *DependencyDemand, claimants []string) {
+// markClaimGap clears any previous resolution and records why a claim leaves a gap.
+func markClaimGap(dep *DependencyDemand, note string) {
 	dep.Status, dep.FrameworkReplacement, dep.Relationship = StatusGap, "", nil
-	dep.Notes = fmt.Sprintf("%s: ambiguous claimants for %s: %s", idx.Contract, dep.Capability, strings.Join(claimants, ", "))
+	dep.Notes = note
 }
 
 // applyContractRelationship applies the relationship the selected contract declares for a
@@ -561,9 +594,9 @@ func applyContractRelationship(idx *FrameworkIndex, dep *DependencyDemand) bool 
 		kind   LibraryRelationshipKind
 		claims map[string][]string
 	}{{RelationshipWrappedBy, idx.Wrappers}, {RelationshipTooling, idx.Tooling}} {
-		path, ambiguous := preferredClaimant(idx, role.claims[key], dep.Capability)
-		if len(ambiguous) > 0 {
-			markAmbiguousClaimants(idx, dep, ambiguous)
+		path, gapNote := preferredClaimant(idx, role.claims[key], dep.Capability)
+		if gapNote != "" {
+			markClaimGap(dep, gapNote)
 			dep.Relationship = &LibraryRelationship{Kind: role.kind, Basis: idx.Basis}
 			return true
 		}

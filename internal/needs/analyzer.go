@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -102,6 +103,20 @@ func (r *AnalyzerRegistry) frameworkFor(language string, fallback *FrameworkInde
 		return index
 	}
 	return fallback
+}
+
+// withoutGoContract keeps Go demands freshly classified until the selected framework scores them.
+// Targets still supply builder kits and other languages keep their configured contracts.
+func (r *AnalyzerRegistry) withoutGoContract() *AnalyzerRegistry {
+	r = registryOrDefault(r)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.contracts["go"] == nil {
+		return r
+	}
+	contracts := maps.Clone(r.contracts)
+	delete(contracts, "go")
+	return &AnalyzerRegistry{analyzers: slices.Clone(r.analyzers), targets: r.targets.clone(), contracts: contracts}
 }
 
 // RowFramework returns the framework a row scored against selected is reported against

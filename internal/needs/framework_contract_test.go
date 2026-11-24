@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 )
 
 const contractFrameworkModule = "example.com/fw"
@@ -241,6 +243,163 @@ func checkContractClaimantOutcome(t *testing.T, got DependencyDemand, role contr
 	assertDemand(t, got, status, replacement, capability)
 	if !reflect.DeepEqual(got.Relationship, relationship) {
 		t.Errorf("relationship = %+v, want %+v", got.Relationship, relationship)
+	}
+}
+
+// TestSelectedFrameworkUsesClassifiedCapability checks claimant selection with and without a configured Go contract.
+func TestSelectedFrameworkUsesClassifiedCapability(t *testing.T) {
+	configured := writeFixture(t, t.TempDir(), FrameworkContractFile, uuidClaimantContract(claimantCapability))
+	registry, err := LoadRegistry(t.Context(), Targets{"go": {Contract: configured}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := setupContractConsumer(t)
+	for _, tc := range [...]struct {
+		name   string
+		keys   []CapabilityKey
+		status CapabilityStatus
+		winner string
+	}{
+		{"exact", []CapabilityKey{"id.uuid", claimantOther}, StatusCovered, claimantA},
+		{"ambiguous", []CapabilityKey{claimantOther, claimantCapability}, StatusGap, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			index := inspectClaimantContract(t, uuidClaimantContract(tc.keys...))
+			for _, r := range [...]*AnalyzerRegistry{registry, nil} {
+				report, err := ScanRepoWithFramework(t.Context(), repo, index, r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := demandFor(t, report, "github.com/google/uuid")
+				assertDemand(t, got, tc.status, tc.winner, "id.uuid")
+				if tc.winner == "" && !strings.Contains(got.Notes, "ambiguous claimants for id.uuid: "+claimantA+", "+claimantB) {
+					t.Errorf("ambiguity note = %q", got.Notes)
+				}
+			}
+		})
+	}
+	plain, err := ScanRepo(t.Context(), repo, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDemand(t, demandFor(t, plain, "github.com/google/uuid"), StatusCovered, claimantA, claimantCapability)
+}
+
+// uuidClaimantContract declares one claimant per capability, each replacing the UUID module.
+func uuidClaimantContract(keys ...CapabilityKey) string {
+	var contract strings.Builder
+	contract.WriteString("version: 1\nframework: " + contractFrameworkModule + "\npackages:\n")
+	for i, key := range keys {
+		writef(&contract, "  - import: %s/%c\n    capabilities: [%s]\n    replaces: [github.com/google/uuid]\n", contractFrameworkModule, 'a'+i, key)
+	}
+	return contract.String()
+}
+
+// inspectClaimantContract validates and indexes a declared framework contract.
+func inspectClaimantContract(t *testing.T, contract string) *FrameworkIndex {
+	t.Helper()
+	path := writeFixture(t, t.TempDir(), FrameworkContractFile, contract)
+	index, err := InspectFramework(t.Context(), FrameworkSource{Contract: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return index
+}
+
+// TestAmbiguousClaimantsManifestRoundTrip exercises 128 claimants across 64 Go demands.
+func TestAmbiguousClaimantsManifestRoundTrip(t *testing.T) {
+	const claimantCount = 128
+	var requires strings.Builder
+	names := make([]string, 64)
+	for i := range names {
+		names[i] = fmt.Sprintf("example.com/dependency%02d", i)
+		writef(&requires, "\t%s v1.0.0\n", names[i])
+	}
+	prefix := contractFrameworkModule + "/" + strings.Repeat("claimant", 16) + "-"
+	index := inspectClaimantContract(t, repeatedClaimantContract(prefix, claimantCount, names))
+	repo := t.TempDir()
+	writeFixture(t, repo, "go.mod", "module example.com/consumer\n\ngo 1.27\n\nrequire (\n"+requires.String()+")\n")
+	report, err := ScanRepoWithFramework(t.Context(), repo, index, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteNeedsManifest(repo, report); err != nil {
+		t.Fatalf("WriteNeedsManifest: %v", err)
+	}
+	committed, err := ReadCommittedManifest(t.Context(), repo)
+	if err != nil {
+		t.Fatalf("ReadCommittedManifest: %v", err)
+	}
+	recorded, err := parseCommittedManifest(committed)
+	if err != nil || len(recorded.Dependencies) != len(names) {
+		t.Fatalf("manifest lost demands: decoded=%v err=%v", recorded != nil, err)
+	}
+	for _, dep := range recorded.Dependencies {
+		assertBoundedAmbiguityNote(t, dep, prefix, claimantCount)
+	}
+}
+
+// repeatedClaimantContract gives every package the same replacement names and an unrelated capability.
+func repeatedClaimantContract(prefix string, count int, names []string) string {
+	var contract strings.Builder
+	contract.WriteString("version: 1\nframework: " + contractFrameworkModule + "\npackages:\n")
+	replaces := strings.Join(names, ", ")
+	for i := count - 1; i >= 0; i-- {
+		writef(&contract, "  - import: %s%03d\n    capabilities: [db.sqlite]\n    replaces: [%s]\n", prefix, i, replaces)
+	}
+	return contract.String()
+}
+
+// assertBoundedAmbiguityNote checks the byte ceiling, sorted prefix and exact omitted count.
+func assertBoundedAmbiguityNote(t *testing.T, dep DependencyDemand, prefix string, count int) {
+	t.Helper()
+	assertDemand(t, dep, StatusGap, "", buildGoDemand(dep.Package, dep.Version).Capability)
+	if len(dep.Notes) > 1024 {
+		t.Fatalf("ambiguity note = %d bytes, want at most 1024", len(dep.Notes))
+	}
+	_, rest, found := strings.Cut(dep.Notes, string(dep.Capability)+": ")
+	paths, omitted, hasCount := strings.Cut(rest, " (")
+	shown := strings.Split(paths, ", ")
+	if !found || !hasCount || len(shown) < 2 || omitted != fmt.Sprintf("%d omitted)", count-len(shown)) {
+		t.Fatalf("ambiguity note lacks sorted prefix or omitted count: %q", dep.Notes)
+	}
+	for i, path := range shown {
+		if want := fmt.Sprintf("%s%03d", prefix, i); path != want {
+			t.Fatalf("claimant %d = %q, want %q", i, path, want)
+		}
+	}
+}
+
+// TestClaimantSelectionBounds accepts a full claim list and keeps an oversized list a gap.
+func TestClaimantSelectionBounds(t *testing.T) {
+	prefix := contractFrameworkModule + "/p"
+	index := inspectClaimantContract(t, repeatedClaimantContract(prefix, maxFrameworkPackages, []string{claimantDependency}))
+	last := fmt.Sprintf("%s%03d", prefix, maxFrameworkPackages-1)
+	index.Packages[last] = FrameworkPackage{Capabilities: []CapabilityKey{claimantCapability}}
+	dep := DependencyDemand{Package: claimantDependency, Capability: claimantCapability, Status: StatusGap}
+	atLimit := dep
+	reconcileDependency(index, &atLimit)
+	assertDemand(t, atLimit, StatusCovered, last, claimantCapability)
+	index.Replacements[claimantDependency] = append(index.Replacements[claimantDependency], claimantA)
+	reconcileDependency(index, &dep)
+	assertDemand(t, dep, StatusGap, "", claimantCapability)
+	if !strings.Contains(dep.Notes, fmt.Sprintf("claimant limit of %d exceeded", maxFrameworkPackages)) {
+		t.Errorf("over-limit note = %q", dep.Notes)
+	}
+}
+
+// TestWriteNeedsManifestRejectsOversize checks the reader's budget without replacing the previous file.
+func TestWriteNeedsManifestRejectsOversize(t *testing.T) {
+	repo := t.TempDir()
+	const previous = "version: 1\n"
+	writeFixture(t, repo, NeedsManifestName, previous)
+	tooLarge := &RepoNeeds{Repository: strings.Repeat("x", contextopt.MaxSourceBytes)}
+	if err := WriteNeedsManifest(repo, tooLarge); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", contextopt.MaxSourceBytes)) {
+		t.Errorf("WriteNeedsManifest = %v, want size error", err)
+	}
+	got, err := ReadCommittedManifest(t.Context(), repo)
+	if err != nil || string(got) != previous {
+		t.Fatalf("previous manifest changed: %q, %v", got, err)
 	}
 }
 

@@ -60,7 +60,7 @@ func AggregateFleetWithHarvest(ctx context.Context, fleetRoot string, framework 
 	}
 
 	agg := newFleetAggregation(fleetRoot, fwIndex, len(layout.repos))
-	agg.registry = registryOrDefault(registry)
+	agg.registry = registry.withoutGoContract()
 	agg.report.DuplicateCheckouts = layout.duplicates
 	for _, repo := range layout.repos {
 		if ctxErr := ctx.Err(); ctxErr != nil {
