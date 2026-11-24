@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 )
 
 var timeoutsToday = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
@@ -344,10 +345,7 @@ func TestAuditTestTimeouts_Positive_ContinuedCommentWithinBound(t *testing.T) {
 }
 
 func TestAuditTestTimeouts_CommentLineSkipped(t *testing.T) {
-	line := "# -timeout replaces go test's ten-minute default"
-	if findings := checkGoTestTimeouts("Makefile", 36, line, nil); len(findings) != 0 {
-		t.Fatalf("comment line: got %v; want no findings", findings)
-	}
+	assertMakefileTimeout(t, "test:\n\t# go test -timeout 99m ./pkg/\n", "")
 }
 
 func TestAuditTestTimeouts_ContinuedRecipeComment(t *testing.T) {
@@ -864,5 +862,63 @@ func TestAuditTestTimeouts_Boundary_YAMLQuotedRunContinuationWithHashPasses(t *t
 	out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
 	if err != nil || !strings.Contains(out, "[PASS]") {
 		t.Fatalf("yaml quoted run within bound: %q, %v; want [PASS]", out, err)
+	}
+}
+
+// TestAuditTestTimeouts_WorkflowShellCommands checks shell syntax and document line mapping.
+func TestAuditTestTimeouts_WorkflowShellCommands(t *testing.T) {
+	const prefix = "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+	for _, tc := range []struct {
+		name, step, want string
+	}{
+		{"continued timeout", "      - run: |\n\n          go test \\\n            -timeout 45m ./pkg/\n", "ci.yml:8 sets 45m"},
+		{"quoted command and arguments", "      - run: |\n          'g'\\\n          'o' test '-timeout' '45'\"m\" ./pkg/\n", "ci.yml:7 sets 45m"},
+		{"trailing shell comment", "      - run: |\n          go test -timeout 30m ./pkg/ # -timeout 99m\n", ""},
+		{"folded value", "      - run: >-\n          go test\n          -timeout 45m ./pkg/\n", "ci.yml:6 sets 45m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": prefix + tc.step}))
+			if tc.want == "" && err == nil && strings.Contains(out, "[PASS]") {
+				return
+			}
+			if tc.want != "" && err != nil && strings.Contains(err.Error(), tc.want) {
+				return
+			}
+			t.Fatalf("AuditTestTimeouts = %q, %v; want %q", out, err, tc.want)
+		})
+	}
+}
+
+// TestAuditTestTimeouts_UnreadableWorkflow requires an explicit failure for both parser stages.
+func TestAuditTestTimeouts_UnreadableWorkflow(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+		entries          []config.Exception
+	}{
+		{name: "malformed YAML", body: boundWorkflow + "invalid: [\n", want: "parse workflow: yaml:"},
+		{
+			name:    "too many steps with live exception",
+			body:    longWorkflow + strings.Repeat("      - run: echo hello\n", ghworkflow.MaxStepsPerJob),
+			want:    fmt.Sprintf("workflow job test exceeds %d steps", ghworkflow.MaxStepsPerJob),
+			entries: []config.Exception{timeoutEntry("ci.yml", "2026-10-18")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": tc.body}), tc.entries...)
+			if err == nil || !strings.Contains(err.Error(), "[FAIL] test-timeout: .github/workflows/ci.yml") ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("AuditTestTimeouts = %q, %v; want a workflow failure with %q", out, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuditTestTimeouts_UnreadableWorkflowShell requires a finding for an unfinished shell word.
+func TestAuditTestTimeouts_UnreadableWorkflowShell(t *testing.T) {
+	wf := strings.Replace(boundWorkflow, "./...", `./... "`, 1)
+	out, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": wf}))
+	const want = "[FAIL] test-timeout: .github/workflows/ci.yml:7 has unreadable shell run script"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("AuditTestTimeouts = %q, %v; want %q", out, err, want)
 	}
 }

@@ -121,7 +121,7 @@ func scanRunBlock(rel string, step *ghworkflow.Step, shell string, file *ScanRep
 		return false
 	}
 	for _, v := range block.Violations {
-		recordViolation(file, v.RuleID, v.FilePath, runBlockLine(step, v.LineNumber), v.Symbol, v.Message)
+		recordViolation(file, v.RuleID, v.FilePath, WorkflowRunLine(step, v.LineNumber), v.Symbol, v.Message)
 	}
 	return true
 }
@@ -139,10 +139,22 @@ func blankExpressions(script string) string {
 	})
 }
 
-// runBlockLine maps line n of a step's script to the workflow line it sits on: in a literal
+// WorkflowShellCommands reads a decoded run script with expressions kept as opaque shell word
+// fragments. This retains the source spelling of timeout values without parsing expressions as shell.
+func WorkflowShellCommands(script string, maxLines int) ([]ShellCodeCommand, bool) {
+	script = strings.ReplaceAll(script, "\r\n", "\n")
+	matches := workflowExpression.FindAllStringIndex(script, -1)
+	literals := make(map[int]int, len(matches))
+	for _, match := range matches {
+		literals[match[0]] = match[1]
+	}
+	return ShellCodeCommands(script, maxLines, literals)
+}
+
+// WorkflowRunLine maps one-based line n of a step's script to the workflow line: in a literal
 // block the line after the indicator is line 1, and any other style is reported at the line its
 // value starts on.
-func runBlockLine(step *ghworkflow.Step, n int) int {
+func WorkflowRunLine(step *ghworkflow.Step, n int) int {
 	if step.RunLiteral {
 		return step.RunLine + n
 	}

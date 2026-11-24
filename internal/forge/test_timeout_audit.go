@@ -20,7 +20,6 @@ import (
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/util"
-	"go.yaml.in/yaml/v3"
 )
 
 // testTimeoutGate names the check in its lines.
@@ -29,19 +28,12 @@ const testTimeoutGate = "test-timeout"
 // testTimeoutBoundMinutes is the go test timeout workflows and Makefile keep per package (#1381).
 const testTimeoutBoundMinutes = 30
 
-var (
-	// goTestCommand matches workflow text mentioning a Go test invocation.
-	goTestCommand = regexp.MustCompile(`\bgo(?:\.exe)?\s+[^;&|]*\btest\b|\$\(GO_TEST\)`)
-	// goTimeoutFlag matches a -timeout or --timeout flag on a command line; its value is a whole
-	// ${{ ... }} expression, spaces included, or a word.
-	goTimeoutFlag = regexp.MustCompile(`(?:^|[\s;&|])--?timeout(?:=|\s+)["']?(\$\{\{[^}]*\}\}|[^"'\s;&|]+)["']?`)
-	// inputExpression matches a value that is exactly ${{ inputs.<id> }}.
-	inputExpression = regexp.MustCompile(`^\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}$`)
-)
+// inputExpression matches a value that is exactly ${{ inputs.<id> }}.
+var inputExpression = regexp.MustCompile(`^\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}$`)
 
 const (
-	maxTimeoutWorkflowLines = 20000
-	maxMatchesPerLine       = 16
+	maxTimeoutWorkflowLines   = 20000
+	maxTimeoutFlagsPerCommand = 16
 )
 
 // TestTimeoutOptions is what AuditTestTimeouts reads: the repository root, the manifest's
@@ -93,8 +85,7 @@ func AuditTestTimeouts(ctx context.Context, opts TestTimeoutOptions) (string, er
 	return strings.Join(append(excepted, "[PASS] test-timeout"), "\n"), nil
 }
 
-// fileTimeouts returns the long go test timeouts of one audited file: the root Makefile by joined
-// logical lines, a workflow line by line with its input defaults.
+// fileTimeouts returns the long go test timeouts in Makefile recipes or decoded workflow scripts.
 func fileTimeouts(file workflowFile) ([]string, error) {
 	if lines := physicalLines(string(file.Data)); lines > maxTimeoutWorkflowLines {
 		return nil, fmt.Errorf("[FAIL] %s: %s has %d lines, above the %d-line scan bound; lines past it would not be audited",
@@ -103,7 +94,7 @@ func fileTimeouts(file workflowFile) ([]string, error) {
 	if file.Name == "Makefile" {
 		return makefileTimeouts(string(file.Data))
 	}
-	return workflowTimeouts(file.Name, file.Data), nil
+	return workflowTimeouts(file.Name, file.Data)
 }
 
 // physicalLines counts the lines of text; a final newline ends the last line instead of starting
@@ -134,31 +125,33 @@ func makefileTimeouts(text string) ([]string, error) {
 		}
 		for _, command := range commands {
 			where := fmt.Sprintf("Makefile:%d", recipe.Line+command.Line+1)
-			out = append(out, makefileCommandTimeouts(where, command.Words)...)
+			out = append(out, commandTimeouts(where, command.Words, nil)...)
 		}
 	}
 	return out, nil
 }
 
-func makefileCommandTimeouts(where string, words []hiss.ShellCodeWord) []string {
-	args := goTestRecipeArgs(words)
+// commandTimeouts checks the timeout flags of a Go test invocation.
+func commandTimeouts(where string, words []hiss.ShellCodeWord, defaults map[string]exprValue) []string {
+	args := goTestArgs(words)
 	var findings []string
 	matches := 0
-	for i := 0; i < len(args) && matches < maxMatchesPerLine; i++ {
-		value, next, ok := makefileTimeoutValue(args, i)
+	for i := 0; i < len(args) && matches < maxTimeoutFlagsPerCommand; i++ {
+		value, next, ok := timeoutValue(args, i)
 		i = next
 		if !ok {
 			continue
 		}
 		matches++
-		if finding := judgeTimeout(where, value, nil); finding != "" {
+		if finding := judgeTimeout(where, value, defaults); finding != "" {
 			findings = append(findings, finding)
 		}
 	}
 	return findings
 }
 
-func goTestRecipeArgs(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
+// goTestArgs returns the arguments to go test or the Makefile's GO_TEST wrapper.
+func goTestArgs(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
 	program := words[0]
 	if program.Opaque && (program.Text == "$(GO_TEST)" || program.Text == "${GO_TEST}") {
 		return words[1:]
@@ -177,7 +170,8 @@ func goTestRecipeArgs(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
 	return nil
 }
 
-func makefileTimeoutValue(args []hiss.ShellCodeWord, i int) (value string, next int, ok bool) {
+// timeoutValue reads a -timeout or --timeout value and its last argument index.
+func timeoutValue(args []hiss.ShellCodeWord, i int) (value string, next int, ok bool) {
 	flag, value, hasEquals := strings.Cut(args[i].Value, "=")
 	if flag != "-timeout" && flag != "--timeout" {
 		return "", i, false
@@ -211,41 +205,6 @@ func readTestTimeoutFiles(ctx context.Context, root string) ([]workflowFile, err
 	return append(files, workflowFile{Name: "Makefile", Data: data}), nil
 }
 
-// timeoutInputDefaults returns the literal workflow_call input defaults of a workflow
-// (workflowCallDefaults), by input id; a workflow that does not parse has none, so an input it
-// names stays unreadable.
-func timeoutInputDefaults(data []byte) map[string]exprValue {
-	var spec workflowSpec
-	if err := yaml.Unmarshal(data, &spec); err != nil {
-		return nil
-	}
-	return workflowCallDefaults(&spec)
-}
-
-// isFullLineComment reports whether a workflow line starts with # after optional blanks.
-func isFullLineComment(line string) bool {
-	trimmed := strings.TrimLeft(line, " \t")
-	return trimmed != "" && trimmed[0] == '#'
-}
-
-// checkGoTestTimeouts checks a go test command line for -timeout flags.
-func checkGoTestTimeouts(rel string, n int, line string, defaults map[string]exprValue) []string {
-	if isFullLineComment(line) {
-		return nil
-	}
-	if !goTestCommand.MatchString(line) {
-		return nil
-	}
-	matches := goTimeoutFlag.FindAllStringSubmatch(line, maxMatchesPerLine)
-	var out []string
-	for i := 0; i < len(matches) && i < maxMatchesPerLine; i++ {
-		if finding := judgeTimeout(fmt.Sprintf("%s:%d", rel, n+1), matches[i][1], defaults); finding != "" {
-			out = append(out, finding)
-		}
-	}
-	return out
-}
-
 // judgeTimeout returns the finding for one -timeout value at where, "" within the bound. A value
 // ${{ inputs.<id> }} is judged by that input's workflow_call default; an input without a
 // literal default the gate can read is unreadable, as any other value it cannot parse.
@@ -268,46 +227,38 @@ func judgeTimeout(where, raw string, defaults map[string]exprValue) string {
 	return ""
 }
 
-// workflowTimeouts reads a workflow document's run: steps through ghworkflow.RunSteps,
-// auditing each decoded script for long or unreadable timeouts.
-func workflowTimeouts(rel string, data []byte) []string {
-	if !goTestCommand.MatchString(string(data)) {
-		return nil
-	}
+// workflowTimeouts audits decoded run steps and refuses workflows it cannot read.
+func workflowTimeouts(rel string, data []byte) ([]string, error) {
 	spec, err := ghworkflow.Parse(data)
 	if err != nil {
-		return longTimeouts(rel, string(data), nil)
+		return nil, fmt.Errorf("[FAIL] %s: %s: %w", testTimeoutGate, rel, err)
 	}
-	defaults := timeoutInputDefaults(data)
 	steps, err := ghworkflow.RunSteps(&spec)
 	if err != nil {
-		return longTimeouts(rel, string(data), defaults)
+		return nil, fmt.Errorf("[FAIL] %s: %s: read run steps: %w", testTimeoutGate, rel, err)
 	}
+	defaults := workflowCallDefaults(&spec)
 	var out []string
 	for _, run := range steps {
-		lines := strings.Split(run.Step.Run, "\n")
-		for k := 0; k < len(lines) && k < maxTimeoutWorkflowLines; k++ {
-			lineNum := run.Step.RunLine
-			if run.Step.RunLiteral {
-				lineNum = run.Step.RunLine + 1 + k
-			}
-			out = append(out, checkGoTestTimeouts(rel, max(lineNum-1, 0), lines[k], defaults)...)
+		findings, err := workflowRunTimeouts(rel, run.Step, defaults)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, findings...)
 	}
-	return out
+	return out, nil
 }
 
-// longTimeouts returns one line per go test -timeout above the bound or unreadable in rel; a job's
-// timeout-minutes is not this gate's subject (decision engine-timeout-audit-scope-20261018).
-// defaults are the workflow's workflow_call input defaults (timeoutInputDefaults).
-func longTimeouts(rel, text string, defaults map[string]exprValue) []string {
-	if !goTestCommand.MatchString(text) {
-		return nil
+// workflowRunTimeouts checks one run script and reports findings at its YAML source lines.
+func workflowRunTimeouts(rel string, step *ghworkflow.Step, defaults map[string]exprValue) ([]string, error) {
+	commands, ok := hiss.WorkflowShellCommands(step.Run, maxTimeoutWorkflowLines)
+	if !ok {
+		return nil, fmt.Errorf("[FAIL] %s: %s:%d has unreadable shell run script", testTimeoutGate, rel, step.RunLine)
 	}
-	lines := strings.Split(text, "\n")
 	var out []string
-	for n := 0; n < len(lines) && n < maxTimeoutWorkflowLines; n++ {
-		out = append(out, checkGoTestTimeouts(rel, n, lines[n], defaults)...)
+	for _, command := range commands {
+		where := fmt.Sprintf("%s:%d", rel, hiss.WorkflowRunLine(step, command.Line+1))
+		out = append(out, commandTimeouts(where, command.Words, defaults)...)
 	}
-	return out
+	return out, nil
 }
