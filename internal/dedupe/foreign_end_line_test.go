@@ -78,7 +78,7 @@ func TestDuplicateEndLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, "fixture", false)
+			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, "fixture", true)
 			if got := endLineLocations(t, group.Locations); !slices.Equal(got, tc.want) || group.LOC != tc.loc {
 				t.Errorf("locations = %+v, LOC = %d; want %+v, LOC = %d", got, group.LOC, tc.want, tc.loc)
 			}
@@ -107,7 +107,7 @@ func TestDuplicateEndLineMissingEnd(t *testing.T) {
 	for i := 0; i < len(cases); i++ {
 		tc := cases[i]
 		t.Run(tc.name, func(t *testing.T) {
-			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, "fixture", false)
+			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, "fixture", true)
 			if got := endLineLocations(t, group.Locations); !slices.Equal(got, tc.want) {
 				t.Errorf("locations = %+v, want %+v", got, tc.want)
 			}
