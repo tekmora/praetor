@@ -168,6 +168,7 @@ func assertExceptionGroupMetadata(t *testing.T, groups []dedupe.DuplicateGroup, 
 	}
 }
 
+// TestForeignScan_ExceptionRootBoundary pins that dedupe exceptions in the main manifest apply only to clones within the main root and not across foreign root boundaries.
 func TestForeignScan_ExceptionRootBoundary(t *testing.T) {
 	for _, mainPath := range []string{"app.py", "other.py"} {
 		t.Run(mainPath, func(t *testing.T) {
@@ -954,6 +955,7 @@ func TestForeignScan_Boundary_EndAbsentZeroMergesByStartPlusLinesMinusOne(t *tes
 	}
 }
 
+// TestForeignScan_Boundary_UnmergedGroupHashUnchanged pins that group hashes for unmerged foreign duplicate pairs remain stable and deterministic across runs.
 func TestForeignScan_Boundary_UnmergedGroupHashUnchanged(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "main.go", "package main\n")
@@ -1324,6 +1326,7 @@ func TestForeignScan_Negative_RustDuplicateExpiredExceptionFails(t *testing.T) {
 	}
 }
 
+// dualPythonCloneFixture sets up a temporary repository with two canned Python duplicate blocks for testing.
 func dualPythonCloneFixture(t *testing.T) (root, canned string) {
 	t.Helper()
 	root = t.TempDir()
@@ -1337,6 +1340,7 @@ func dualPythonCloneFixture(t *testing.T) (root, canned string) {
 	return root, canned
 }
 
+// plantFakeJscpdReport sets environment variables to mock the jscpd binary and supply a canned JSON report.
 func plantFakeJscpdReport(t *testing.T, canned string) {
 	t.Helper()
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")

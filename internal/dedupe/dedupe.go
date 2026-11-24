@@ -823,6 +823,7 @@ func reportAdopterSprawl(starts []adopterGitStart, helper adopterGitFunction, re
 	})
 }
 
+// collectDuplicates partitions duplicate groups into report Duplicates or Excepted based on exception rules and sorts each slice by hash.
 func collectDuplicates(hashMap map[string][]FileLocation, locMap map[string]int, exceptions []config.Exception, today time.Time, used []bool, report *DedupeReport) {
 	for hash, locs := range hashMap {
 		if len(locs) <= 1 {
@@ -908,6 +909,7 @@ func classifyUnusedException(entry config.Exception, report *DedupeReport) {
 		entry.Target(), config.ExceptionRuleDedupe, lang))
 }
 
+// classifyDuplicateGroup checks exception coverage for each location in a duplicate group and returns whether all locations are excused.
 func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []config.Exception, today time.Time, used []bool, foreign bool) (DuplicateGroup, bool) {
 	group.Locations = append([]FileLocation(nil), group.Locations...)
 	allExcepted := true
@@ -935,6 +937,7 @@ func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []
 	return group, allExcepted
 }
 
+// judgeLocation checks a file location against dedupe exceptions, marking expired dates and returning active exceptions for the main root.
 func judgeLocation(loc *FileLocation, mainRoot, hash string, exceptions []config.Exception, today time.Time, used []bool, foreign bool) *config.Exception {
 	// Entries belong to the main manifest, so the same path in another root cannot use them.
 	if loc.Root != "" && loc.Root != mainRoot {

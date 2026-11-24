@@ -278,6 +278,7 @@ func writeJscpdConfig(path, outputDir string) error {
 
 var errJscpdReportNoDuplicates = errors.New("jscpd report missing duplicates array")
 
+// parseJscpdReport parses JSON output from jscpd and returns its duplicate clone entries.
 func parseJscpdReport(data []byte) ([]rawJscpdDuplicate, error) {
 	var envelope struct {
 		Duplicates json.RawMessage `json:"duplicates"`
@@ -340,6 +341,7 @@ func unionRoots(parent []int, x, y int) {
 	}
 }
 
+// mergeDuplicatePairs merges overlapping pairwise jscpd duplicates into connected duplicate groups using disjoint-set union.
 func mergeDuplicatePairs(duplicates []rawJscpdDuplicate, roots []rootMapping, mainAbs string, isCrossRoot bool) []DuplicateGroup {
 	n := len(duplicates)
 	if n == 0 {
@@ -620,6 +622,7 @@ func formatHashLocationLine(loc FileLocation, mainAbs string, roots []rootMappin
 	return rootKey + ":" + loc.Path + ":" + strconv.Itoa(loc.Line)
 }
 
+// relPathForGroupHash resolves an absolute file path to a root key and a slash-separated path relative to its enclosing repository root.
 func relPathForGroupHash(absName, mainAbs string, roots []rootMapping) (rootKey, rel string) {
 	absPath := filepath.Clean(absName)
 	for i := 0; i < len(roots) && i < 1000; i++ {
@@ -640,6 +643,7 @@ func relPathForGroupHash(absName, mainAbs string, roots []rootMapping) (rootKey,
 	return "", filepath.ToSlash(absPath)
 }
 
+// hashLocationRoot returns the root identifier for a file location, returning empty string for the main repository root.
 func hashLocationRoot(loc FileLocation, mainAbs string, roots []rootMapping) string {
 	if loc.Root == "" {
 		return ""
@@ -699,6 +703,7 @@ func filterDuplicateGroups(groups []DuplicateGroup, mainRoot string, isCrossRoot
 	return filtered
 }
 
+// classifyForeignDuplicates partitions foreign duplicate groups in a report into ForeignDuplicates or ForeignExcepted based on active exceptions.
 func classifyForeignDuplicates(mainRoot string, exceptions []config.Exception, today time.Time, used []bool, report *DedupeReport) {
 	groups := report.ForeignDuplicates
 	report.ForeignDuplicates = nil

@@ -26,6 +26,7 @@ func setPinnedJscpdStub(t *testing.T) {
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", `{"duplicates":[]}`)
 }
 
+// TestScanRepo_Positive_PolyglotVerdictIsPartial pins that polyglot repositories report partial coverage when foreign scanners are skipped and full passing coverage when jscpd runs.
 func TestScanRepo_Positive_PolyglotVerdictIsPartial(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "tooling/add.go", polyglotGoSource)
@@ -99,6 +100,7 @@ func TestScanRepo_Positive_JVMAndModuleSourcesMakeTheVerdictPartial(t *testing.T
 	}
 }
 
+// TestScanRepo_Positive_ForeignScannedLeavesVerdictPartial pins that foreign source files scanned by jscpd produce an applicable, passing, and non-partial report.
 func TestScanRepo_Positive_ForeignScannedLeavesVerdictPartial(t *testing.T) {
 	if os.Getenv("PRAETOR_JSCPD_BIN") == "" {
 		t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")

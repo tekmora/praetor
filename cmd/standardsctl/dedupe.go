@@ -187,6 +187,7 @@ func dedupeHasForeignCoverageOrFailure(report *dedupe.DedupeReport) bool {
 		len(report.ForeignExcepted) > 0 || dedupeNotApplicableNeedsVerdict(report)
 }
 
+// printDedupeForeignScannerLine prints the foreign scanner name, its skipped reason, or a notice that clone detection is not implemented.
 func printDedupeForeignScannerLine(report *dedupe.DedupeReport) {
 	if report.ForeignScanner != "" {
 		fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
@@ -199,6 +200,7 @@ func printDedupeForeignScannerLine(report *dedupe.DedupeReport) {
 	fmt.Println("  Clone detection for other languages is not implemented.")
 }
 
+// dedupeNotApplicableNeedsVerdict reports whether a Go-free dedupe report requires returning a verdict due to stale exceptions, a skipped scanner, or foreign duplicates.
 func dedupeNotApplicableNeedsVerdict(report *dedupe.DedupeReport) bool {
 	return len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" || len(report.ForeignDuplicates) > 0
 }

@@ -1816,6 +1816,7 @@ func BetaGit() {
 	}
 }
 
+// TestScanRepo_ScopedExceptions pins that scoped HISS-19 exceptions with fingerprints and line ranges correctly excuse duplicate groups across Go and foreign scans.
 func TestScanRepo_ScopedExceptions(t *testing.T) {
 	for _, foreign := range []bool{false, true} {
 		t.Run(fmt.Sprintf("foreign=%v", foreign), func(t *testing.T) {
@@ -1929,6 +1930,7 @@ func assertScopedExceptionReport(t *testing.T, report *dedupe.DedupeReport, fore
 	}
 }
 
+// TestScanRepo_ScopedExceptionExpiry pins that expired scoped HISS-19 exceptions report as unexcused duplicates with their expiration date recorded.
 func TestScanRepo_ScopedExceptionExpiry(t *testing.T) {
 	for _, foreign := range []bool{false, true} {
 		t.Run(fmt.Sprintf("foreign=%v", foreign), func(t *testing.T) {
