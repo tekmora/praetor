@@ -121,25 +121,7 @@ func printDedupeJSON(report *dedupe.DedupeReport) error {
 func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 	fmt.Printf("=== Codebase Deduplication & Unification Audit: %s ===\n", dir)
 	if !report.Applicable {
-		// Neither a pass nor a failure. The detector reads Go sources and found none, so it
-		// has no verdict to give; printing one would certify a tree it never opened.
-		fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
-		printUnscannedLanguages(report)
-		if report.ForeignScanner != "" {
-			fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
-		} else if report.ForeignSkipped != "" {
-			fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
-		} else {
-			fmt.Println("  Clone detection for other languages is not implemented.")
-		}
-		printForeignDuplicates(report)
-		printExceptedBlocks("Excepted Foreign Duplicate Blocks", report.ForeignExcepted)
-		printStaleExceptions(report.StaleExceptions)
-		printNotCheckedExceptions(report.NotCheckedExceptions)
-		if len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" || len(report.ForeignDuplicates) > 0 {
-			return dedupeVerdict(report)
-		}
-		return nil
+		return printDedupeNotApplicableReport(report)
 	}
 	fmt.Printf("  Files Scanned:     %d\n", report.TotalFilesScanned)
 	if report.SkippedGeneratedFiles > 0 {
@@ -170,6 +152,40 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 	printStaleExceptions(report.StaleExceptions)
 	printNotCheckedExceptions(report.NotCheckedExceptions)
 	return dedupeVerdict(report)
+}
+
+// printDedupeNotApplicableReport prints the no-Go-sources case and returns a verdict when foreign
+// findings or stale exceptions require a failing exit.
+func printDedupeNotApplicableReport(report *dedupe.DedupeReport) error {
+	// Neither a pass nor a failure. The detector reads Go sources and found none, so it
+	// has no verdict to give; printing one would certify a tree it never opened.
+	fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
+	printUnscannedLanguages(report)
+	printDedupeForeignScannerLine(report)
+	printForeignDuplicates(report)
+	printExceptedBlocks("Excepted Foreign Duplicate Blocks", report.ForeignExcepted)
+	printStaleExceptions(report.StaleExceptions)
+	printNotCheckedExceptions(report.NotCheckedExceptions)
+	if dedupeNotApplicableNeedsVerdict(report) {
+		return dedupeVerdict(report)
+	}
+	return nil
+}
+
+func printDedupeForeignScannerLine(report *dedupe.DedupeReport) {
+	if report.ForeignScanner != "" {
+		fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
+		return
+	}
+	if report.ForeignSkipped != "" {
+		fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
+		return
+	}
+	fmt.Println("  Clone detection for other languages is not implemented.")
+}
+
+func dedupeNotApplicableNeedsVerdict(report *dedupe.DedupeReport) bool {
+	return len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" || len(report.ForeignDuplicates) > 0
 }
 
 // printForeignDuplicates prints the foreign (non-Go) clone groups with a count per language and their file spans.

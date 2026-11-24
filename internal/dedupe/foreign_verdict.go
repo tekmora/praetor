@@ -5,7 +5,10 @@ import (
 	"strings"
 )
 
-const maxForeignVerdictGroups = 3
+const (
+	maxForeignVerdictGroups    = 3
+	maxForeignVerdictLocations = 6
+)
 
 // FormatFileLocation returns path:line or path:line-endline for a clone location.
 func FormatFileLocation(loc FileLocation) string {
@@ -34,11 +37,18 @@ func ForeignDuplicateVerdictSuffix(groups []DuplicateGroup) string {
 		g := groups[i]
 		b.WriteString(g.Language)
 		b.WriteString(": ")
-		for j, loc := range g.Locations {
+		locLimit := len(g.Locations)
+		if locLimit > maxForeignVerdictLocations {
+			locLimit = maxForeignVerdictLocations
+		}
+		for j := 0; j < locLimit; j++ {
 			if j > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(FormatFileLocation(loc))
+			b.WriteString(FormatFileLocation(g.Locations[j]))
+		}
+		if len(g.Locations) > locLimit {
+			fmt.Fprintf(&b, ", …+%d locations", len(g.Locations)-locLimit)
 		}
 	}
 	if len(groups) > limit {

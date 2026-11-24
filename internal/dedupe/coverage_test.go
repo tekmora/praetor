@@ -88,11 +88,11 @@ func TestScanRepo_Positive_ForeignScannedLeavesVerdictPartial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Applicable || !report.Passed || !report.Partial {
-		t.Fatalf("expected applicable passed partial verdict, got: %+v", report)
+	if !report.Applicable || !report.Passed || report.Partial {
+		t.Fatalf("expected applicable passed full verdict when jscpd read every foreign file, got: %+v", report)
 	}
-	if want := map[string]int{"c": 1}; !maps.Equal(report.Unscanned, want) {
-		t.Fatalf("Unscanned = %v, want %v", report.Unscanned, want)
+	if len(report.Unscanned) != 0 {
+		t.Fatalf("Unscanned = %v, want empty after foreign scan read c", report.Unscanned)
 	}
 	if want := map[string]int{"c": 1}; !maps.Equal(report.ForeignScanned, want) {
 		t.Fatalf("ForeignScanned = %v, want %v", report.ForeignScanned, want)

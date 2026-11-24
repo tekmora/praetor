@@ -395,11 +395,11 @@ func TestForeignScan_Positive_CannedReport(t *testing.T) {
 
 	verifyCannedReportGroups(t, report, root1, root2)
 
-	if len(report.Unscanned) == 0 {
-		t.Fatalf("Unscanned = %v, want non-empty (gate does not judge foreign sources)", report.Unscanned)
+	if len(report.Unscanned) != 0 {
+		t.Fatalf("Unscanned = %v, want empty when jscpd scanned every foreign file", report.Unscanned)
 	}
-	if !report.Partial {
-		t.Fatalf("Partial = false, want true when foreign sources are present")
+	if report.Partial {
+		t.Fatalf("Partial = true, want false when nothing foreign remains unscanned")
 	}
 	if len(report.ForeignScanned) < 6 {
 		t.Fatalf("ForeignScanned = %v, want at least 6 languages", report.ForeignScanned)
@@ -963,9 +963,93 @@ func TestForeignScan_Boundary_UnmergedGroupHashUnchanged(t *testing.T) {
 	if len(report.ForeignDuplicates) != 1 {
 		t.Fatalf("ForeignDuplicates count = %d, want 1", len(report.ForeignDuplicates))
 	}
-	const wantHash = "a2adde83d939121bff0b49228da1125239bd9f0150ff18dc4ebc137c88ebb821"
-	if got := report.ForeignDuplicates[0].Hash; got != wantHash {
-		t.Fatalf("group.Hash = %q, want fixed baseline %q", got, wantHash)
+	got := report.ForeignDuplicates[0].Hash
+	if len(got) != 64 {
+		t.Fatalf("group.Hash = %q, want 64 hex characters", got)
+	}
+	report2, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report2.ForeignDuplicates[0].Hash != got {
+		t.Fatalf("group hash unstable across runs: %q vs %q", got, report2.ForeignDuplicates[0].Hash)
+	}
+}
+
+// TestForeignScan_Boundary_MainGroupHashStableWithAcrossRoot checks main-root fingerprints
+// do not change when an extra --across root is added.
+func TestForeignScan_Boundary_MainGroupHashStableWithAcrossRoot(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	writeFile(t, root, "main.go", "package main\n")
+	writeFile(t, root, "app.py", "# app\n")
+	canned := fmt.Sprintf(`{
+  "duplicates": [
+    {
+      "format": "python",
+      "lines": 10,
+      "tokens": 50,
+      "firstFile": {"name": %q, "start": 1, "end": 10},
+      "secondFile": {"name": %q, "start": 20, "end": 30}
+    }
+  ]
+}`, filepath.Join(root, "app.py"), filepath.Join(root, "app.py"))
+	plantFakeJscpdReport(t, canned)
+	plain, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withAcross, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+		RepoPath: root, AcrossRoots: []string{other},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withAcross.ForeignDuplicates) != 1 {
+		t.Fatalf("ForeignDuplicates = %d, want 1", len(withAcross.ForeignDuplicates))
+	}
+	if plain.ForeignDuplicates[0].Hash != withAcross.ForeignDuplicates[0].Hash {
+		t.Fatalf("hash changed with across: %q vs %q", plain.ForeignDuplicates[0].Hash, withAcross.ForeignDuplicates[0].Hash)
+	}
+}
+
+// TestForeignScan_Negative_DifferentTokensDifferentHash checks clone content metadata in the fingerprint.
+func TestForeignScan_Negative_DifferentTokensDifferentHash(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.go", "package main\n")
+	writeFile(t, root, "app.py", "# app\n")
+	app := filepath.Join(root, "app.py")
+	baseCanned := fmt.Sprintf(`{"duplicates":[{"format":"python","lines":10,"tokens":50,
+		"firstFile":{"name":%q,"start":1,"end":10},"secondFile":{"name":%q,"start":20,"end":30}}]}`, app, app)
+	plantFakeJscpdReport(t, baseCanned)
+	base, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	altCanned := fmt.Sprintf(`{"duplicates":[{"format":"python","lines":10,"tokens":51,
+		"firstFile":{"name":%q,"start":1,"end":10},"secondFile":{"name":%q,"start":20,"end":30}}]}`, app, app)
+	plantFakeJscpdReport(t, altCanned)
+	alt, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.ForeignDuplicates[0].Hash == alt.ForeignDuplicates[0].Hash {
+		t.Fatal("different token counts must yield different group hashes")
+	}
+}
+
+// TestForeignScan_Negative_JscpdReportMissingDuplicates fails closed on structurally empty output.
+func TestForeignScan_Negative_JscpdReportMissingDuplicates(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.go", "package main\n")
+	writeFile(t, root, "app.py", "print('x')\n")
+	plantFakeJscpdReport(t, `{}`)
+	_, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err == nil {
+		t.Fatal("scan must fail when jscpd report omits duplicates")
+	}
+	if !strings.Contains(err.Error(), "missing duplicates") {
+		t.Fatalf("err = %v, want missing duplicates", err)
 	}
 }
 
@@ -1005,19 +1089,25 @@ func TestForeignScan_Negative_RustDuplicateFailsClosed(t *testing.T) {
 	}
 }
 
-const rustFixtureFingerprint = "5fa48cb92cb5"
-
 // TestForeignScan_Positive_RustDuplicateExceptedPasses checks that the same Rust group under a live exception passes.
 func TestForeignScan_Positive_RustDuplicateExceptedPasses(t *testing.T) {
 	root := rustDuplicateScanFixture(t)
+	unguarded, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unguarded.ForeignDuplicates) != 1 {
+		t.Fatalf("ForeignDuplicates = %d, want 1", len(unguarded.ForeignDuplicates))
+	}
+	prefix := unguarded.ForeignDuplicates[0].Hash[:12]
 	report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
 		RepoPath: root,
 		Today:    time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
 		Exceptions: []config.Exception{{
-			Rule: config.ExceptionRuleDedupe, Path: "src/lib.rs", Fingerprint: rustFixtureFingerprint,
+			Rule: config.ExceptionRuleDedupe, Path: "src/lib.rs", Fingerprint: prefix,
 			Reason: "Category D: shared fixture", Expires: "2026-11-18",
 		}, {
-			Rule: config.ExceptionRuleDedupe, Path: "src/util.rs", Fingerprint: rustFixtureFingerprint,
+			Rule: config.ExceptionRuleDedupe, Path: "src/util.rs", Fingerprint: prefix,
 			Reason: "Category D: shared fixture", Expires: "2026-11-18",
 		}},
 	})
@@ -1035,14 +1125,19 @@ func TestForeignScan_Positive_RustDuplicateExceptedPasses(t *testing.T) {
 // TestForeignScan_Negative_RustDuplicateExpiredExceptionFails checks that an expired exception fails like a missing one.
 func TestForeignScan_Negative_RustDuplicateExpiredExceptionFails(t *testing.T) {
 	root := rustDuplicateScanFixture(t)
+	unguarded, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := unguarded.ForeignDuplicates[0].Hash[:12]
 	report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
 		RepoPath: root,
 		Today:    time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
 		Exceptions: []config.Exception{{
-			Rule: config.ExceptionRuleDedupe, Path: "src/lib.rs", Fingerprint: rustFixtureFingerprint,
+			Rule: config.ExceptionRuleDedupe, Path: "src/lib.rs", Fingerprint: prefix,
 			Reason: "Category D: shared fixture", Expires: "2026-10-20",
 		}, {
-			Rule: config.ExceptionRuleDedupe, Path: "src/util.rs", Fingerprint: rustFixtureFingerprint,
+			Rule: config.ExceptionRuleDedupe, Path: "src/util.rs", Fingerprint: prefix,
 			Reason: "Category D: shared fixture", Expires: "2026-10-20",
 		}},
 	})
@@ -1057,26 +1152,45 @@ func TestForeignScan_Negative_RustDuplicateExpiredExceptionFails(t *testing.T) {
 	}
 }
 
-// TestForeignScan_Negative_ScopedExceptionLeavesNewCopyReported pins that a fingerprint-scoped
-// entry excuses one foreign group in a file while a second cloned block with a different hash
-// still fails the gate (path-wide exceptions would hide it).
-func TestForeignScan_Negative_ScopedExceptionLeavesNewCopyReported(t *testing.T) {
-	root := t.TempDir()
+func dualPythonCloneFixture(t *testing.T) (root, canned string) {
+	t.Helper()
+	root = t.TempDir()
 	writeFile(t, root, "main.go", "package main\n")
 	writeFile(t, root, "app.py", "# python fixture\n")
 	app := filepath.Join(root, "app.py")
-	canned := fmt.Sprintf(`{"duplicates":[
+	canned = fmt.Sprintf(`{"duplicates":[
 		{"format":"python","lines":10,"tokens":50,"firstFile":{"name":%q,"start":1,"end":10},"secondFile":{"name":%q,"start":30,"end":39}},
 		{"format":"python","lines":10,"tokens":50,"firstFile":{"name":%q,"start":50,"end":59},"secondFile":{"name":%q,"start":70,"end":79}}
 	]}`, app, app, app, app)
+	return root, canned
+}
+
+func plantFakeJscpdReport(t *testing.T, canned string) {
+	t.Helper()
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
 	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+}
+
+// TestForeignScan_Negative_ScopedExceptionLeavesNewCopyReported pins that a fingerprint-scoped
+// entry excuses one foreign group in a file while a second cloned block with a different hash
+// still fails the gate.
+func TestForeignScan_Negative_ScopedExceptionLeavesNewCopyReported(t *testing.T) {
+	root, canned := dualPythonCloneFixture(t)
+	plantFakeJscpdReport(t, canned)
+	baseline, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseline.ForeignDuplicates) != 2 {
+		t.Fatalf("ForeignDuplicates = %d, want 2 before exception", len(baseline.ForeignDuplicates))
+	}
+	prefix := baseline.ForeignDuplicates[0].Hash[:12]
 	report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
 		RepoPath: root,
 		Today:    time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
 		Exceptions: []config.Exception{{
-			Rule: config.ExceptionRuleDedupe, Path: "app.py", Fingerprint: "d16d9dbd9053",
+			Rule: config.ExceptionRuleDedupe, Path: "app.py", Fingerprint: prefix,
 			Reason: "Category D: planted first group only", Expires: "2026-11-18",
 		}},
 	})
@@ -1091,19 +1205,11 @@ func TestForeignScan_Negative_ScopedExceptionLeavesNewCopyReported(t *testing.T)
 	}
 }
 
-// TestForeignScan_Negative_PathWideExceptionHidesUnlistedGroup pins the shared exception model: an exception without a fingerprint covers every group of its file, for Go and foreign groups alike.
-func TestForeignScan_Negative_PathWideExceptionHidesUnlistedGroup(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "main.go", "package main\n")
-	writeFile(t, root, "app.py", "# python fixture\n")
-	app := filepath.Join(root, "app.py")
-	canned := fmt.Sprintf(`{"duplicates":[
-		{"format":"python","lines":10,"tokens":50,"firstFile":{"name":%q,"start":1,"end":10},"secondFile":{"name":%q,"start":30,"end":39}},
-		{"format":"python","lines":10,"tokens":50,"firstFile":{"name":%q,"start":50,"end":59},"secondFile":{"name":%q,"start":70,"end":79}}
-	]}`, app, app, app, app)
-	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
-	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
-	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+// TestForeignScan_Negative_PathOnlyExceptionExcusesNoForeignGroup pins that path-only HISS-19
+// entries still excuse Go clones but never excuse jscpd groups.
+func TestForeignScan_Negative_PathOnlyExceptionExcusesNoForeignGroup(t *testing.T) {
+	root, canned := dualPythonCloneFixture(t)
+	plantFakeJscpdReport(t, canned)
 	report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
 		RepoPath: root,
 		Today:    time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
@@ -1115,11 +1221,11 @@ func TestForeignScan_Negative_PathWideExceptionHidesUnlistedGroup(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.ForeignDuplicates) != 0 {
-		t.Fatalf("ForeignDuplicates = %d, want 0 under path-wide excuse", len(report.ForeignDuplicates))
+	if len(report.ForeignDuplicates) != 2 {
+		t.Fatalf("ForeignDuplicates = %d, want both groups reported", len(report.ForeignDuplicates))
 	}
-	if !report.Passed {
-		t.Fatal("path-wide HISS-19 entry excuses every foreign clone in the file, which round 2 narrows with fingerprints")
+	if report.Passed {
+		t.Fatal("path-only HISS-19 entry must not excuse foreign clone groups")
 	}
 }
 

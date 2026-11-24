@@ -857,6 +857,27 @@ func TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted(t *testing.T
 	}
 }
 
+func TestRunDedupeScan_Negative_GoFreeForeignDuplicateFailsTextAndJSON(t *testing.T) {
+	dir := dedupeFixtureDir(t, "src/lib.rs", "fn shared_impl() {}\n")
+	writeFixtureFile(t, dir, "src/util.rs", "fn shared_impl() {}\n")
+	lib := filepath.Join(dir, "src", "lib.rs")
+	util := filepath.Join(dir, "src", "util.rs")
+	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,
+		"firstFile":{"name":%q,"start":1,"end":12},
+		"secondFile":{"name":%q,"start":1,"end":12}}]}`, lib, util)
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
+	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+
+	out, textErr := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
+	mustErrContain(t, textErr, "1 foreign duplicate block group")
+	mustContain(t, out, "Foreign Duplicate Blocks (1):", "Passed:            false")
+
+	jsonOut, jsonErr := captureStdout(t, func() error { return runDedupeScan([]string{"--json", dir}) })
+	mustErrContain(t, jsonErr, "1 foreign duplicate block group")
+	mustContain(t, jsonOut, `"passed": false`, `"foreign_duplicates"`)
+}
+
 func TestRunDedupeScan_Planted_NotApplicableWrongStubReturnsError(t *testing.T) {
 	// order engine-dedupe-jscpd-skip-fails-closed-20261027
 	testsupport.UseFakeJscpd(t, "jscpd 5.4.1")

@@ -1078,6 +1078,29 @@ exceptions:
 	}
 }
 
+func TestDedupeExceptionForForeign_3D(t *testing.T) {
+	entry := validException()
+	entry.Rule, entry.Fingerprint = ExceptionRuleDedupe, "abcdef12"
+	pathOnly := entry
+	pathOnly.Fingerprint = ""
+	live, _ := DedupeExceptionForForeign([]Exception{pathOnly}, entry.Path, "abcdef1234567890", 10, exceptionsToday, nil)
+	if live != nil {
+		t.Fatal("path-only entry must not excuse a foreign clone group")
+	}
+	used := make([]bool, 2)
+	live, _ = DedupeExceptionForForeign([]Exception{entry}, entry.Path, "abcdef1234567890", 10, exceptionsToday, used)
+	if live != &entry {
+		t.Fatalf("fingerprint-scoped live = %+v, want entry", live)
+	}
+	if !used[0] {
+		t.Fatal("fingerprint entry must be marked used")
+	}
+	live, _ = DedupeExceptionFor([]Exception{pathOnly}, entry.Path, "abcdef1234567890", 10, exceptionsToday, nil)
+	if live == nil {
+		t.Fatal("path-only entry must still excuse Go duplicate paths")
+	}
+}
+
 func TestDedupeExceptionForScopedUsage(t *testing.T) {
 	entry := validException()
 	entry.Rule, entry.Fingerprint, entry.Lines = ExceptionRuleDedupe, "abcdef12", "10-20"

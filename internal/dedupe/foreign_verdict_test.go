@@ -1,6 +1,9 @@
 package dedupe
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestFormatFileLocation_Positive_Span checks the path:start-end form for a location with an end line.
 func TestFormatFileLocation_Positive_Span(t *testing.T) {
@@ -38,5 +41,25 @@ func TestForeignDuplicateVerdictSuffix_Positive_NamesGroups(t *testing.T) {
 	want := " (rust: src/a.rs:1-10, src/b.rs:1-10)"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestForeignDuplicateVerdictSuffix_Boundary_CapsGroupsAndLocations checks the verdict suffix
+// renders only the first three groups and caps locations per group.
+func TestForeignDuplicateVerdictSuffix_Boundary_CapsGroupsAndLocations(t *testing.T) {
+	groups := make([]DuplicateGroup, 0, 4)
+	for i := 0; i < 4; i++ {
+		locs := make([]FileLocation, 0, maxForeignVerdictLocations+2)
+		for j := 0; j < maxForeignVerdictLocations+2; j++ {
+			locs = append(locs, FileLocation{Path: "f.py", Line: j + 1, EndLine: j + 2})
+		}
+		groups = append(groups, DuplicateGroup{Language: "python", Locations: locs})
+	}
+	got := ForeignDuplicateVerdictSuffix(groups)
+	if !strings.Contains(got, "; …+1 more") {
+		t.Fatalf("got %q, want remainder for group cap", got)
+	}
+	if !strings.Contains(got, "…+2 locations") {
+		t.Fatalf("got %q, want location overflow suffix", got)
 	}
 }

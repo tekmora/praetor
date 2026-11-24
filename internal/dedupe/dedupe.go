@@ -830,7 +830,7 @@ func collectDuplicates(hashMap map[string][]FileLocation, locMap map[string]int,
 		if len(locs) <= 1 {
 			continue
 		}
-		group, allExcepted := classifyDuplicateGroup(DuplicateGroup{Hash: hash, LOC: locMap[hash], Locations: locs}, "", exceptions, today, used)
+		group, allExcepted := classifyDuplicateGroup(DuplicateGroup{Hash: hash, LOC: locMap[hash], Locations: locs}, "", exceptions, today, used, false)
 		if allExcepted {
 			report.Excepted = append(report.Excepted, group)
 		} else {
@@ -910,14 +910,14 @@ func classifyUnusedException(entry config.Exception, report *DedupeReport) {
 		entry.Target(), config.ExceptionRuleDedupe, lang))
 }
 
-func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []config.Exception, today time.Time, used []bool) (DuplicateGroup, bool) {
+func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []config.Exception, today time.Time, used []bool, foreign bool) (DuplicateGroup, bool) {
 	group.Locations = append([]FileLocation(nil), group.Locations...)
 	allExcepted := true
 	var groupExceptions []ExceptionEntry
 	seen := make(map[*config.Exception]bool)
 
 	for i := range group.Locations {
-		live := judgeLocation(&group.Locations[i], mainRoot, group.Hash, exceptions, today, used)
+		live := judgeLocation(&group.Locations[i], mainRoot, group.Hash, exceptions, today, used, foreign)
 		if live != nil {
 			if !seen[live] {
 				seen[live] = true
@@ -937,12 +937,17 @@ func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []
 	return group, allExcepted
 }
 
-func judgeLocation(loc *FileLocation, mainRoot, hash string, exceptions []config.Exception, today time.Time, used []bool) *config.Exception {
+func judgeLocation(loc *FileLocation, mainRoot, hash string, exceptions []config.Exception, today time.Time, used []bool, foreign bool) *config.Exception {
 	// Entries belong to the main manifest, so the same path in another root cannot use them.
 	if loc.Root != "" && loc.Root != mainRoot {
 		return nil
 	}
-	live, expired := config.DedupeExceptionFor(exceptions, loc.Path, hash, loc.Line, today, used)
+	var live, expired *config.Exception
+	if foreign {
+		live, expired = config.DedupeExceptionForForeign(exceptions, loc.Path, hash, loc.Line, today, used)
+	} else {
+		live, expired = config.DedupeExceptionFor(exceptions, loc.Path, hash, loc.Line, today, used)
+	}
 	if live == nil && expired != nil {
 		loc.Expired = expired.Expires
 	}
