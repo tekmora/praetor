@@ -715,6 +715,53 @@ func TestJobTimeout_MatchSlowestJob_Boundary_SiblingClaimsPreemptMatrixFallback(
 	}
 }
 
+// Boundary: among literal matrix siblings, the longest matching target claims "<target> (...)"
+// records so a shorter sibling does not inherit a longer sibling's matrix leg, while a single
+// matrix job still takes its legs.
+func TestJobTimeout_MatchSlowestJob_Boundary_MatrixLongestTargetWins(t *testing.T) {
+	const siblings = "on: push\njobs:\n" +
+		"  build:\n    name: Build\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.21\"]\n    steps:\n      - run: echo build\n" +
+		"  build-linux:\n    name: Build (linux)\n    timeout-minutes: 60\n    strategy:\n      matrix:\n        version: [\"1.22\"]\n    steps:\n      - run: echo linux\n"
+	linuxLeg := jobDurationRecord("Build (linux) (1.22)", 44.8)
+	baseLeg := jobDurationRecord("Build (1.21)", 18)
+	for _, recs := range [...][]WorkflowJobRecord{{linuxLeg, baseLeg}, {baseLeg, linuxLeg}} {
+		got := slowestBySpec(t, siblings, recs...)
+		if got["build-linux"] != 44.8 || got["build"] != 18 {
+			t.Errorf("slowest = %v, want build-linux=44.8 build=18", got)
+		}
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", siblings)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", linuxLeg, baseLeg), Branch: "main",
+	})
+	if err != nil || strings.Contains(out, "cancel risk") || !strings.Contains(out, "measured path for 2 jobs") {
+		t.Errorf("30m Build must raise no cancel-risk finding; err=%v\nout:\n%s", err, out)
+	}
+	const single = "on: push\njobs:\n  build:\n    name: Build\n    timeout-minutes: 35\n    strategy:\n      matrix:\n        go: [\"1.21\", \"1.22\"]\n    steps:\n      - run: echo build\n"
+	if got := slowestBySpec(t, single, baseLeg, jobDurationRecord("Build (1.22)", 24)); got["build"] != 24 {
+		t.Errorf("single matrix job Build must take its legs, got %v", got)
+	}
+	if got := slowestBySpec(t, single, linuxLeg, baseLeg); got["build"] != 44.8 {
+		t.Errorf("single matrix job Build without longer sibling must take nested-paren leg, got %v", got)
+	}
+}
+
+// Boundary: longest-target matrix fallback shares ties of equal length and still matches a shorter
+// matrix sibling when a longer non-matching matrix sibling sorts ahead of it.
+func TestJobTimeout_MatchSlowestJob_Boundary_MatrixFallbackTiesAndSortOrder(t *testing.T) {
+	const tiesAndOrder = "on: push\njobs:\n" +
+		"  alpha-linux:\n    name: Build (linux)\n    timeout-minutes: 60\n    strategy:\n      matrix:\n        version: [\"1.22\"]\n    steps:\n      - run: echo a\n" +
+		"  beta-linux:\n    name: Build (linux)\n    timeout-minutes: 60\n    strategy:\n      matrix:\n        version: [\"1.22\"]\n    steps:\n      - run: echo b\n" +
+		"  zulu-build:\n    name: Build\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.21\"]\n    steps:\n      - run: echo build\n"
+	got := slowestBySpec(t, tiesAndOrder,
+		jobDurationRecord("Build (linux) (1.22)", 44.8),
+		jobDurationRecord("Build (1.21)", 18))
+	if got["alpha-linux"] != 44.8 || got["beta-linux"] != 44.8 || got["zulu-build"] != 18 {
+		t.Fatalf("slowest = %v, want alpha-linux=44.8 beta-linux=44.8 zulu-build=18", got)
+	}
+}
+
 // A matrix job with timeout-minutes 45 and a 44.8-minute measured matrix leg ("test (1.22)")
 // enters the measured path and reports cancel-risk (45 < 1.25 x 44.8 = 56).
 func TestJobTimeout_Measured_MatrixLiteralCancelRisk(t *testing.T) {

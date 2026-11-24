@@ -516,9 +516,9 @@ func updateSlowestJobs(slowest map[string]float64, jobs []WorkflowJobRecord, spe
 //  2. Expression prefix match: among spec jobs whose target holds "${{" and matches forgeName by
 //     its literal prefix before "${{", the longest prefix wins (ties share the record) and ends
 //     the search.
-//  3. Matrix suffix fallback: only when steps 1 and 2 match nothing, a spec job whose target holds
-//     no "${{" expression and that declares strategy.matrix matches forgeName of the form
-//     "<target> (...)".
+//  3. Matrix suffix fallback: only when steps 1 and 2 match nothing, among spec jobs whose target
+//     holds no "${{" expression, that declare strategy.matrix, and that match forgeName of the
+//     form "<target> (...)", the longest target wins (ties share the record).
 func matchSlowestJob(slowest map[string]float64, forgeName string, dur float64, spec *ghworkflow.Spec) {
 	if spec == nil {
 		return
@@ -578,16 +578,35 @@ func longestExpressionPrefixMatch(jobIDs []string, forgeName string, spec *ghwor
 	return best
 }
 
-// matchMatrixFallbackJobs updates every literal-target spec job declaring strategy.matrix whose
-// target matches forgeName as "<target> (...)".
+// matchMatrixFallbackJobs updates every literal-target spec job declaring strategy.matrix that
+// shares the longest target matching forgeName as "<target> (...)".
 func matchMatrixFallbackJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) {
+	best := longestMatrixFallbackMatch(jobIDs, forgeName, spec)
+	if best == 0 {
+		return
+	}
 	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
 		jobID := jobIDs[i]
 		job := spec.Jobs[jobID]
-		if matrixFallbackMatches(specJobTarget(jobID, job), job, forgeName) {
+		target := specJobTarget(jobID, job)
+		if len(target) == best && matrixFallbackMatches(target, job, forgeName) {
 			recordSlowest(slowest, jobID, dur)
 		}
 	}
+}
+
+// longestMatrixFallbackMatch returns the byte length of the longest literal matrix target matching forgeName.
+func longestMatrixFallbackMatch(jobIDs []string, forgeName string, spec *ghworkflow.Spec) int {
+	best := 0
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		job := spec.Jobs[jobID]
+		target := specJobTarget(jobID, job)
+		if len(target) > best && matrixFallbackMatches(target, job, forgeName) {
+			best = len(target)
+		}
+	}
+	return best
 }
 
 // matrixFallbackMatches reports whether job has a literal target, declares strategy.matrix,
