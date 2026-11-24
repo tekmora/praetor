@@ -112,6 +112,30 @@ HEREDOC_CONSUMERS = {
     "zsh": "shell",
 }
 
+BRACE_LAUNCHERS = (
+    "builtin",
+    "chrt",
+    "command",
+    "doas",
+    "env",
+    "exec",
+    "flock",
+    "ionice",
+    "nice",
+    "nohup",
+    "pkexec",
+    "run0",
+    "setsid",
+    "stdbuf",
+    "su",
+    "sudo",
+    "systemd-run",
+    "taskset",
+    "time",
+    "timeout",
+    "xargs",
+)
+
 
 def commit_command(command, short_pattern, anchored=False):
     """Reuse the short-flag rule's Git option prefilter without its flag tail."""
@@ -219,7 +243,7 @@ def admission_source(command, segments, parser):
     text = parser.rule_text.copy()
     for opener, start, end in parser.document_spans:
         first, last = opener
-        text[first:last] = " " * (last - first)
+        text[first:last] = re.sub(r"[^\n]", " ", parser.command[first:last])
         text[start:end] = re.sub(r"[^\n]", " ", parser.command[start:end])
     return join_line_continuations("".join(text)), True
 
@@ -282,7 +306,10 @@ def descriptor_style_redirect_target(raw):
 
     Every absolute path under /proc and every path under /dev except /dev/null counts.
     """
-    path = os.path.normpath(shell_unquote_word(raw.strip())).replace(os.sep, "/")
+    path = shell_unquote_word(raw.strip()).replace(os.sep, "/")
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    path = os.path.normpath(path).replace(os.sep, "/")
     if path == "/dev/null":
         return False
     return path in ("/dev", "/proc") or path.startswith(("/dev/", "/proc/"))
@@ -369,6 +396,8 @@ class CommandSpans:
         self.word_executions, self.nested, self.feeds = [], [], []
         self.consumer_frames = [([[0, 0, [], False, False]], True, None, False)]
         self.command_unknown = self.prefix_value = False
+        self.brace_launcher = False
+        self.brace_git_end = 0
         self.prefix_mode, self.groups = "", 0
         self.consumer_state_unknown = False
         self.code_only = False
@@ -538,6 +567,7 @@ class CommandSpans:
             self.record_redirect(self.redirect_start, end)
             self.redirect_start = -1
         self.enter_git_command(word, end)
+        self.remember_brace_git_candidate(word, end)
         data = self.next_data or self.redirect_data
         self.mask_word(word, end)
         self.normalize_word(word, end, data)
@@ -552,11 +582,22 @@ class CommandSpans:
 
     def command_word(self, word):
         """Record the first executable word and its Git basename's raw offset."""
-        if self.command_word_seen or self.redirect_data or self.command_prefix(word):
+        if self.redirect_data:
+            return
+        if self.command_word_seen:
+            if (
+                self.brace_launcher
+                and self.git_word_start < 0
+                and self.literal_word(word) == word
+            ):
+                self.record_git_word(shell_unquote_word(word))
+            return
+        if self.command_prefix(word):
             return
         self.command_word_start = self.word_start
         self.command_word_seen, self.git_word_start = True, -1
         word = shell_unquote_word(word)
+        self.brace_launcher = word.rsplit("/", 1)[-1] in BRACE_LAUNCHERS
         self.brace_consumer_host = bool(re.search(self.state_pattern, word))
         self.consumer_state_unknown |= self.brace_consumer_host or word in (
             "eval",
@@ -564,6 +605,10 @@ class CommandSpans:
             "source",
         )
         self.command_unknown = not self.known_command(word)
+        self.record_git_word(word)
+
+    def record_git_word(self, word):
+        """Retain a literal Git word in command or launcher arguments."""
         if word.endswith("git") and commit_command(
             word + " commit", self.short_pattern
         ):
@@ -637,8 +682,28 @@ class CommandSpans:
             return
         start, stop = self.start, self.word_start
         prefix = "".join(self.judged[start:stop])
-        if commit_command(prefix + word, self.short_pattern):
+        if commit_command(prefix + word, self.short_pattern) or self.brace_git_command(
+            word
+        ):
             self.git_command = word
+
+    def brace_git_command(self, word):
+        """Match a literal Git subcommand after a possible braced Git word."""
+        if not self.brace_git_end:
+            return False
+        start, end = self.brace_git_end, self.word_start
+        options = "".join(self.judged[start:end])
+        return commit_command("git" + options + word, self.short_pattern, True)
+
+    def remember_brace_git_candidate(self, word, end):
+        """Track only splitting brace words with a possible literal Git basename."""
+        if not self.command_unknown or not self.word_splitting or self.redirect_data:
+            return
+        prefix, brace, _ = word.partition("{")
+        if brace and (not prefix or self.literal_word(prefix) == prefix):
+            basename = shell_unquote_word(prefix).rsplit("/", 1)[-1]
+            if "git".startswith(basename):
+                self.brace_git_end = end
 
     def data_option_word(self, word):
         """Decode a fully literal quoted commit option before operand tests."""
@@ -1095,6 +1160,8 @@ class CommandSpans:
         self.arguments_uncertain = False
         self.command_word_seen = False
         self.command_unknown = self.prefix_value = False
+        self.brace_launcher = False
+        self.brace_git_end = 0
         self.prefix_mode = ""
         self.command_word_start = -1
         self.brace_consumer_host = False
@@ -1209,6 +1276,9 @@ class CommandSpans:
         self.mask_rules(self.position, self.position + len(word))
         self.position += len(word)
         self.record_redirect(redir_start, self.position)
+        self.document_spans.append(
+            ((redir_start, self.position), self.position, self.position)
+        )
         return True
 
     def newline(self):

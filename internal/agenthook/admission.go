@@ -263,6 +263,20 @@ func (c *admissionCheck) judge(command string) Verdict {
 	return c.judgeInDir(ctx, "", command)
 }
 
+// judgeInputs checks executable stdin as independent shell sources after its outer command.
+func (c *admissionCheck) judgeInputs(ctx context.Context, workDir, command string, stdin []string) Verdict {
+	verdict := c.judgeInDir(ctx, workDir, command)
+	for _, source := range stdin {
+		if verdict.Outcome != Allow {
+			break
+		}
+		next := c.judgeInDir(ctx, workDir, source)
+		next.Notice = appendLaneNotice(verdict.Notice, next.Notice)
+		verdict = next
+	}
+	return verdict
+}
+
 // judgeInDir evaluates simple commands with workDir as the base repository directory.
 func (c *admissionCheck) judgeInDir(ctx context.Context, workDir, command string) Verdict {
 	lines, ok := hiss.ShellCode(command, admissionMaxLines)

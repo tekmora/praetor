@@ -1598,11 +1598,11 @@ func evasionDelimiterBraceCases() []struct {
 		{"quoted option hides no subcommand", `git -c '{x.y=z,commit,-n}' -m msg`, 0},
 		{"non git operand names git", `echo git {commit,-n} -m msg`, 0},
 		{"git data operand names git", `git log git {commit,-n} -m msg`, 0},
-	}, evasionRoundSixDelimiterBraceCases()...)
+	}, additionalEvasionDelimiterBraceCases()...)
 }
 
-// evasionRoundSixDelimiterBraceCases covers literal message braces, expanding braces and inner delimiter quotes.
-func evasionRoundSixDelimiterBraceCases() []struct {
+// additionalEvasionDelimiterBraceCases covers launchers, redirect targets, message braces and delimiter quotes.
+func additionalEvasionDelimiterBraceCases() []struct {
 	name, command string
 	want          int
 } {
@@ -1610,6 +1610,14 @@ func evasionRoundSixDelimiterBraceCases() []struct {
 		name, command string
 		want          int
 	}{
+		{"timeout brace command", `timeout 5 gi{t..t} commit -n -m x`, 2},
+		{"cat brace file operand", `cat a{b,c}.txt`, 0},
+		{"heredoc double-slash proc descriptor", "cat <<'EOF' > //proc/self/fd/1 | sh\ngit commit -n -m x\nEOF", 2},
+		{"heredoc double-slash proc-like file", "cat <<'EOF' > //process/notes.txt | sh\ngit commit -n -m x\nEOF", 0},
+		{"heredoc double-slash dev descriptor", "cat <<'EOF' > //dev//stdout | sh\ngit commit -n -m x\nEOF", 2},
+		{"heredoc double-slash dev null", "cat <<'EOF' > //dev//null | sh\ngit commit -n -m x\nEOF", 0},
+		{"nohup git brace subcommand", `nohup git {commit,-n} -m x`, 2},
+		{"ls brace file operand", `ls file{1,2}`, 0},
 		{"literal brace pair in commit message", `git commit -m fix{docs}`, 0},
 		{"brace comma list in commit message", `git commit -m fix{docs,tests}`, 2},
 		{"brace numeric sequence in commit message", `git commit -m fix{1..3}`, 2},

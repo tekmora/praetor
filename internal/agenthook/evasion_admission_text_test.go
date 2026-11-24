@@ -107,6 +107,8 @@ func TestEvasionHereDocumentAdmissionText(t *testing.T) {
 		{"downstream shell reader", "cat <<'EOF' | sh\ngo test ./...\nEOF", "go test ./...", "", 3, true},
 		{"unquoted shell reader", "bash <<EOF\ngo test ./...\nEOF", "go test ./...", "", 3, true},
 		{"data document substitution", "cat <<EOF\n$(go test ./...)\nEOF", "go test ./...", "", 3, true},
+		{"shell here-string", `bash <<< 'go test ./...'`, "go test ./...", "bash", 1, true},
+		{"data here-string", `cat <<< 'go test ./...'`, "go test ./...", "cat", 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			texts := engineAdmissionTexts(t, tc.command)
@@ -124,6 +126,31 @@ func TestEvasionHereDocumentAdmissionText(t *testing.T) {
 				requireDeniedContaining(t, tc.command, verdict, "heavy step needs host admission:", "--label go-test")
 			} else if verdict.Outcome != Allow {
 				t.Errorf("data document refused: %s", verdict.Reason)
+			}
+		})
+	}
+}
+
+// TestEvasionHereStringAdmission checks literal stdin through the enforcing Go policy.
+func TestEvasionHereStringAdmission(t *testing.T) {
+	goPolicy, err := BuildPolicy(config.HookSettings{Admission: config.AdmissionSettings{Enforce: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		reader string
+		deny   bool
+	}{
+		{"bash", true},
+		{"cat", false},
+	} {
+		t.Run(tc.reader, func(t *testing.T) {
+			command := tc.reader + " <<< 'go test ./...'"
+			verdict := goPolicy.Command(command)
+			if tc.deny {
+				requireDeniedContaining(t, command, verdict, "heavy step needs host admission:", "--label go-test")
+			} else if verdict.Outcome != Allow {
+				t.Errorf("data here-string refused: %s", verdict.Reason)
 			}
 		})
 	}

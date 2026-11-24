@@ -466,6 +466,7 @@ type shellInput struct {
 	text     string
 	document bool
 	codeOnly bool
+	stdin    bool
 }
 
 // shellSpans walks raw command bytes once, using a bounded stack rather than recursion.
@@ -487,6 +488,8 @@ type shellSpans struct {
 	argumentsUncertain             bool
 	commandWordSeen                bool
 	commandUnknown                 bool
+	braceLauncher                  bool
+	braceGitEnd                    int
 	prefixMode                     string
 	prefixValue                    bool
 	groups                         int
@@ -506,6 +509,11 @@ type shellSpans struct {
 
 // commandSegments isolates short-flag scans; uncertain syntax retains the whole-command scan.
 func commandSegments(command string) ([]shellSpan, error) {
+	return commandSegmentsWithStdin(command, nil)
+}
+
+// commandSegmentsWithStdin also collects evaluated stdin for host admission when requested.
+func commandSegmentsWithStdin(command string, stdin *[]string) ([]shellSpan, error) {
 	queue := []shellInput{{text: command}}
 	var parts []shellSpan
 	for i := 0; i < len(queue) && i <= len(command); i++ {
@@ -515,6 +523,9 @@ func commandSegments(command string) ([]shellSpan, error) {
 		}
 		if len(spans) > 0 && !queue[i].document && spans[0].raw == "" {
 			spans[0].raw = queue[i].text
+		}
+		if stdin != nil && queue[i].stdin {
+			*stdin = append(*stdin, queue[i].text)
 		}
 		parts = append(parts, spans...)
 		queue = append(queue, nested...)
@@ -784,6 +795,7 @@ func (s *shellSpans) finishWord(end int) {
 		s.redirectStart = -1
 	}
 	s.enterGitCommand(word, end)
+	s.rememberBraceGitCandidate(word, end)
 	data := s.nextData || s.redirectData
 	s.maskWord(word, end)
 	s.normalizeWord(word, end, data)
@@ -802,18 +814,49 @@ func (s *shellSpans) finishWord(end int) {
 
 // commandWord records the first executable word, keeping its Git basename's raw offset.
 func (s *shellSpans) commandWord(word string) {
-	if s.commandWordSeen || s.redirectData || s.commandPrefix(word) {
+	if s.redirectData {
+		return
+	}
+	if s.commandWordSeen {
+		if s.braceLauncher && s.gitWordStart < 0 && shellLiteralWord(word) == word {
+			s.recordGitWord(unquoteShellWord(word))
+		}
+		return
+	}
+	if s.commandPrefix(word) {
 		return
 	}
 	s.commandWordStart, s.commandWordSeen, s.gitWordStart = s.wordStart, true, -1
 	word = unquoteShellWord(word)
+	s.braceLauncher = isBraceLauncher(word[strings.LastIndexByte(word, '/')+1:])
 	s.braceConsumerHost = shellStatePattern.MatchString(word)
 	s.consumerStateUnknown = s.consumerStateUnknown || s.braceConsumerHost ||
 		slices.Contains([]string{"eval", ".", "source"}, word)
 	s.commandUnknown = !knownShellCommand(word)
+	s.recordGitWord(word)
+}
+
+// recordGitWord retains a literal Git word in command or launcher arguments.
+func (s *shellSpans) recordGitWord(word string) {
 	if strings.HasSuffix(word, "git") && shellCommitPattern.MatchString(word+" commit") {
 		s.gitWordStart = s.wordStart + len(word) - len("git")
 	}
+}
+
+// BraceLaunchers returns the launcher names used by the rendered brace policy.
+func BraceLaunchers() []string {
+	names := slices.Clone(privilegeNames)
+	for name := range admissionWrappers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// isBraceLauncher shares admissible wrappers and escalator names with their policy rules.
+func isBraceLauncher(name string) bool {
+	_, wrapper := admissionWrappers[name]
+	return wrapper || slices.Contains(privilegeNames, name)
 }
 
 // knownShellCommand separates modeled commands from unknown launcher prefixes for brace words.
@@ -886,8 +929,27 @@ func (s *shellSpans) enterGitCommand(word string, end int) {
 	if word != "commit" && word != "am" {
 		return
 	}
-	if shellCommitPattern.MatchString(string(s.judged[s.start:s.wordStart]) + word) {
+	if shellCommitPattern.MatchString(string(s.judged[s.start:s.wordStart])+word) || s.braceGitCommand(word) {
 		s.gitCommand = word
+	}
+}
+
+// braceGitCommand matches a literal Git subcommand after a possible braced Git word.
+func (s *shellSpans) braceGitCommand(word string) bool {
+	return s.braceGitEnd != 0 && shellCommitPrefixPattern.MatchString("git"+string(s.judged[s.braceGitEnd:s.wordStart])+word)
+}
+
+// rememberBraceGitCandidate tracks a splitting brace word with a possible literal Git basename.
+func (s *shellSpans) rememberBraceGitCandidate(word string, end int) {
+	if !s.commandUnknown || !s.wordSplitting || s.redirectData {
+		return
+	}
+	prefix, _, brace := strings.Cut(word, "{")
+	if brace && shellLiteralWord(prefix) == prefix {
+		literal := unquoteShellWord(prefix)
+		if strings.HasPrefix("git", literal[strings.LastIndexByte(literal, '/')+1:]) {
+			s.braceGitEnd = end
+		}
 	}
 }
 
@@ -1329,7 +1391,7 @@ func (s *shellSpans) feedCode(feed shellFeed) bool {
 	if feed.expandable {
 		body = joinDocumentContinuations(body)
 	}
-	s.nested = append(s.nested, shellInput{text: body, codeOnly: s.codeOnly || expands})
+	s.nested = append(s.nested, shellInput{text: body, codeOnly: s.codeOnly || expands, stdin: true})
 	return true
 }
 
@@ -1399,6 +1461,7 @@ func (s *shellSpans) split(end, next int) {
 	s.argumentsUncertain = false
 	s.commandWordSeen = false
 	s.commandUnknown, s.prefixValue = false, false
+	s.braceLauncher, s.braceGitEnd = false, 0
 	s.prefixMode = ""
 	s.commandWordStart = -1
 	s.braceConsumerHost = false
@@ -1481,7 +1544,11 @@ func (s *shellSpans) hereDocumentOpener(rest string, redirStart int) bool {
 // /proc/thread-self/fd/1, /dev/fd/1 and /dev/stdout alike). Such a target never makes the stage a
 // plain-file barrier.
 func isDescriptorStyleRedirectTarget(raw string) bool {
-	path := filepath.ToSlash(filepath.Clean(unquoteShellWord(strings.TrimSpace(raw))))
+	path := filepath.ToSlash(unquoteShellWord(strings.TrimSpace(raw)))
+	if strings.HasPrefix(path, "//") {
+		path = "/" + strings.TrimLeft(path, "/")
+	}
+	path = filepath.ToSlash(filepath.Clean(path))
 	if path == "/dev/null" {
 		return false
 	}
@@ -1773,7 +1840,8 @@ func (p *Policy) commandRulesIn(ctx context.Context, command, workDir string) Ve
 	if p == nil {
 		return Verdict{Outcome: Deny, Reason: "[BLOCKED BY HISS] no command policy is loaded"}
 	}
-	segments, err := commandSegments(command)
+	var stdin []string
+	segments, err := commandSegmentsWithStdin(command, &stdin)
 	if err != nil {
 		return Verdict{Outcome: Deny, Reason: InvalidInputRefusal + err.Error()}
 	}
@@ -1795,14 +1863,14 @@ func (p *Policy) commandRulesIn(ctx context.Context, command, workDir string) Ve
 			return Verdict{Outcome: Deny, Reason: boundReason(rule.prefix + rule.source)}
 		}
 	}
-	return p.commandFallback(ctx, command, workDir)
+	return p.commandFallback(ctx, command, workDir, stdin)
 }
 
 // commandFallback applies admission and worktree checks after the deny rules pass.
-func (p *Policy) commandFallback(ctx context.Context, command, workDir string) Verdict {
+func (p *Policy) commandFallback(ctx context.Context, command, workDir string, stdin []string) Verdict {
 	verdict := Verdict{Outcome: Allow}
 	if p.admission != nil {
-		if verdict = p.admission.judgeInDir(ctx, workDir, command); verdict.Outcome != Allow {
+		if verdict = p.admission.judgeInputs(ctx, workDir, command, stdin); verdict.Outcome != Allow {
 			return verdict
 		}
 	}
