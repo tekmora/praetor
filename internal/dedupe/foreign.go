@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,7 @@ type rawJscpdDuplicate struct {
 	Format     string       `json:"format"`
 	Lines      int          `json:"lines"`
 	Tokens     int          `json:"tokens"`
+	Fragment   string       `json:"fragment"`
 	FirstFile  rawJscpdFile `json:"firstFile"`
 	SecondFile rawJscpdFile `json:"secondFile"`
 }
@@ -79,6 +81,7 @@ func scanForeign(ctx context.Context, repoPath string, acrossRoots []string, sco
 		return fmt.Errorf("collect foreign files: %w", err)
 	}
 	report.SkippedGeneratedFiles += skippedGenerated
+	reconcileSkippedGeneratedUnscanned(scope, report)
 	if len(files) == 0 {
 		return nil
 	}
@@ -559,45 +562,62 @@ func determineLanguage(format string, locations []FileLocation) string {
 	return format
 }
 
-// computeJscpdGroupHash fingerprints a foreign clone group from jscpd pair metadata and merged spans.
+// computeJscpdGroupHash fingerprints a foreign clone group from jscpd pair fragments, metadata and merged spans.
 // Main-root paths omit a root key so adding --across roots does not change their hashes.
 func computeJscpdGroupHash(language string, dups []rawJscpdDuplicate, locations []FileLocation, mainAbs string, roots []rootMapping) string {
-	h := sha256.New()
-	if _, err := h.Write([]byte(language + "\n")); err != nil {
-		return ""
-	}
+	var buf strings.Builder
+	buf.WriteString(language)
+	buf.WriteByte('\n')
 	pairSigs := make([]string, 0, len(dups))
 	for i := 0; i < len(dups) && i < maxDuplicatePairs; i++ {
-		d := dups[i]
-		var b strings.Builder
-		fmt.Fprintf(&b, "%s:%d:%d", d.Format, d.Lines, d.Tokens)
-		for _, f := range []rawJscpdFile{d.FirstFile, d.SecondFile} {
-			rootKey, rel := relPathForGroupHash(f.Name, mainAbs, roots)
-			end := fileEnd(f, d.Lines)
-			fmt.Fprintf(&b, ";%s:%s:%d:%d", rootKey, rel, f.Start, end)
-		}
-		pairSigs = append(pairSigs, b.String())
+		pairSigs = append(pairSigs, formatJscpdPairSignature(dups[i], mainAbs, roots))
 	}
 	sort.Strings(pairSigs)
 	for i := 0; i < len(pairSigs) && i < maxDuplicatePairs; i++ {
-		if _, err := fmt.Fprintf(h, "%s\n", pairSigs[i]); err != nil {
-			return ""
-		}
+		buf.WriteString(pairSigs[i])
+		buf.WriteByte('\n')
 	}
 	for i := 0; i < len(locations) && i < maxDuplicatePairs; i++ {
-		loc := locations[i]
-		rootKey := hashLocationRoot(loc, mainAbs, roots)
-		if loc.EndLine > loc.Line && loc.EndLine != 0 {
-			if _, err := fmt.Fprintf(h, "%s:%s:%d:%d\n", rootKey, loc.Path, loc.Line, loc.EndLine); err != nil {
-				return ""
-			}
-			continue
-		}
-		if _, err := fmt.Fprintf(h, "%s:%s:%d\n", rootKey, loc.Path, loc.Line); err != nil {
-			return ""
-		}
+		buf.WriteString(formatHashLocationLine(locations[i], mainAbs, roots))
+		buf.WriteByte('\n')
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	sum := sha256.Sum256([]byte(buf.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// formatJscpdPairSignature encodes one jscpd duplicate pair's format, span counts, fragment digest and file endpoints.
+func formatJscpdPairSignature(d rawJscpdDuplicate, mainAbs string, roots []rootMapping) string {
+	fragSum := sha256.Sum256([]byte(d.Fragment))
+	var b strings.Builder
+	b.WriteString(d.Format)
+	b.WriteByte(':')
+	b.WriteString(strconv.Itoa(d.Lines))
+	b.WriteByte(':')
+	b.WriteString(strconv.Itoa(d.Tokens))
+	b.WriteByte(':')
+	b.WriteString(hex.EncodeToString(fragSum[:]))
+	for _, f := range []rawJscpdFile{d.FirstFile, d.SecondFile} {
+		rootKey, rel := relPathForGroupHash(f.Name, mainAbs, roots)
+		end := fileEnd(f, d.Lines)
+		b.WriteByte(';')
+		b.WriteString(rootKey)
+		b.WriteByte(':')
+		b.WriteString(rel)
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(f.Start))
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(end))
+	}
+	return b.String()
+}
+
+// formatHashLocationLine encodes one merged group location with root-normalized identity.
+func formatHashLocationLine(loc FileLocation, mainAbs string, roots []rootMapping) string {
+	rootKey := hashLocationRoot(loc, mainAbs, roots)
+	if loc.EndLine > loc.Line && loc.EndLine != 0 {
+		return rootKey + ":" + loc.Path + ":" + strconv.Itoa(loc.Line) + ":" + strconv.Itoa(loc.EndLine)
+	}
+	return rootKey + ":" + loc.Path + ":" + strconv.Itoa(loc.Line)
 }
 
 func relPathForGroupHash(absName, mainAbs string, roots []rootMapping) (rootKey, rel string) {
@@ -712,6 +732,26 @@ func updateForeignScannedLanguages(files []string, report *DedupeReport) {
 				report.ForeignScanned = make(map[string]int)
 			}
 			report.ForeignScanned[language]++
+		}
+	}
+}
+
+// reconcileSkippedGeneratedUnscanned drops linguist-generated foreign files from Unscanned
+// because generated outputs are excluded from clone measurement rather than left unscanned.
+func reconcileSkippedGeneratedUnscanned(scope sourceScope, report *DedupeReport) {
+	if len(report.Unscanned) == 0 || len(scope.linguistGenerated) == 0 {
+		return
+	}
+	for i := 0; i < len(scope.foreignFiles) && i < maxScopeEntries; i++ {
+		rel := scope.foreignFiles[i]
+		if !scope.isLinguistGenerated(rel) {
+			continue
+		}
+		lang := foreignSourceLanguage(rel)
+		if remain := report.Unscanned[lang]; remain <= 1 {
+			delete(report.Unscanned, lang)
+		} else {
+			report.Unscanned[lang] = remain - 1
 		}
 	}
 }

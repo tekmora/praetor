@@ -171,6 +171,7 @@ type fakeJscpdDuplicateWire struct {
 	Format     string            `json:"format"`
 	Lines      int               `json:"lines"`
 	Tokens     int               `json:"tokens"`
+	Fragment   string            `json:"fragment,omitempty"`
 	FirstFile  fakeJscpdFileWire `json:"firstFile"`
 	SecondFile fakeJscpdFileWire `json:"secondFile"`
 }
@@ -181,14 +182,14 @@ type fakeJscpdFileWire struct {
 	End   int    `json:"end"`
 }
 
-// filterFakeJscpdReport keeps the canned duplicate pairs whose both files are in allowed; with no allowed set or
-// an unreadable report it returns data unchanged.
+// filterFakeJscpdReport keeps the canned duplicate pairs whose both files are in allowed; with no allowed set,
+// a report lacking a duplicates array, or an unreadable report it returns data unchanged.
 func filterFakeJscpdReport(data []byte, allowed map[string]struct{}) []byte {
 	if len(allowed) == 0 {
 		return data
 	}
 	var rep fakeJscpdReportWire
-	if err := json.Unmarshal(data, &rep); err != nil {
+	if err := json.Unmarshal(data, &rep); err != nil || rep.Duplicates == nil {
 		return data
 	}
 	filtered := make([]fakeJscpdDuplicateWire, 0, len(rep.Duplicates))

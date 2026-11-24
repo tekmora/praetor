@@ -154,13 +154,21 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 	return dedupeVerdict(report)
 }
 
-// printDedupeNotApplicableReport prints the no-Go-sources case and returns a verdict when foreign
-// findings or stale exceptions require a failing exit.
+// printDedupeNotApplicableReport prints the no-Go-sources report: Go AST cleanliness scoring is
+// not applicable, while foreign clone coverage still prints a Passed verdict when jscpd ran, was
+// skipped, or left stale exceptions.
 func printDedupeNotApplicableReport(report *dedupe.DedupeReport) error {
-	// Neither a pass nor a failure. The detector reads Go sources and found none, so it
-	// has no verdict to give; printing one would certify a tree it never opened.
-	fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
+	if !dedupeHasForeignCoverageOrFailure(report) {
+		// Neither Go nor foreign sources were examined, so there is no verdict to give.
+		fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
+		printUnscannedLanguages(report)
+		printDedupeForeignScannerLine(report)
+		printNotCheckedExceptions(report.NotCheckedExceptions)
+		return nil
+	}
+	fmt.Println("  Not applicable: no Go sources found; Go AST cleanliness score is not measured.")
 	printUnscannedLanguages(report)
+	fmt.Printf("  Passed:            %v\n", report.Passed)
 	printDedupeForeignScannerLine(report)
 	printForeignDuplicates(report)
 	printExceptedBlocks("Excepted Foreign Duplicate Blocks", report.ForeignExcepted)
@@ -170,6 +178,13 @@ func printDedupeNotApplicableReport(report *dedupe.DedupeReport) error {
 		return dedupeVerdict(report)
 	}
 	return nil
+}
+
+// dedupeHasForeignCoverageOrFailure reports whether a Go-free scan examined foreign sources or
+// recorded foreign findings, a skipped foreign scanner, or stale exceptions.
+func dedupeHasForeignCoverageOrFailure(report *dedupe.DedupeReport) bool {
+	return report.ForeignScanner != "" || len(report.ForeignScanned) > 0 ||
+		len(report.ForeignExcepted) > 0 || dedupeNotApplicableNeedsVerdict(report)
 }
 
 func printDedupeForeignScannerLine(report *dedupe.DedupeReport) {

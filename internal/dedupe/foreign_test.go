@@ -68,13 +68,25 @@ func scanExceptionFixture(t *testing.T, tc exceptionScanCase) *dedupe.DedupeRepo
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
 	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
-	exceptions := []config.Exception{{
+	foreignFP := "000000000000"
+	if tc.foreign {
+		unguarded, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+		if err != nil || len(unguarded.ForeignDuplicates) != 1 {
+			t.Fatalf("unguarded foreign fixture: err=%v groups=%d", err, len(unguarded.ForeignDuplicates))
+		}
+		foreignFP = unguarded.ForeignDuplicates[0].Hash[:12]
+	}
+	firstExc := config.Exception{
 		Rule: config.ExceptionRuleDedupe, Path: path,
 		Reason: "Category D: retained fixture clones", Expires: tc.expires,
-	}}
+	}
+	if !tc.native {
+		firstExc.Fingerprint = foreignFP
+	}
+	exceptions := []config.Exception{firstExc}
 	if tc.native && tc.foreign {
 		exceptions = append(exceptions, config.Exception{
-			Rule: config.ExceptionRuleDedupe, Path: "app.py",
+			Rule: config.ExceptionRuleDedupe, Path: "app.py", Fingerprint: foreignFP,
 			Reason: "Category D: retained fixture clones", Expires: tc.expires,
 		})
 	}
@@ -171,11 +183,18 @@ func TestForeignScan_ExceptionRootBoundary(t *testing.T) {
 			t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
 			t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
 			t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+			unguarded, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+				RepoPath: root, AcrossRoots: []string{other},
+			})
+			if err != nil || len(unguarded.ForeignDuplicates) != 1 {
+				t.Fatalf("unguarded cross-root fixture: err=%v groups=%d", err, len(unguarded.ForeignDuplicates))
+			}
 			report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
 				RepoPath: root, AcrossRoots: []string{other},
 				Today: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
 				Exceptions: []config.Exception{{Rule: config.ExceptionRuleDedupe, Path: "app.py",
-					Reason: "Category D: main repository clones", Expires: "2026-11-18"}},
+					Fingerprint: unguarded.ForeignDuplicates[0].Hash[:12],
+					Reason:      "Category D: main repository clones", Expires: "2026-11-18"}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1036,6 +1055,159 @@ func TestForeignScan_Negative_DifferentTokensDifferentHash(t *testing.T) {
 	if base.ForeignDuplicates[0].Hash == alt.ForeignDuplicates[0].Hash {
 		t.Fatal("different token counts must yield different group hashes")
 	}
+}
+
+const (
+	pyReviewedNineLine = `def reconcile_ledger_batch(records, window, limit, floor, ceiling):
+    accepted = [r for r in records if floor <= r.score <= ceiling]
+    rejected = [r for r in records if r.score < floor or r.score > ceiling]
+    total = sum(r.score * window + limit for r in accepted)
+    penalty = sum(abs(r.score - floor) * 2 for r in rejected)
+    adjusted = max(0, total - penalty + len(accepted) * window)
+    ratio = adjusted / max(1, len(records) * ceiling)
+    summary = {"count": len(accepted), "adjusted": adjusted, "ratio": ratio}
+    return summary, accepted[:limit]
+`
+	pyReplacementSixLine = `def render_markdown_table(headers, rows, align_map, pad_width):
+    widths = [max(pad_width, len(h)) for h in headers]
+    divider = "|".join("-" * w + ":" + align_map.get(h, "l") for h, w in zip(headers, widths))
+    header_line = "|".join(h.ljust(w) for h, w in zip(headers, widths))
+    body_lines = ["|".join(str(c).ljust(w) for c, w in zip(row, widths)) for row in rows]
+    return "\n".join([header_line, divider] + body_lines)
+`
+	pyEqualMetricsOne = `def compute_alpha_vector(first, second, third, fourth, fifth):
+    step_one = (first + second) * third + fourth + fifth + 11
+    step_two = (second + third) * fourth + fifth + first + 13
+    step_three = (third + fourth) * fifth + first + second + 17
+    step_four = (fourth + fifth) * first + second + third + 19
+    return step_one + step_two + step_three + step_four + 23
+`
+	pyEqualMetricsTwo = `def measure_omega_matrix(north, south, east, west, center):
+    row_one = (north - south) * east - west - center - 31
+    row_two = (south - east) * west - center - north - 37
+    row_three = (east - west) * center - north - south - 41
+    row_four = (west - center) * north - south - east - 43
+    return row_one - row_two - row_three - row_four - 47
+`
+)
+
+// pairExceptionsForHash builds live HISS-19 exceptions for a.py and b.py scoped to hash[:12].
+func pairExceptionsForHash(hash string) []config.Exception {
+	prefix := hash[:12]
+	return []config.Exception{
+		{Rule: config.ExceptionRuleDedupe, Path: "a.py", Fingerprint: prefix, Reason: "Category D: reviewed pair", Expires: "2026-11-18"},
+		{Rule: config.ExceptionRuleDedupe, Path: "b.py", Fingerprint: prefix, Reason: "Category D: reviewed pair", Expires: "2026-11-18"},
+	}
+}
+
+// TestForeignScan_Planted_EqualLinesAndTokensReplacementFailsOldException pins that replacing a
+// clone with an unrelated fragment of identical line count, token count, and start/end spans
+// changes the group fingerprint and fails under the old exception.
+func TestForeignScan_Planted_EqualLinesAndTokensReplacementFailsOldException(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.go", "package main\n")
+	writeFile(t, root, "a.py", pyEqualMetricsOne)
+	writeFile(t, root, "b.py", pyEqualMetricsOne)
+	aPath, bPath := filepath.Join(root, "a.py"), filepath.Join(root, "b.py")
+	today := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+
+	firstCanned := fmt.Sprintf(`{"duplicates":[{"format":"python","lines":6,"tokens":79,"fragment":%q,
+		"firstFile":{"name":%q,"start":1,"end":6},"secondFile":{"name":%q,"start":1,"end":6}}]}`,
+		strings.TrimSuffix(pyEqualMetricsOne, "\n"), aPath, bPath)
+	plantFakeJscpdReport(t, firstCanned)
+	initial, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil || len(initial.ForeignDuplicates) != 1 {
+		t.Fatalf("initial scan: err=%v groups=%d", err, len(initial.ForeignDuplicates))
+	}
+	exceptions := pairExceptionsForHash(initial.ForeignDuplicates[0].Hash)
+	waived, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+		RepoPath: root, Today: today, Exceptions: exceptions,
+	})
+	if err != nil || !waived.Passed || len(waived.ForeignExcepted) != 1 {
+		t.Fatalf("reviewed clone must pass under its exception: err=%v report=%+v", err, waived)
+	}
+
+	replacedCanned := fmt.Sprintf(`{"duplicates":[{"format":"python","lines":6,"tokens":79,"fragment":%q,
+		"firstFile":{"name":%q,"start":1,"end":6},"secondFile":{"name":%q,"start":1,"end":6}}]}`,
+		strings.TrimSuffix(pyEqualMetricsTwo, "\n"), aPath, bPath)
+	plantFakeJscpdReport(t, replacedCanned)
+	replaced, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+		RepoPath: root, Today: today, Exceptions: exceptions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.Passed || len(replaced.ForeignDuplicates) != 1 || len(replaced.StaleExceptions) != 2 {
+		t.Fatalf("equal-lines/equal-tokens replacement passed under old exception: %+v", replaced)
+	}
+}
+
+// TestForeignScan_Planted_RealJscpdSameStartAndAcrossStability verifies with pinned jscpd 5.4.2
+// that same-start 9->6 line and equal-metric replacements both fail under the old exception while
+// an unchanged main-root clone keeps its fingerprint across runs and with --across roots.
+func TestForeignScan_Planted_RealJscpdSameStartAndAcrossStability(t *testing.T) {
+	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "")
+	root, across := t.TempDir(), t.TempDir()
+	writeFile(t, root, "main.go", "package main\n")
+	writeFile(t, root, "a.py", pyReviewedNineLine)
+	writeFile(t, root, "b.py", pyReviewedNineLine)
+	writeFile(t, across, "unrelated.py", "def standalone_helper(x):\n    return x + 1\n")
+
+	probe, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe.ForeignSkipped != "" {
+		t.Skipf("pinned jscpd unavailable: %s", probe.ForeignSkipped)
+	}
+	if len(probe.ForeignDuplicates) != 1 {
+		t.Fatalf("ForeignDuplicates = %d, want 1", len(probe.ForeignDuplicates))
+	}
+	origHash := probe.ForeignDuplicates[0].Hash
+	exceptions := pairExceptionsForHash(origHash)
+	today := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+
+	withAcross, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+		RepoPath: root, AcrossRoots: []string{across}, Today: today, Exceptions: exceptions,
+	})
+	if err != nil || !withAcross.Passed || len(withAcross.ForeignExcepted) != 1 || len(withAcross.StaleExceptions) != 0 {
+		t.Fatalf("waived main-root group failed with --across: err=%v report=%+v", err, withAcross)
+	}
+	if withAcross.ForeignExcepted[0].Hash != origHash {
+		t.Fatalf("hash changed under --across: %s vs %s", withAcross.ForeignExcepted[0].Hash, origHash)
+	}
+
+	assertRealJscpdReplacementFails(t, root, pyReplacementSixLine, today, exceptions)
+	assertRealJscpdEqualMetricReplacementFails(t, root, today)
+}
+
+// assertRealJscpdReplacementFails overwrites a.py and b.py at line 1 and requires old exceptions to fail.
+func assertRealJscpdReplacementFails(t *testing.T, root, replacement string, today time.Time, exceptions []config.Exception) {
+	t.Helper()
+	writeFile(t, root, "a.py", replacement)
+	writeFile(t, root, "b.py", replacement)
+	rep, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+		RepoPath: root, Today: today, Exceptions: exceptions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Passed || len(rep.ForeignDuplicates) != 1 || len(rep.StaleExceptions) != 2 {
+		t.Fatalf("same-start replacement must fail with 2 stale exceptions, got: %+v", rep)
+	}
+}
+
+// assertRealJscpdEqualMetricReplacementFails checks two real jscpd clones of equal lines and tokens produce distinct hashes.
+func assertRealJscpdEqualMetricReplacementFails(t *testing.T, root string, today time.Time) {
+	t.Helper()
+	writeFile(t, root, "a.py", pyEqualMetricsOne)
+	writeFile(t, root, "b.py", pyEqualMetricsOne)
+	first, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: root})
+	if err != nil || len(first.ForeignDuplicates) != 1 {
+		t.Fatalf("first equal-metric scan: err=%v groups=%d", err, len(first.ForeignDuplicates))
+	}
+	exceptions := pairExceptionsForHash(first.ForeignDuplicates[0].Hash)
+	assertRealJscpdReplacementFails(t, root, pyEqualMetricsTwo, today, exceptions)
 }
 
 // TestForeignScan_Negative_JscpdReportMissingDuplicates fails closed on structurally empty output.

@@ -68,20 +68,19 @@ func TestPrintDedupeReport_ExceptedForeignEndLine(t *testing.T) {
 	}
 }
 
-// TestPrintDedupeReport_ExpiredForeignException checks that the report names the expiry date of a foreign group's lapsed exception.
+// TestPrintDedupeReport_ExpiredForeignException checks that an expired foreign exception fails
+// the verdict and prints its expiry annotation in the report.
 func TestPrintDedupeReport_ExpiredForeignException(t *testing.T) {
 	report := &dedupe.DedupeReport{
-		Applicable: true, Passed: true,
+		Applicable: true, Passed: false,
 		ForeignDuplicates: []dedupe.DuplicateGroup{{
 			Language: "python", Hash: "fixture", LOC: 10,
 			Locations: []dedupe.FileLocation{{Path: "app.py", Line: 1, Expired: "2026-10-20"}},
 		}},
 	}
 	out, err := captureStdout(t, func() error { return printDedupeReport("fixture", report) })
-	if err != nil {
-		t.Fatalf("foreign findings remain reported without gating: %v", err)
-	}
-	mustContain(t, out, "Foreign Duplicate Blocks (1):", "app.py:1", "its HISS-19 exception expired on 2026-10-20")
+	mustErrContain(t, err, "1 foreign duplicate block group(s) (python: app.py:1)")
+	mustContain(t, out, "Passed:            false", "Foreign Duplicate Blocks (1):", "app.py:1", "its HISS-19 exception expired on 2026-10-20")
 }
 
 // TestPrintDedupeReport_ForeignEndLine checks spans and metadata across end boundaries.
@@ -262,22 +261,30 @@ func TestRunDedupeCadence_Boundary_GrowthBelowThresholdStaysQuiet(t *testing.T) 
 	}
 }
 
-// #161: a polyglot repository with a small Go module used to get "Passed: true" with no word
-// about the source the scan never read. The verdict now says partial and names the rest.
+// #161: when jscpd scans the foreign files beside a Go module, Unscanned is empty and the verdict
+// is full; when jscpd is skipped, Unscanned keeps those languages and marks the verdict partial.
 func TestRunDedupeScan_Positive_PolyglotVerdictSaysPartial(t *testing.T) {
-	stubPinnedJscpd(t)
 	dir := dedupeFixtureDir(t, "tooling/clean.go", dedupeCleanSource)
 	writeFixtureFile(t, dir, "crates/core/src/lib.rs", "pub fn add() {}\n")
 	writeFixtureFile(t, dir, "crates/core/src/util.rs", "pub fn sub() {}\n")
 	writeFixtureFile(t, dir, "crates/core/native/shim.c", "int shim(void) { return 0; }\n")
 
-	out, err := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
-	if err != nil {
-		t.Fatalf("a clean Go module beside other languages still passes: %v\n%s", err, out)
-	}
-	mustContain(t, out, "Passed:            true (partial: Go sources only)",
+	t.Setenv("PRAETOR_JSCPD_BIN", "/nonexistent/jscpd")
+	skippedOut, skippedErr := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
+	mustErrContain(t, skippedErr, "foreign clone scan skipped")
+	mustContain(t, skippedOut, "Passed:            false (partial: Go sources only)",
 		"Not Scanned:       c (1 file), rust (2 files)",
 		"HISS-19 is not measured for these languages")
+
+	stubPinnedJscpd(t)
+	out, err := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
+	if err != nil {
+		t.Fatalf("a clean Go module with scanned foreign files must pass: %v\n%s", err, out)
+	}
+	mustContain(t, out, "Passed:            true", "Foreign Scanner:   jscpd "+dedupe.JscpdVersion)
+	if strings.Contains(out, "Not Scanned:") || strings.Contains(out, "partial:") {
+		t.Fatalf("scanned foreign languages must not appear as Not Scanned:\n%s", out)
+	}
 }
 
 func TestRunDedupeScan_Negative_GoOnlyVerdictIsNotQualified(t *testing.T) {
@@ -293,32 +300,35 @@ func TestRunDedupeScan_Negative_GoOnlyVerdictIsNotQualified(t *testing.T) {
 	}
 }
 
-// A repository with no Go at all still reports no verdict, now naming what it holds, and the
-// JSON form carries the same coverage fields.
+// A repository without Go sources keeps Applicable false (no Go AST cleanliness score) while
+// recording Passed and ForeignScanned when jscpd scans its foreign sources.
 func TestRunDedupeScan_Boundary_NoGoNamesTheLanguagesAndJSONCarriesThem(t *testing.T) {
 	stubPinnedJscpd(t)
 	dir := dedupeFixtureDir(t, "src/app.ts", "export const a = 1;\n")
 	out, err := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
 	if err != nil {
-		t.Fatalf("a repository without Go is not a failure: %v", err)
+		t.Fatalf("a clean Go-free repository scanned by jscpd must pass: %v", err)
 	}
-	mustContain(t, out, "Not applicable: no Go sources found", "Not Scanned:       typescript (1 file)")
-	if strings.Contains(out, "Passed:") {
-		t.Fatalf("no verdict may be printed for a tree the detector never read:\n%s", out)
+	mustContain(t, out,
+		"Not applicable: no Go sources found; Go AST cleanliness score is not measured.",
+		"Passed:            true",
+		"Foreign Scanner:   jscpd "+dedupe.JscpdVersion,
+	)
+	if strings.Contains(out, "Not Scanned:") {
+		t.Fatalf("scanned TypeScript source must not appear in Not Scanned:\n%s", out)
 	}
 
-	poly := dedupeFixtureDir(t, "clean.go", dedupeCleanSource)
-	writeFixtureFile(t, poly, "scripts/run.py", "print('x')\n")
-	out, err = captureStdout(t, func() error { return runDedupeScan([]string{"--json", poly}) })
+	jsonOut, err := captureStdout(t, func() error { return runDedupeScan([]string{"--json", dir}) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	var report dedupe.DedupeReport
-	if err := json.Unmarshal([]byte(out), &report); err != nil {
-		t.Fatalf("JSON report: %v\n%s", err, out)
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("JSON report: %v\n%s", err, jsonOut)
 	}
-	if !report.Partial || report.Unscanned["python"] != 1 {
-		t.Fatalf("JSON report must carry partial coverage: %+v", report)
+	if report.Applicable || !report.Passed || report.CleanlinessScore != 0 ||
+		report.ForeignScanned["typescript"] != 1 || len(report.Unscanned) != 0 {
+		t.Fatalf("Go-free JSON report must distinguish Go score eligibility from foreign verdict: %+v", report)
 	}
 }
 
@@ -826,30 +836,37 @@ func TestRunDedupeScan_Negative_PlantedRustForeignDuplicateFails(t *testing.T) {
 	mustContain(t, out, "Foreign Duplicate Blocks (1):", "src/lib.rs", "Passed:            false")
 }
 
-// TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted checks that the scan command passes when both Rust files carry live exceptions.
+// TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted checks that the scan command passes when both Rust files carry live fingerprint-scoped exceptions.
 func TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted(t *testing.T) {
 	dir := dedupeFixtureDir(t, "main.go", "package main\nfunc main() {}\n")
 	writeFixtureFile(t, dir, "src/lib.rs", "fn shared_impl() {}\n")
 	writeFixtureFile(t, dir, "src/util.rs", "fn shared_impl() {}\n")
 	lib := filepath.Join(dir, "src", "lib.rs")
 	util := filepath.Join(dir, "src", "util.rs")
-	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,
+	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,"fragment":"fn shared_impl() {}",
 		"firstFile":{"name":%q,"start":1,"end":12},
 		"secondFile":{"name":%q,"start":1,"end":12}}]}`, lib, util)
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
 	t.Setenv("PRAETOR_JSCPD_BIN", os.Args[0])
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", canned)
+	unguarded, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{RepoPath: dir})
+	if err != nil || len(unguarded.ForeignDuplicates) != 1 {
+		t.Fatalf("unguarded rust scan: err=%v groups=%d", err, len(unguarded.ForeignDuplicates))
+	}
+	fp := unguarded.ForeignDuplicates[0].Hash[:12]
 	expires := time.Now().AddDate(0, 0, 30).Format(config.ExceptionDateLayout)
 	manifest := fmt.Sprintf(`exceptions:
   - rule: HISS-19
     path: src/lib.rs
+    fingerprint: %s
     reason: "Category D: shared fixture clones"
     expires: %s
   - rule: HISS-19
     path: src/util.rs
+    fingerprint: %s
     reason: "Category D: shared fixture clones"
     expires: %s
-`, expires, expires)
+`, fp, expires, fp, expires)
 	writeFixtureFile(t, dir, config.ManifestFileName, manifest)
 
 	if err := runDedupeScan([]string{dir}); err != nil {
@@ -857,12 +874,14 @@ func TestRunDedupeScan_Positive_PlantedRustForeignDuplicateExcepted(t *testing.T
 	}
 }
 
+// TestRunDedupeScan_Negative_GoFreeForeignDuplicateFailsTextAndJSON verifies a Rust-only clone
+// fails in both text and JSON while distinguishing Go score inapplicability from foreign coverage.
 func TestRunDedupeScan_Negative_GoFreeForeignDuplicateFailsTextAndJSON(t *testing.T) {
 	dir := dedupeFixtureDir(t, "src/lib.rs", "fn shared_impl() {}\n")
 	writeFixtureFile(t, dir, "src/util.rs", "fn shared_impl() {}\n")
 	lib := filepath.Join(dir, "src", "lib.rs")
 	util := filepath.Join(dir, "src", "util.rs")
-	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,
+	canned := fmt.Sprintf(`{"duplicates":[{"format":"rust","lines":12,"tokens":60,"fragment":"fn shared_impl() {}",
 		"firstFile":{"name":%q,"start":1,"end":12},
 		"secondFile":{"name":%q,"start":1,"end":12}}]}`, lib, util)
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
@@ -871,11 +890,25 @@ func TestRunDedupeScan_Negative_GoFreeForeignDuplicateFailsTextAndJSON(t *testin
 
 	out, textErr := captureStdout(t, func() error { return runDedupeScan([]string{dir}) })
 	mustErrContain(t, textErr, "1 foreign duplicate block group")
-	mustContain(t, out, "Foreign Duplicate Blocks (1):", "Passed:            false")
+	mustContain(t, out,
+		"Not applicable: no Go sources found; Go AST cleanliness score is not measured.",
+		"Passed:            false",
+		"Foreign Duplicate Blocks (1):",
+	)
+	if strings.Contains(out, "Not Scanned:") {
+		t.Fatalf("scanned Rust files must not appear in Not Scanned:\n%s", out)
+	}
 
 	jsonOut, jsonErr := captureStdout(t, func() error { return runDedupeScan([]string{"--json", dir}) })
 	mustErrContain(t, jsonErr, "1 foreign duplicate block group")
-	mustContain(t, jsonOut, `"passed": false`, `"foreign_duplicates"`)
+	var report dedupe.DedupeReport
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("unmarshal Go-free JSON report: %v\n%s", err, jsonOut)
+	}
+	if report.Applicable || report.Passed || report.CleanlinessScore != 0 ||
+		report.ForeignScanned["rust"] != 2 || len(report.Unscanned) != 0 || len(report.ForeignDuplicates) != 1 {
+		t.Fatalf("unexpected Go-free failing JSON report: %+v", report)
+	}
 }
 
 func TestRunDedupeScan_Planted_NotApplicableWrongStubReturnsError(t *testing.T) {

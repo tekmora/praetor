@@ -81,16 +81,14 @@ type DedupeReport struct {
 	FindingFunctions int     `json:"finding_functions"`
 	CleanlinessScore float64 `json:"cleanliness_score"`
 	Passed           bool    `json:"passed"`
-	// Applicable reports whether there was anything to scan. This detector reads Go sources
-	// only, so a repository with none is not clean -- it is unexamined, and the difference
-	// matters to every caller that reads the score.
+	// Applicable reports whether Go AST sources were scanned so CleanlinessScore is defined.
+	// A repository without Go sources keeps Applicable false and CleanlinessScore 0 while
+	// ForeignScanned and Passed still record the foreign clone verdict when jscpd ran.
 	Applicable bool `json:"applicable"`
-	// Unscanned counts, per language (util.SourceLanguage), the repository's source files
-	// this detector cannot read. HISS-19 is not measured for them: a clean verdict over the
-	// Go files of a polyglot repository says nothing about the rest (#161).
+	// Unscanned counts, per language (util.SourceLanguage), non-generated source files neither
+	// the Go AST detector nor jscpd scanned (for example when jscpd was skipped).
 	Unscanned map[string]int `json:"unscanned,omitempty"`
-	// Partial reports a verdict that covers the Go sources only while the repository also
-	// holds source listed in Unscanned.
+	// Partial reports an applicable Go verdict while non-Go sources remain in Unscanned.
 	Partial bool `json:"partial"`
 
 	// ForeignDuplicates holds unexcused duplicate groups from the foreign scanner (jscpd).
@@ -1000,7 +998,8 @@ func calculateScore(report *DedupeReport) {
 	report.Partial = report.Applicable && len(report.Unscanned) > 0
 	if !report.Applicable {
 		report.CleanlinessScore = 0
-		report.Passed = false
+		report.Passed = len(report.ForeignScanned) > 0 && len(report.ForeignDuplicates) == 0 &&
+			len(report.StaleExceptions) == 0 && report.ForeignSkipped == ""
 		return
 	}
 	report.FindingFunctions = countFindingFunctions(report)
