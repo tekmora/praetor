@@ -480,6 +480,14 @@ rules:
           changed_when and a creates or removes argument, as a key or a free-form word, are not
           reported. The Windows command modules, and a task file included from outside a role's
           tasks/ or handlers/ directory, are held as gaps.
+      - language: rust
+        state: unsupported
+        mechanism: none
+        rationale: >-
+          Neither internal/hiss nor .config/semgrep/hiss-invariants.yml implements a Rust HISS-08
+          rule; gap/command-shell.rs, gap/libc-kill.rs and gap/libloading-open.rs record shell
+          command evaluation, unguarded process-group signals and runtime shared-library loading
+          going undetected.
   - id: HISS-07
     coverage:
       - language: go

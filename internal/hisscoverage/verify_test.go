@@ -434,13 +434,7 @@ const malformedGo = "package p\n\nfunc F() {\n"
 // writeCorpusFixture stages an additional fixture file under an existing corpus root.
 func writeCorpusFixture(t *testing.T, root, rule, lang, bucket, name, body string) {
 	t.Helper()
-	dir := filepath.Join(root, filepath.FromSlash(FixtureDir), rule, lang, bucket)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatalf("create fixture dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	plantCorpusFile(t, root, rule+"/"+lang+"/"+bucket+"/"+name, body)
 }
 
 // delegatedCatalogFor builds a one-claim catalog attributed to runner.
@@ -576,4 +570,186 @@ func TestVerifyIntentionalGapMarkerContract(t *testing.T) {
 	writeCorpusFixture(t, noReason, "HISS-01", "go", bucketGap, "no-reason.go", markedReasonlessGo)
 	requireFinding(t, "marker without reason", noReason, catalogFor("HISS-01", "go", StatePartial),
 		"no-reason.go", "reason")
+}
+
+// plantCorpusFile writes body at rel (a slash path below FixtureDir) inside root.
+func plantCorpusFile(t *testing.T, root, rel, body string) string {
+	t.Helper()
+	slashRel := FixtureDir + "/" + rel
+	full := filepath.Join(root, filepath.FromSlash(slashRel))
+	dir := filepath.Dir(full)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create dir for %s: %v", slashRel, err)
+	}
+	if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", slashRel, err)
+	}
+	return slashRel
+}
+
+// withoutCoverageCell returns a shallow copy of catalog with ruleID/lang removed, and reports
+// whether the cell was present.
+func withoutCoverageCell(catalog *Catalog, ruleID, lang string) (*Catalog, bool) {
+	out := &Catalog{Version: catalog.Version, Rules: make([]Rule, 0, len(catalog.Rules))}
+	removed := false
+	for i := 0; i < len(catalog.Rules); i++ {
+		rule := catalog.Rules[i]
+		if rule.ID != ruleID {
+			out.Rules = append(out.Rules, rule)
+			continue
+		}
+		kept := make([]Coverage, 0, len(rule.Coverage))
+		for j := 0; j < len(rule.Coverage); j++ {
+			if rule.Coverage[j].Language == lang {
+				removed = true
+				continue
+			}
+			kept = append(kept, rule.Coverage[j])
+		}
+		rule.Coverage = kept
+		if len(rule.Coverage) > 0 {
+			out.Rules = append(out.Rules, rule)
+		}
+	}
+	return out, removed
+}
+
+// TestVerifyCorpusOwnershipControl is the passing control case that holds before and after
+// corpus-ownership reconciliation: fixtures inside valid buckets of declared cells pass Verify.
+func TestVerifyCorpusOwnershipControl(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	plantCorpusFile(t, root, "HISS-01/go/gap/method-cycle.go", cleanGo)
+
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !report.Passed() || report.Fixtures != 2 {
+		t.Fatalf("owned positive and gap fixtures must pass (fixtures=%d): %+v", report.Fixtures, report.Findings)
+	}
+}
+
+// TestVerifyCommittedCorpusOwnsHISS08Rust verifies that the committed catalog owns HISS-08/rust
+// as unsupported with mechanism none and that the whole committed fixture corpus passes Verify.
+func TestVerifyCommittedCorpusOwnsHISS08Rust(t *testing.T) {
+	root := filepath.Join("..", "..")
+	catalog, err := LoadCatalog(t.Context(), root)
+	if err != nil {
+		t.Fatalf("load repository catalog: %v", err)
+	}
+	cov, ok := catalog.Lookup("HISS-08", "rust")
+	if !ok {
+		t.Fatalf("HISS-08/rust must be declared in %s so its gap fixtures have an owner", CatalogFile)
+	}
+	if cov.State != StateUnsupported || cov.Mechanism != "none" || !cov.ReplayedHere() {
+		t.Fatalf("HISS-08/rust = %+v, want state=%q mechanism=%q replayed directly", cov, StateUnsupported, "none")
+	}
+	report, err := Verify(t.Context(), root, catalog)
+	if err != nil {
+		t.Fatalf("verify repository catalog: %v", err)
+	}
+	if !report.Passed() {
+		t.Fatalf("committed corpus must pass Verify: %+v", report.Findings)
+	}
+}
+
+// TestVerifyRejectsOrphanFixtures is the negative dimension for corpus ownership: any fixture
+// file under FixtureDir that maps to no declared rule/language cell or valid bucket fails Verify
+// and names the path.
+func TestVerifyRejectsOrphanFixtures(t *testing.T) {
+	cases := []struct {
+		name string
+		rel  string
+	}{
+		{"undeclared rule and language", "HISS-08/rust/gap/orphan.rs"},
+		{"corpus root file", "orphan.go"},
+		{"rule level file", "HISS-01/orphan.go"},
+		{"language level file outside bucket", "HISS-01/go/orphan.go"},
+		{"unknown bucket", "HISS-01/go/retired/orphan.go"},
+		{"nested subdirectory inside bucket", "HISS-01/go/positive/nested/orphan.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+			wantPath := plantCorpusFile(t, root, tc.rel, cleanGo)
+			report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if report.Passed() {
+				t.Fatalf("planted orphan %s passed Verify", wantPath)
+			}
+			if len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantPath) {
+				t.Fatalf("findings = %+v, want one naming %s", report.Findings, wantPath)
+			}
+		})
+	}
+}
+
+// TestVerifyRejectsMisspelledLanguageDirectory is the negative and boundary dimension for
+// directory ownership: a misspelled language directory or undeclared rule directory fails Verify
+// whether it holds fixtures or sits empty on disk, naming its path.
+func TestVerifyRejectsMisspelledLanguageDirectory(t *testing.T) {
+	t.Run("populated misspelled language", func(t *testing.T) {
+		root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+		wantPath := plantCorpusFile(t, root, "HISS-01/golnag/positive/recursion.go", recursiveGo)
+		report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.Passed() || len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantPath) {
+			t.Fatalf("findings = %+v, want failure naming %s", report.Findings, wantPath)
+		}
+	})
+	for _, rel := range []string{"HISS-01/golnag", "HISS-03"} {
+		t.Run("empty "+rel, func(t *testing.T) {
+			root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+			wantPath := FixtureDir + "/" + rel
+			// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- an empty directory fixture needs the owner execute bit to be listed; 0o750 matches the fixture tree
+			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(wantPath)), 0o750); err != nil {
+				t.Fatalf("mkdir %s: %v", wantPath, err)
+			}
+			report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if report.Passed() || len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantPath) {
+				t.Fatalf("findings = %+v, want failure naming %s", report.Findings, wantPath)
+			}
+		})
+	}
+}
+
+// TestVerifyRemovingHISS08RustFailsCommittedCorpus proves the three committed HISS-08 Rust gap
+// fixtures are owned by HISS-08/rust: dropping that cell makes Verify fail and name all three.
+func TestVerifyRemovingHISS08RustFailsCommittedCorpus(t *testing.T) {
+	root := filepath.Join("..", "..")
+	catalog, err := LoadCatalog(t.Context(), root)
+	if err != nil {
+		t.Fatalf("load repository catalog: %v", err)
+	}
+	trimmed, removed := withoutCoverageCell(catalog, "HISS-08", "rust")
+	if !removed {
+		t.Errorf("HISS-08/rust must be declared in %s", CatalogFile)
+	}
+	report, err := Verify(t.Context(), root, trimmed)
+	if err != nil {
+		t.Fatalf("verify without HISS-08/rust: %v", err)
+	}
+	if report.Passed() {
+		t.Fatal("without HISS-08/rust, the committed Rust gap fixtures are unowned and Verify must fail")
+	}
+	want := []string{
+		".config/hiss/testdata/HISS-08/rust/gap/command-shell.rs",
+		".config/hiss/testdata/HISS-08/rust/gap/libc-kill.rs",
+		".config/hiss/testdata/HISS-08/rust/gap/libloading-open.rs",
+	}
+	if len(report.Findings) != len(want) {
+		t.Fatalf("findings = %+v, want the %d HISS-08/rust gap files", report.Findings, len(want))
+	}
+	for i := range want {
+		if !strings.Contains(report.Findings[i].String(), want[i]) {
+			t.Errorf("finding %d = %q, want path %s", i, report.Findings[i], want[i])
+		}
+	}
 }

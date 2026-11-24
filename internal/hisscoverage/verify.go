@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	slashpath "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -33,6 +35,10 @@ const (
 	maxFixtureMarkerLines = 32
 	// fixtureMarkerPrefix introduces an intentional gap marker inside a leading fixture comment.
 	fixtureMarkerPrefix = "hiss-fixture:"
+	// maxCorpusDirs bounds the directories Verify walks below FixtureDir (HISS-02).
+	maxCorpusDirs = 4096
+	// maxCorpusEntries bounds the entries read from one directory below FixtureDir (HISS-02).
+	maxCorpusEntries = 4096
 )
 
 // Bucket names within a fixture directory. A measured fixture holds a shape the scanner
@@ -116,9 +122,33 @@ type Finding struct {
 	Detail   string
 }
 
-// String renders a finding for a terminal report.
+// String renders a finding for a terminal report, omitting empty cell or bucket segments so
+// corpus-ownership findings outside a full rule/language/bucket/fixture path format cleanly.
 func (f Finding) String() string {
-	return fmt.Sprintf("%s/%s %s/%s: %s", f.Rule, f.Language, f.Bucket, f.Fixture, f.Detail)
+	head := slashJoinNonEmpty(f.Rule, f.Language)
+	leaf := slashJoinNonEmpty(f.Bucket, f.Fixture)
+	switch {
+	case head != "" && leaf != "":
+		return fmt.Sprintf("%s %s: %s", head, leaf, f.Detail)
+	case head != "":
+		return fmt.Sprintf("%s: %s", head, f.Detail)
+	case leaf != "":
+		return fmt.Sprintf("%s: %s", leaf, f.Detail)
+	default:
+		return f.Detail
+	}
+}
+
+// slashJoinNonEmpty joins a and b with a slash when both are non-empty, or returns whichever is set.
+func slashJoinNonEmpty(a, b string) string {
+	switch {
+	case a != "" && b != "":
+		return a + "/" + b
+	case a != "":
+		return a
+	default:
+		return b
+	}
 }
 
 // Report is the outcome of replaying the corpus against the catalog.
@@ -145,14 +175,17 @@ func (r *Report) Passed() bool {
 	return r != nil && len(r.Findings) == 0
 }
 
-// Verify replays the fixture corpus and reports every claim the corpus contradicts.
+// Verify replays the fixture corpus, reconciles FixtureDir against catalog, and reports every
+// contradiction or unowned path.
 //
-// The check runs in both directions. A state claiming detection must report each of its
-// positive fixtures, and a state claiming none must leave its gap fixtures undetected. The
-// second direction is what stops the catalog from quietly becoming pessimistic: when a rule
-// gains coverage, the gap fixture it was supposed to miss now fires and the catalog must be
-// updated to say so. An incomplete (unparsed or truncated) or zero-file fixture scan never
-// certifies a negative, gap, measured, positive or delegated claim.
+// The check runs in both directions across claims and across the directory tree. A state
+// claiming detection must report each of its positive fixtures, and a state claiming none must
+// leave its gap fixtures undetected, stopping the catalog from quietly becoming pessimistic
+// when a rule gains coverage. Walking FixtureDir in reverse ensures every file and language
+// directory on disk belongs to a valid bucket of a declared rule and language cell, naming the
+// path whenever an orphan fixture or misspelled directory goes unowned.
+// An incomplete (unparsed or truncated) or zero-file fixture scan never certifies a
+// negative, gap, measured, positive or delegated claim.
 func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, error) {
 	if ctx == nil {
 		return nil, errors.New("hisscoverage: verify requires a context")
@@ -168,6 +201,9 @@ func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, err
 				return nil, err
 			}
 		}
+	}
+	if err := verifyCorpus(ctx, rootDir, catalog, report); err != nil {
+		return nil, err
 	}
 	sort.Slice(report.Findings, func(a, b int) bool {
 		return report.Findings[a].String() < report.Findings[b].String()
@@ -680,4 +716,246 @@ func measuresRule(measurements []hiss.Measurement, ruleID string) bool {
 		}
 	}
 	return false
+}
+
+// corpusChecker walks FixtureDir and reports every file or directory that belongs to no
+// declared rule/language cell or sits outside a valid fixture bucket.
+type corpusChecker struct {
+	rules    map[string]bool
+	cells    map[string]bool
+	report   *Report
+	dirsLeft int
+}
+
+// newCorpusChecker indexes catalog's rules and rule/language cells for the corpus walk.
+func newCorpusChecker(catalog *Catalog, report *Report) *corpusChecker {
+	c := &corpusChecker{
+		rules:    make(map[string]bool, len(catalog.Rules)),
+		cells:    make(map[string]bool, len(catalog.Rules)*4),
+		report:   report,
+		dirsLeft: maxCorpusDirs,
+	}
+	for i := 0; i < len(catalog.Rules); i++ {
+		rule := &catalog.Rules[i]
+		c.rules[rule.ID] = true
+		for j := 0; j < len(rule.Coverage); j++ {
+			c.cells[rule.ID+"/"+rule.Coverage[j].Language] = true
+		}
+	}
+	return c
+}
+
+// readDirBounded reads one directory below FixtureDir under the directory and entry bounds.
+func (c *corpusChecker) readDirBounded(ctx context.Context, dir string) ([]fs.DirEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("verify fixture corpus: %w", err)
+	}
+	if c.dirsLeft <= 0 {
+		return nil, fmt.Errorf("fixture corpus exceeds %d directories", maxCorpusDirs)
+	}
+	c.dirsLeft--
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read fixture corpus %s: %w", dir, err)
+	}
+	if len(entries) > maxCorpusEntries {
+		return nil, fmt.Errorf("fixture directory %s exceeds %d entries", dir, maxCorpusEntries)
+	}
+	return entries, nil
+}
+
+// verifyCorpus walks FixtureDir and records a finding for every file or directory that maps to
+// no declared rule/language cell or sits outside a replayed fixture bucket.
+func verifyCorpus(ctx context.Context, rootDir string, catalog *Catalog, report *Report) error {
+	corpusDir := filepath.Join(rootDir, filepath.FromSlash(FixtureDir))
+	checker := newCorpusChecker(catalog, report)
+	entries, err := checker.readDirBounded(ctx, corpusDir)
+	if err != nil {
+		if util.DirectoryAbsent(corpusDir, err) {
+			return nil
+		}
+		return err
+	}
+	for i := 0; i < len(entries) && i < maxCorpusEntries; i++ {
+		if err := checker.checkRuleEntry(ctx, corpusDir, entries[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRuleEntry inspects one top-level entry directly below FixtureDir.
+func (c *corpusChecker) checkRuleEntry(ctx context.Context, corpusDir string, entry fs.DirEntry) error {
+	ruleID := entry.Name()
+	rel := slashpath.Join(FixtureDir, ruleID)
+	if !entry.IsDir() {
+		c.report.Findings = append(c.report.Findings, Finding{
+			Fixture: ruleID, Detail: fmt.Sprintf("unowned fixture %s maps to no declared rule and language cell", rel),
+		})
+		return nil
+	}
+	ruleDir := filepath.Join(corpusDir, ruleID)
+	entries, err := c.readDirBounded(ctx, ruleDir)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 && !c.rules[ruleID] {
+		c.report.Findings = append(c.report.Findings, Finding{
+			Rule: ruleID, Detail: fmt.Sprintf("unowned rule directory %s: %s is not declared in %s", rel, ruleID, CatalogFile),
+		})
+		return nil
+	}
+	for i := 0; i < len(entries) && i < maxCorpusEntries; i++ {
+		if err := c.checkLanguageEntry(ctx, ruleDir, ruleID, entries[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkLanguageEntry inspects one entry below FixtureDir/<rule>.
+func (c *corpusChecker) checkLanguageEntry(ctx context.Context, ruleDir, ruleID string, entry fs.DirEntry) error {
+	lang := entry.Name()
+	rel := slashpath.Join(FixtureDir, ruleID, lang)
+	if !entry.IsDir() {
+		c.report.Findings = append(c.report.Findings, Finding{
+			Rule: ruleID, Fixture: lang, Detail: fmt.Sprintf("unowned fixture %s maps to no declared rule and language cell", rel),
+		})
+		return nil
+	}
+	langDir := filepath.Join(ruleDir, lang)
+	if !c.cells[ruleID+"/"+lang] {
+		reason := fmt.Sprintf("%s/%s is not declared in %s", ruleID, lang, CatalogFile)
+		target := unownedTarget{dir: langDir, rel: rel, rule: ruleID, lang: lang, kind: "language directory", reason: reason}
+		return c.reportUnownedSubtree(ctx, target)
+	}
+	entries, err := c.readDirBounded(ctx, langDir)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(entries) && i < maxCorpusEntries; i++ {
+		if err := c.checkBucketEntry(ctx, langDir, ruleID, lang, entries[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isValidBucket reports whether name is one of the four replayed fixture buckets.
+func isValidBucket(name string) bool {
+	switch name {
+	case bucketPositive, bucketNegative, bucketGap, bucketMeasured:
+		return true
+	default:
+		return false
+	}
+}
+
+// checkBucketEntry inspects one entry below a declared FixtureDir/<rule>/<language> cell.
+func (c *corpusChecker) checkBucketEntry(ctx context.Context, langDir, ruleID, lang string, entry fs.DirEntry) error {
+	name := entry.Name()
+	rel := slashpath.Join(FixtureDir, ruleID, lang, name)
+	if !entry.IsDir() {
+		c.report.Findings = append(c.report.Findings, Finding{
+			Rule: ruleID, Language: lang, Fixture: name, Detail: fmt.Sprintf("unowned fixture %s sits outside a fixture bucket", rel),
+		})
+		return nil
+	}
+	bucketDir := filepath.Join(langDir, name)
+	if !isValidBucket(name) {
+		reason := fmt.Sprintf("bucket %q is not positive, negative, gap or measured", name)
+		target := unownedTarget{dir: bucketDir, rel: rel, rule: ruleID, lang: lang, bucket: name, kind: "bucket directory", reason: reason}
+		return c.reportUnownedSubtree(ctx, target)
+	}
+	return c.checkBucketSubdirs(ctx, bucketDir, rel, ruleID, lang, name)
+}
+
+// checkBucketSubdirs flags any nested directory inside a valid bucket, since replayBucket reads
+// only direct files of the bucket directory.
+func (c *corpusChecker) checkBucketSubdirs(ctx context.Context, bucketDir, bucketRel, ruleID, lang, bucket string) error {
+	entries, err := c.readDirBounded(ctx, bucketDir)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(entries) && i < maxCorpusEntries; i++ {
+		if !entries[i].IsDir() {
+			continue
+		}
+		sub := entries[i].Name()
+		target := unownedTarget{
+			dir:    filepath.Join(bucketDir, sub),
+			rel:    slashpath.Join(bucketRel, sub),
+			rule:   ruleID,
+			lang:   lang,
+			bucket: bucket,
+			kind:   "nested directory",
+			reason: "nested directories inside a fixture bucket are not replayed",
+		}
+		if err := c.reportUnownedSubtree(ctx, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// unownedTarget describes a directory below FixtureDir whose contents belong to no replayed cell.
+type unownedTarget struct {
+	dir    string
+	rel    string
+	rule   string
+	lang   string
+	bucket string
+	kind   string
+	reason string
+}
+
+// walkFrame is one pending directory on reportUnownedSubtree's explicit stack.
+type walkFrame struct {
+	dir string
+	rel string
+	sub string
+}
+
+// reportUnownedSubtree walks target.dir iteratively without recursion, recording one finding per
+// file inside it, or one finding for target.rel itself when the subtree holds no files.
+func (c *corpusChecker) reportUnownedSubtree(ctx context.Context, target unownedTarget) error {
+	stack := []walkFrame{{dir: target.dir, rel: target.rel}}
+	files := 0
+	for step := 0; len(stack) > 0 && step < maxCorpusDirs; step++ {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		entries, err := c.readDirBounded(ctx, cur.dir)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < len(entries) && i < maxCorpusEntries; i++ {
+			entryRel := slashpath.Join(cur.rel, entries[i].Name())
+			entrySub := slashJoinNonEmpty(cur.sub, entries[i].Name())
+			if entries[i].IsDir() {
+				stack = append(stack, walkFrame{dir: filepath.Join(cur.dir, entries[i].Name()), rel: entryRel, sub: entrySub})
+				continue
+			}
+			files++
+			c.report.Findings = append(c.report.Findings, target.fileFinding(entryRel, entrySub))
+		}
+	}
+	if files == 0 {
+		detail := fmt.Sprintf("unowned %s %s: %s", target.kind, target.rel, target.reason)
+		c.report.Findings = append(c.report.Findings, Finding{
+			Rule: target.rule, Language: target.lang, Bucket: target.bucket, Detail: detail,
+		})
+	}
+	return nil
+}
+
+// fileFinding builds the Finding for one unowned file at entryRel (entrySub below target.rel).
+func (t unownedTarget) fileFinding(entryRel, entrySub string) Finding {
+	bucket, fixture := t.bucket, entrySub
+	if bucket == "" {
+		if head, rest, ok := strings.Cut(entrySub, "/"); ok {
+			bucket, fixture = head, rest
+		}
+	}
+	detail := fmt.Sprintf("unowned fixture %s: %s", entryRel, t.reason)
+	return Finding{Rule: t.rule, Language: t.lang, Bucket: bucket, Fixture: fixture, Detail: detail}
 }
