@@ -533,8 +533,8 @@ func TestCheck_FixtureDataNotSource(t *testing.T) {
 	assertDocstringReport(t, "fixture data excluded; documented control counted", rep, err, true, 1, 1)
 }
 
-// runDocstringFixtureCase evaluates one fixture file in a fresh git repository and checks the report.
-func runDocstringFixtureCase(t *testing.T, tc docstringFixtureCase) {
+// runDocstringFixtureCase checks coverage in a fresh git repository and returns the fixture source.
+func runDocstringFixtureCase(t *testing.T, tc docstringFixtureCase) string {
 	t.Helper()
 	raw := readDocstringFixture(t, tc.fixture, tc.targetPath)
 	dir := newDocstringTestRepo(t, map[string]string{"pkg/seed.go": "package pkg\n"})
@@ -547,6 +547,7 @@ func runDocstringFixtureCase(t *testing.T, tc docstringFixtureCase) {
 			t.Fatalf("%s: want first uncovered %s:%d, got %+v", tc.name, tc.uncoveredName, tc.uncoveredLine, rep.Uncovered)
 		}
 	}
+	return raw
 }
 
 // TestCheck_RustMultilineSignaturesAndAttributes_3D verifies positive, negative, and boundary
@@ -605,23 +606,50 @@ func TestCheck_AttributeRegressions_3D(t *testing.T) {
 		{"r4_backtick_documented", "r4_backtick_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
 		{"r4_backtick_undocumented", "r4_backtick_neg.ts.txt", "web/routes.ts", false, 1, 0, "render", 3},
 		{"malformed_attributes", "malformed_attributes.rs.txt", "src/lib.rs", false, 2, 0, "mismatched", 5},
+		{"rust_inner_comment_documented", "rust_inner_comment_pos.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"rust_inner_comment_undocumented", "rust_inner_comment_neg.rs.txt", "src/lib.rs", false, 1, 0, "f", 6},
+		{"rust_inner_blank_documented", "rust_inner_blank_pos.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"rust_inner_blank_undocumented", "rust_inner_blank_neg.rs.txt", "src/lib.rs", false, 1, 0, "f", 6},
+		{"python_inner_comment_documented", "python_inner_comment_pos.py.txt", "app/decorated.py", true, 1, 1, "", 0},
+		{"python_inner_comment_undocumented", "python_inner_comment_neg.py.txt", "app/decorated.py", false, 1, 0, "f", 7},
+		{"typescript_inner_comment_documented", "ts_inner_comment_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"typescript_inner_comment_undocumented", "ts_inner_comment_neg.ts.txt", "web/routes.ts", false, 1, 0, "route", 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			runDocstringFixtureCase(t, tc)
+			raw := runDocstringFixtureCase(t, tc)
+			if util.SourceLanguage(tc.targetPath) == "python" {
+				assertPythonDecoratorAnchor(t, raw, tc.passed)
+			}
 		})
+	}
+}
+
+// assertPythonDecoratorAnchor exercises the attribute reader directly because Python coverage uses a body docstring.
+func assertPythonDecoratorAnchor(t *testing.T, raw string, wantComment bool) {
+	t.Helper()
+	decorator, _, found := strings.Cut(raw, "\ndef ")
+	if !found {
+		t.Fatal("missing fixture function after decorator")
+	}
+	lines := strings.Split(decorator, "\n")
+	idx, ok := docstrings.SkipPythonDecoratorForTest(lines, len(lines)-1)
+	gotComment := ok && idx >= 0 && strings.HasPrefix(lines[idx], "#")
+	if gotComment != wantComment {
+		t.Fatalf("Python decorator anchor: got index=%d ok=%v, want comment=%v", idx, ok, wantComment)
 	}
 }
 
 // TestCheck_Boundary_MaxAttributeLines_3D verifies the exact 32-line scalar bound on attribute
 // skipping: a 32-line balanced attribute passes, a 33-line attribute fails as undocumented, and
-// quoted brackets or trailing // comments inside attributes do not desynchronise the delimiter walk.
+// quoted brackets, comments, and blank lines do not desynchronise the delimiter walk.
 func TestCheck_Boundary_MaxAttributeLines_3D(t *testing.T) {
 	dir := newDocstringTestRepo(t, map[string]string{"pkg/seed.go": "package pkg\n"})
 
 	// Boundary positive: 32 attribute lines total (#[cfg_attr( + 30 inner lines + )]).
 	exact32 := "/// Documented at the exact 32-line attribute bound.\n#[cfg_attr(\n" +
-		strings.Repeat("    feature = \"a)]\", // trailing )]\n", 30) +
+		strings.Repeat("    feature = \"a)]\", // trailing )]\n", 28) +
+		"    // Standalone )]\n\n" +
 		")]\npub fn at_bound(\n    a: u32,\n) -> u32 {\n    a\n}\n"
 	writeTestFile(t, dir, "src/lib.rs", exact32)
 	runGitCmd(t, dir, "add", ".")
@@ -630,7 +658,8 @@ func TestCheck_Boundary_MaxAttributeLines_3D(t *testing.T) {
 
 	// Boundary negative: 33 attribute lines total (#[cfg_attr( + 31 inner lines + )]).
 	over33 := "/// Documented above a 33-line attribute exceeding the bound.\n#[cfg_attr(\n" +
-		strings.Repeat("    feature = \"a\",\n", 31) +
+		strings.Repeat("    feature = \"a\",\n", 29) +
+		"    // Standalone )]\n\n" +
 		")]\npub fn over_bound(\n    a: u32,\n) -> u32 {\n    a\n}\n"
 	writeTestFile(t, dir, "src/lib.rs", over33)
 	repOver, err := docstrings.Check(t.Context(), docstrings.Options{RepoDir: dir, BaseRef: "origin/main"})

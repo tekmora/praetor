@@ -1,0 +1,6 @@
+#[cfg_attr(
+    feature = "fast",
+    // Enable inlining for this feature.
+    inline
+)]
+pub fn f() {}

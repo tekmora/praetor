@@ -350,7 +350,7 @@ func hasCommentAbove(lines []string, startLine int) bool {
 	if strings.TrimSpace(lines[startLine-1]) == "{" && idx >= 1 {
 		idx--
 	}
-	idx, ok := skipAttributesAbove(lines, idx)
+	idx, ok := skipAttributesAbove(lines, idx, "//")
 	if !ok || idx < 0 {
 		return false
 	}
@@ -366,14 +366,14 @@ func hasCommentAbove(lines []string, startLine int) bool {
 
 // skipAttributesAbove steps backwards from idx over at most maxAttributeLines of balanced
 // single-line or multi-line attributes and decorators, returning the index above them.
-func skipAttributesAbove(lines []string, idx int) (int, bool) {
+func skipAttributesAbove(lines []string, idx int, lineComment string) (int, bool) {
 	remaining := maxAttributeLines
 	for steps := 0; steps < maxAttributeLines && remaining > 0 && idx >= 0; steps++ {
 		trimmed := strings.TrimSpace(lines[idx])
-		if !isAttributeOrDecorator(trimmed) && !closesAttributeGroup(trimmed) {
+		if !isAttributeOrDecorator(trimmed) && !closesAttributeGroup(trimmed, lineComment) {
 			return idx, true
 		}
-		nextIdx, used, ok := stepAttributeGroup(lines, idx, remaining)
+		nextIdx, used, ok := stepAttributeGroup(lines, idx, remaining, lineComment)
 		if !ok {
 			return -1, false
 		}
@@ -385,15 +385,15 @@ func skipAttributesAbove(lines []string, idx int) (int, bool) {
 
 // closesAttributeGroup reports whether a trimmed line ends with a closing bracket or parenthesis
 // that may terminate a multi-line attribute or decorator.
-func closesAttributeGroup(trimmed string) bool {
-	code, closed := stripAttributeLine(trimmed)
+func closesAttributeGroup(trimmed, lineComment string) bool {
+	code, closed := stripAttributeLine(trimmed, lineComment)
 	return closed && countParenDelta(code) < 0 && (strings.HasSuffix(code, "]") || strings.HasSuffix(code, ")"))
 }
 
 // stepAttributeGroup consumes one balanced attribute or decorator ending at idx within remaining lines.
-func stepAttributeGroup(lines []string, idx, remaining int) (int, int, bool) {
+func stepAttributeGroup(lines []string, idx, remaining int, lineComment string) (int, int, bool) {
 	trimmed := strings.TrimSpace(lines[idx])
-	code, closed := stripAttributeLine(trimmed)
+	code, closed := stripAttributeLine(trimmed, lineComment)
 	if !closed {
 		return -1, 0, false
 	}
@@ -407,20 +407,21 @@ func stepAttributeGroup(lines []string, idx, remaining int) (int, int, bool) {
 	if delta >= 0 {
 		return -1, 0, false
 	}
-	return scanAttributeStart(lines, idx, remaining, -delta, code)
+	return scanAttributeStart(lines, idx, remaining, -delta, code, lineComment)
 }
 
 // scanAttributeStart walks backwards from idx-1 until bracket depth reaches zero on an attribute header.
-func scanAttributeStart(lines []string, idx, remaining, depth int, tail string) (int, int, bool) {
+// Blank lines and standalone line comments consume the same line budget as code.
+func scanAttributeStart(lines []string, idx, remaining, depth int, tail, lineComment string) (int, int, bool) {
 	parts := make([]string, 1, remaining)
 	parts[0] = tail
 	for step := 1; step < remaining && idx-step >= 0 && depth > 0; step++ {
 		trimmed := strings.TrimSpace(lines[idx-step])
-		if trimmed == "" || isCommentBoundary(trimmed) {
-			break
+		if trimmed == "" || strings.HasPrefix(trimmed, lineComment) {
+			continue
 		}
-		code, closed := stripAttributeLine(trimmed)
-		if !closed {
+		code, closed := stripAttributeLine(trimmed, lineComment)
+		if !closed || isBlockCommentBoundary(trimmed) {
 			break
 		}
 		parts = append(parts, code)
@@ -488,13 +489,13 @@ func attributeBodyWidth(code string) int {
 	return 0
 }
 
-// isCommentBoundary reports whether a trimmed line is a standalone comment that cannot be part of an attribute.
-func isCommentBoundary(trimmed string) bool {
-	return strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasSuffix(trimmed, "*/")
+// isBlockCommentBoundary reports whether a trimmed line starts or ends a standalone block comment.
+func isBlockCommentBoundary(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "/*") || strings.HasSuffix(trimmed, "*/")
 }
 
-// stripAttributeLine removes literal contents and trailing // comments, and reports whether its quotes close.
-func stripAttributeLine(line string) (string, bool) {
+// stripAttributeLine removes literal contents and trailing line comments and reports whether its quotes close.
+func stripAttributeLine(line, lineComment string) (string, bool) {
 	var b strings.Builder
 	var inQuote byte
 	for i := 0; i < len(line); i++ {
@@ -508,7 +509,7 @@ func stripAttributeLine(line string) (string, bool) {
 			}
 			continue
 		}
-		if strings.HasPrefix(line[i:], "//") {
+		if strings.HasPrefix(line[i:], lineComment) {
 			break
 		}
 		if ch == '"' || ch == '\'' || ch == '`' {
