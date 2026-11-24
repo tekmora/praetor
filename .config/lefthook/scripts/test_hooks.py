@@ -41,7 +41,6 @@ from checks import (
     FIXTURE_DIRECTORY,
     GATE_LAUNCH_MARGIN,
     GATE_QUERY_TIMEOUT,
-    PUSH_ADMISSION_WAIT_SECONDS,
     PUSH_SLOT_PLATFORMS,
     SEMGREP_LANGUAGE_EXTENSIONS,
     SEMGREP_SUFFIXES,
@@ -3244,7 +3243,7 @@ class ScopeAndGuard(unittest.TestCase):
             self.assertTrue(run_full_gate(Path(".")))
         calls = [(call.args[0][3:5], call.kwargs["timeout"]) for call in spawned.call_args_list]
         timeout = 2100 + GATE_LAUNCH_MARGIN
-        execution = (["admit", "--class"], timeout + 2 * PUSH_ADMISSION_WAIT_SECONDS) \
+        execution = (["admit", "--class"], 3 * timeout + GATE_LAUNCH_MARGIN) \
             if sys.platform.startswith(PUSH_SLOT_PLATFORMS) else (["gate", "run"], timeout)
         self.assertEqual(calls, [(["gate", "deadline"], GATE_QUERY_TIMEOUT),
                                  execution, (["gate", "verify"], timeout)])
@@ -4248,7 +4247,7 @@ class ScopeAndGuard(unittest.TestCase):
                 gate = [*cli, "gate", "run", "--path=.", "--race-packages=none"]
                 if sys.platform.startswith(PUSH_SLOT_PLATFORMS):
                     gate = [*cli, "admit", "--class", "push", "--local", "--label", "push-gate",
-                            "--wait", f"{PUSH_ADMISSION_WAIT_SECONDS}s", "--timeout", f"{480 + GATE_LAUNCH_MARGIN}s",
+                            "--wait", f"{480 + GATE_LAUNCH_MARGIN}s", "--timeout", f"{480 + GATE_LAUNCH_MARGIN}s",
                             "--", *gate]
                 self.assertEqual(calls, [[toolchain.make_program(), "--no-print-directory", "state-audit"],
                                          [*cli, "gate", "deadline", "--json"],

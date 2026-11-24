@@ -157,7 +157,8 @@ run_pinned() {                                                      #
 #
 # has_push_slot ENGINE: confirm the OS has Unix advisory locks and this engine advertises --class.
 has_push_slot() {                                                                                     #
-  case "${OS-}:$(uname -s 2>/dev/null || :)" in                                                       #
+  kernel=$(uname -s 2>/dev/null) || return 1                                                          #
+  case "${OS-}:$kernel" in                                                                            #
     Windows_NT:*) return 1 ;;                                                                         #
     *:AIX | *:Darwin | *:DragonFly | *:FreeBSD | *:GNU | *:Linux | *:NetBSD | *:OpenBSD | *:SunOS) ;; #
     *) return 1 ;;                                                                                    #
@@ -172,7 +173,7 @@ run_engine() {                                                                  
   shift                                                                                                            #
   if [ "$#" -eq 4 ] && [ "$*" = "gate run --path=. --admit-unsupported" ]; then                                    #
     if has_push_slot "$engine"; then                                                                               #
-      exec "$engine" admit --class push --local --label push-gate --wait 300s -- "$engine" "$@"                    #
+      exec "$engine" admit --class push --local --label push-gate -- "$engine" "$@"                                #
     fi                                                                                                             #
     echo "praetor hooks: push slot unavailable on this platform or engine; running the verified gate directly" >&2 #
   fi                                                                                                               #

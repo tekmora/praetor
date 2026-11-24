@@ -81,10 +81,8 @@ func TestLefthookGate_Positive_PrePushGateRunsGateThroughAdmit(t *testing.T) {
 	}
 	got := mustRead(t, f.log)
 	pinned := filepath.Join(directory, util.LegacyCLI)
-	if !strings.Contains(got, "admit --class push --local --label push-gate") ||
-		!strings.Contains(got, "--wait 300s") ||
-		!strings.Contains(got, " -- "+pinned+" gate run") {
-		t.Fatalf("admit must run the pinned gate with a wait budget: %q", got)
+	if !strings.Contains(got, "admit --class push --local --label push-gate -- "+pinned+" gate run") {
+		t.Fatalf("admit must run the pinned gate with the engine's default wait: %q", got)
 	}
 	if !strings.Contains(got, util.LegacyCLI+" gate run --path=. --"+gating.AdmitUnsupportedFlag) {
 		t.Fatalf("inner gate subcommand not executed: %q", got)
@@ -117,21 +115,30 @@ func generatedPrePushGate(t *testing.T) string {
 	return command
 }
 
-// TestReview2044GeneratedPrePushRunsOnNonUnix exercises the gate with an engine that advertises
-// the class flag but refuses push slot admission on Windows.
+// TestReview2044GeneratedPrePushRunsOnNonUnix exercises the direct gate when the launcher cannot
+// confirm the platform supports push slots.
 func TestReview2044GeneratedPrePushRunsOnNonUnix(t *testing.T) {
-	f := newEngineFixture(t)
-	writeStub(t, f.stubs, "uname", "printf '%s\\n' MINGW64_NT-10.0\n")
-	writeStub(t, f.stubs, util.PraetorCLI, `case "$*" in
+	const engine = `case "$*" in
   "admit --help") printf 'Usage of admit:\n  -class string\n' >&2 ;;
   admit*) echo 'push slot: host push slot leases require Unix advisory file locks' >&2; exit 1 ;;
   "gate run --path=. --admit-unsupported") echo 'verified gate' ;;
   *) exit 2 ;;
 esac
-`)
-	out, code := f.runLine(generatedPrePushGate(t), "OS=Windows_NT")
-	if code != 0 || !strings.Contains(out, "verified gate") {
-		t.Fatalf("Windows gate: exit %d, output %q", code, out)
+`
+	for _, tc := range []struct{ name, osEnv, uname string }{
+		{"Windows", "OS=Windows_NT", "printf '%s\\n' MINGW64_NT-10.0\n"},
+		{"unknown uname", "OS=", "printf '%s\\n' unknown\n"},
+		{"failed uname", "OS=", "printf '%s\\n' Linux\nexit 1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEngineFixture(t)
+			writeStub(t, f.stubs, "uname", tc.uname)
+			writeStub(t, f.stubs, util.PraetorCLI, engine)
+			out, code := f.runLine(generatedPrePushGate(t), tc.osEnv)
+			if code != 0 || !strings.Contains(out, "verified gate") {
+				t.Fatalf("direct gate: exit %d, output %q", code, out)
+			}
+		})
 	}
 }
 

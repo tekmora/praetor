@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/admission"
@@ -163,6 +164,54 @@ func TestRunAdmit_PushClass_WaiterDeadline(t *testing.T) {
 	}
 	waitHolder()
 }
+
+// TestReview2044HookPushSlotWaitsPastFiveMinutes queues with the actual pre-push hook budget.
+func TestReview2044HookPushSlotWaitsPastFiveMinutes(t *testing.T) {
+	admission.PushSlotTestBase(t)
+	wait, err := time.ParseDuration(strings.TrimSpace(runHookDeadlineFixture(t, hookPushSlotWaitFixture)))
+	if err != nil {
+		t.Fatalf("hook push slot wait: %v", err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		holding, releaseHolder := startPushSlotHolderForTest(t)
+		select {
+		case <-holding:
+		case <-time.After(time.Second):
+			t.Fatal("holder blocked")
+		}
+		done := make(chan error, 1)
+		go func() {
+			release, err := admission.WaitPushSlot(t.Context(), wait, time.Second, io.Discard)
+			if err == nil {
+				err = release()
+			}
+			done <- err
+		}()
+		synctest.Wait()
+		time.Sleep(301 * time.Second)
+		releaseHolder()
+		if err := <-done; err != nil {
+			t.Fatalf("waiter after 301s: %v", err)
+		}
+	})
+}
+
+// hookPushSlotWaitFixture prints the duration passed to admit for a 25-minute gate deadline.
+const hookPushSlotWaitFixture = `
+from pathlib import Path
+from unittest.mock import patch
+import checks
+
+def run(argv, **kwargs):
+    if argv[3:5] == ["gate", "deadline"]:
+        return b'{"timeout_seconds": 1500}'
+    if argv[3:5] == ["admit", "--class"]:
+        print(argv[argv.index("--wait") + 1])
+    return b""
+
+with patch.object(checks.sys, "platform", "linux"), patch.object(checks, "run", run):
+    assert checks.run_full_gate(Path("."))
+`
 
 // startPushSlotHolderForTest runs a push-slot holder until t ends or the returned wait function runs.
 func startPushSlotHolderForTest(t *testing.T) (<-chan struct{}, func()) {

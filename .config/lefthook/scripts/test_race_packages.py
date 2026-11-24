@@ -56,9 +56,9 @@ class RacePackages(unittest.TestCase):
             self.assertTrue(checks.source_checks(root, names))
         if sys.platform.startswith(checks.PUSH_SLOT_PLATFORMS):
             admitted = next(cmd for cmd in calls if cmd[3:5] == ["admit", "--class"])
+            timeout = f"{1500 + checks.GATE_LAUNCH_MARGIN}s"
             self.assertEqual(admitted[3:14], ["admit", "--class", "push", "--local", "--label", "push-gate",
-                                             "--wait", f"{checks.PUSH_ADMISSION_WAIT_SECONDS}s", "--timeout",
-                                             f"{1500 + checks.GATE_LAUNCH_MARGIN}s", "--"])
+                                             "--wait", timeout, "--timeout", timeout, "--"])
             launched = admitted[14:]
         else:
             launched = next(cmd for cmd in calls if cmd[3:5] == ["gate", "run"])

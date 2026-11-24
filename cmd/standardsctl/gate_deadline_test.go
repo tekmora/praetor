@@ -19,6 +19,12 @@ import (
 
 // TestReview2044HookDeadlineReservesGateRuntime executes the hook budget against a stand-in gate.
 func TestReview2044HookDeadlineReservesGateRuntime(t *testing.T) {
+	runHookDeadlineFixture(t, hookDeadlineFixture)
+}
+
+// runHookDeadlineFixture runs a stubbed hook budget check and returns its stdout.
+func runHookDeadlineFixture(t *testing.T, script string) string {
+	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required to exercise the hook budget")
@@ -26,10 +32,11 @@ func TestReview2044HookDeadlineReservesGateRuntime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	dir := filepath.Join("..", "..", ".config", "lefthook", "scripts")
-	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", hookDeadlineFixture)
+	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", script)
 	if err != nil {
 		t.Fatalf("stubbed hook budget: %v\n%s\n%s", err, out.Stdout, out.Stderr)
 	}
+	return string(out.Stdout)
 }
 
 // hookDeadlineFixture spends time in both admission and gate work, using only stand-in processes.
@@ -48,20 +55,19 @@ def run(argv, *, timeout, **kwargs):
     calls.append((argv[3:5], timeout))
     if argv[3] == "gate":
         return b""
-    child = "import time; time.sleep(0.65); time.sleep(0.65); print('gate complete')"
+    child = "import time; time.sleep(0.65); time.sleep(0.65); time.sleep(0.65); print('gate complete')"
     result = subprocess.run([sys.executable, "-B", "-c", child],
                             timeout=timeout, capture_output=True, check=True)
     assert result.stdout.strip() == b"gate complete", result.stdout
-    assert argv[argv.index("--wait") + 1] == "1s", argv
-    assert argv[argv.index("--timeout") + 1] == "1.1s", argv
+    assert argv[argv.index("--wait") + 1] == "1.25s", argv
+    assert argv[argv.index("--timeout") + 1] == "1.25s", argv
     return b""
 
 with patch.object(checks.sys, "platform", "linux"), \
-     patch.object(checks, "GATE_LAUNCH_MARGIN", 0.1), \
-     patch.object(checks, "PUSH_ADMISSION_WAIT_SECONDS", 1, create=True), \
+     patch.object(checks, "GATE_LAUNCH_MARGIN", 0.25), \
      patch.object(checks, "run", run):
     assert checks.run_full_gate(Path("."))
-assert calls == [(["admit", "--class"], 3.1), (["gate", "verify"], 1.1)], calls
+assert calls == [(["admit", "--class"], 4), (["gate", "verify"], 1.25)], calls
 
 calls.clear()
 with patch.object(checks.sys, "platform", "win32"), patch.object(checks, "run", run):

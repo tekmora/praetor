@@ -589,7 +589,7 @@ against the installed one.
 
 The pre-push `gate` job runs `sh .config/lefthook/engine.sh gate run --path=. --admit-unsupported`.
 On Unix, when the resolved engine advertises `--class`, the launcher runs the gate through
-`admit --class push --local --wait 300s`. The slot and load admission each get five minutes.
+`admit --class push --local`. Slot and load admission each use the resolved engine's default wait.
 Local load admission uses host-capped defaults from `HostCappedPolicy` in
 `internal/admission/admission.go`. The resolved engine runs `gate run --path=. --admit-unsupported`
 directly on other platforms or when its version predates the class flag.
@@ -1054,8 +1054,9 @@ resolves `PRAETOR_TEST_STAGE_TIMEOUT` through the pipeline's parser: the race-st
 to its 30-minute ceiling, once per test suite the repository holds, plus the allowance for the
 other stages. It runs from the repository root, so a root holding both a `go.mod` and a
 `Cargo.lock` gets the two-suite deadline `gate run` grants itself. It adds a two-minute
-launch margin (`GATE_LAUNCH_MARGIN`) for `go run` to rebuild the CLI. On Unix the outer
-`gate run` timeout also reserves five minutes for the push slot and five for load admission.
+launch margin (`GATE_LAUNCH_MARGIN`) for `go run` to rebuild the CLI. On Unix the hook gives
+the gate process, the push slot wait and the load wait that same budget each. The outer timeout
+covers all three budgets plus a separate `go run` launch margin for `admit`.
 `gate verify` runs separately after slot release with the gate deadline and launch margin.
 A deadline report the hook cannot use fails the
 push rather than running the gate under a guessed bound. The deadline itself is described in

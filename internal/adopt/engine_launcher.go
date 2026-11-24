@@ -23,7 +23,7 @@ const engineLauncherFile = ".config/lefthook/engine.sh"
 // TestPriorEngineLauncherDigests_Boundary_CurrentTextRecorded fails until a changed launcher is
 // recorded here, so the next release still refreshes it.
 var priorEngineLauncherDigests = map[string]string{
-	"50601aa764234b53c94fbf907a6ca3328b2fdba9faac4e27090aad6dc06f9317": "engine launcher with compatible pre-push admission",
+	"7447a91ccc7f3f412e15551103b0da5e3eb54079e1ffa42d444db6dcbf1a2484": "engine launcher with compatible pre-push admission",
 	"3ba512b82b0f461443b3d268bb5dbd2df6e9f420840d83e1210078e8f94d28a8": "engine pinned by PRAETOR_REF (#906)",
 	"93387a66f5c910bd4df4dbe11bd016d489af208620f7c0deea69777cdad00387": "engine launcher with --print-path, uses-pin, full semver (#906)",
 	"888b3442bf8381166b8623c195c887260a68672ce5795bf327ae5ce8b77fcc7b": "engine launcher with explicit PRAETOR_REF priority (#906)",

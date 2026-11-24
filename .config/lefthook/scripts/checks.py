@@ -52,8 +52,6 @@ SEMGREP_SUFFIXES = frozenset().union(*SEMGREP_LANGUAGE_EXTENSIONS.values())
 # deadline itself; this margin only keeps the hook from killing it before it can report
 # which deadline fired.
 GATE_LAUNCH_MARGIN = 120
-# Admit gives the slot and load waits this budget independently.
-PUSH_ADMISSION_WAIT_SECONDS = 300
 # The engine builds its slot implementation only on Go's Unix targets.
 PUSH_SLOT_PLATFORMS = ("aix", "android", "darwin", "dragonfly", "freebsd", "gnu",
                        "illumos", "ios", "linux", "netbsd", "openbsd", "sunos")
@@ -692,10 +690,10 @@ def run_full_gate(directory, packages=None):
     gate = [*command, "run", "--path=.", *scope]
     run_timeout = timeout
     if sys.platform.startswith(PUSH_SLOT_PLATFORMS):
-        wait = PUSH_ADMISSION_WAIT_SECONDS
         gate = [*CLI, "admit", "--class", "push", "--local", "--label", "push-gate",
-                "--wait", f"{wait}s", "--timeout", f"{timeout}s", "--", *gate]
-        run_timeout += 2 * wait
+                "--wait", f"{timeout}s", "--timeout", f"{timeout}s", "--", *gate]
+        # Admit budgets the slot and load waits separately. The outer go run has its own launch.
+        run_timeout += 2 * timeout + GATE_LAUNCH_MARGIN
     run(gate, cwd=directory, env=clean_env(), timeout=run_timeout, capture=False)
     run([*command, "verify", "--path=."], cwd=directory, env=clean_env(), timeout=timeout, capture=False)
     return True
