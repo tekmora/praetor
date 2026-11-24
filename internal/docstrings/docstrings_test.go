@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/docstrings"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -637,6 +638,73 @@ func assertPythonDecoratorAnchor(t *testing.T, raw string, wantComment bool) {
 	gotComment := ok && idx >= 0 && strings.HasPrefix(lines[idx], "#")
 	if gotComment != wantComment {
 		t.Fatalf("Python decorator anchor: got index=%d ok=%v, want comment=%v", idx, ok, wantComment)
+	}
+}
+
+// TestLaneAttributeLiterals pairs each literal fixture with and without a preceding doc comment.
+func TestLaneAttributeLiterals(t *testing.T) {
+	cases := []struct {
+		name, path, attribute string
+		singleLine            bool
+	}{
+		{"rust_raw_quote", "lib.rs", `#[cfg_attr(test, doc = r#"raw " ) ] tail"#)]`, true},
+		{"cpp_raw_quote", "lib.cpp", `[[deprecated(R"msg(old " ) ] text)msg")]]`, true},
+		{"ts_nested_template", "lib.ts", "@stamp(`outer ${`inner )`}`)", true},
+		{"rust_lifetime_token", "lib.rs", `#[attribute(for<'a> fn(&'a ()))]`, true},
+		{"rust_raw_multiline", "lib.rs", "#[cfg_attr(test, doc = r#\"first\nsecond\"#)]", false},
+		{"ts_multiline_template", "lib.ts", "@stamp(`first\nsecond`)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checkLaneAttributePair(t, tc.path, tc.attribute, tc.singleLine)
+		})
+	}
+}
+
+// TestLaneAttributeComments pairs comment-bearing attributes with and without documentation.
+func TestLaneAttributeComments(t *testing.T) {
+	cases := []struct{ name, path, attribute string }{
+		{"rust_block_comment", "lib.rs", "#[inline] /* reason */"},
+		{"rust_block_comment_delimiter", "lib.rs", "#[inline /* ] */]"},
+		{"ts_block_comment", "lib.ts", "@stamp('ok') /* reason */"},
+		{"rust_wrapped_blank", "lib.rs", "#[cfg_attr(\n\n    test, inline\n)]"},
+		{"rust_wrapped_comment", "lib.rs", "#[cfg_attr(\n    // )] ignored\n    test, inline\n)]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checkLaneAttributePair(t, tc.path, tc.attribute, true)
+		})
+	}
+}
+
+// checkLaneAttributePair compares the documented and undocumented twins through the source reader.
+func checkLaneAttributePair(t *testing.T, path, attribute string, coversComment bool) {
+	t.Helper()
+	prefix, suffix := "", "fn f() {}\n"
+	switch util.SourceLanguage(path) {
+	case "cpp":
+		suffix = "void f() {}\n"
+	case "typescript":
+		prefix, suffix = "class Example {\n", "f() {}\n}\n"
+	}
+	t.Run("documented", func(t *testing.T) {
+		checkLaneAttribute(t, path, prefix+"// Documents f.\n"+attribute+"\n"+suffix, coversComment)
+	})
+	t.Run("undocumented", func(t *testing.T) {
+		checkLaneAttribute(t, path, prefix+attribute+"\n"+suffix, false)
+	})
+}
+
+// checkLaneAttribute verifies documentation attaches to exactly the fixture's function.
+func checkLaneAttribute(t *testing.T, path, source string, want bool) {
+	t.Helper()
+	data := []byte(source)
+	functions, err := hiss.ExtractFileFunctions(path, data)
+	if err != nil || len(functions) != 1 || functions[0].Name != "f" {
+		t.Fatalf("expected only f, got %v, %v", functions, err)
+	}
+	if got := docstrings.HasDocstring(path, data, strings.Split(source, "\n"), functions[0]); got != want {
+		t.Errorf("HasDocstring = %v, want %v", got, want)
 	}
 }
 

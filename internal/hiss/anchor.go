@@ -41,19 +41,19 @@ const (
 	maxNotedFunctions = 1 << 16
 )
 
-// FunctionSpan is one named function or method a language scanner located in a source file,
-// with 1-based inclusive start and end line numbers.
+// FunctionSpan is one named function or method, from its signature to its closing line,
+// with 1-based inclusive line numbers.
 type FunctionSpan struct {
 	Name  string
 	Start int
 	End   int
 }
 
-// funcSpan is one named function a language scanner located in the file it is reading: the
-// lines its definition spans, both included.
+// funcSpan holds the scanner's inclusive finding span and, when recorded separately, its header.
 type funcSpan struct {
 	name       string
 	start, end int
+	header     int
 }
 
 // ExtractFileFunctions returns the function and method spans recorded for rel by the HISS
@@ -93,36 +93,36 @@ func exportFunctionSpans(spans []funcSpan) []FunctionSpan {
 		return nil
 	}
 	out := make([]FunctionSpan, len(spans))
-	for i := 0; i < len(spans); i++ {
-		out[i] = FunctionSpan{
-			Name:  spans[i].name,
-			Start: spans[i].start,
-			End:   spans[i].end,
+	for i, span := range spans {
+		start := span.start
+		if span.header != 0 {
+			start = span.header
 		}
+		out[i] = FunctionSpan{Name: span.name, Start: start, End: span.end}
 	}
 	return out
 }
 
 // appendFunction adds a function a scanner located to those of the file being read, within
 // maxNotedFunctions. A function without a name anchors nothing.
-func appendFunction(functions []funcSpan, name string, start, end int) []funcSpan {
-	if name == "" || len(functions) >= maxNotedFunctions {
+func appendFunction(functions []funcSpan, span funcSpan) []funcSpan {
+	if span.name == "" || len(functions) >= maxNotedFunctions {
 		return functions
 	}
-	return append(functions, funcSpan{name: name, start: start, end: end})
+	return append(functions, span)
 }
 
 // noteFunction records a function the scanner located in the file it is reading, so the
 // findings on its lines are anchored to it once the file is read.
-func noteFunction(rep *ScanReport, name string, start, end int) {
-	rep.functions = appendFunction(rep.functions, name, start, end)
+func noteFunction(rep *ScanReport, span funcSpan) {
+	rep.functions = appendFunction(rep.functions, span)
 }
 
 // adoptFunctions moves the functions a scanner noted in a per-file report into r, for the
 // scanners that collect a file's findings apart before recording them.
 func (r *ScanReport) adoptFunctions(file *ScanReport) {
-	for i := 0; i < len(file.functions); i++ {
-		noteFunction(r, file.functions[i].name, file.functions[i].start, file.functions[i].end)
+	for _, span := range file.functions {
+		noteFunction(r, span)
 	}
 }
 
@@ -221,7 +221,11 @@ func extractGoFunctions(fset *token.FileSet, file *ast.File) []funcSpan {
 		if fn.Recv != nil && len(fn.Recv.List) > 0 {
 			owner, _ = ReceiverTypeName(fn.Recv.List[0].Type)
 		}
-		functions = appendFunction(functions, qualifiedName(owner, fn.Name.Name), fset.Position(fn.Pos()).Line, fset.Position(fn.End()).Line)
+		functions = appendFunction(functions, funcSpan{
+			name:  qualifiedName(owner, fn.Name.Name),
+			start: fset.Position(fn.Pos()).Line,
+			end:   fset.Position(fn.End()).Line,
+		})
 	}
 	return functions
 }

@@ -330,7 +330,7 @@ func hasShellShebang(data []byte) bool {
 func HasDocstring(rel string, data []byte, lines []string, fn hiss.FunctionSpan) bool {
 	switch resolveDocStyle(rel, data) {
 	case docStyleCommentAbove:
-		return hasCommentAbove(lines, fn.Start)
+		return hasCommentAbove(lines, fn.Start, util.SourceLanguage(rel))
 	case docStylePythonBody:
 		return hasPythonDocstring(lines, fn.Start, fn.End)
 	case docStyleShellAbove:
@@ -342,7 +342,7 @@ func HasDocstring(rel string, data []byte, lines []string, fn hiss.FunctionSpan)
 
 // hasCommentAbove checks for a //, ///, /* */, or /** */ comment ending directly above startLine,
 // skipping intervening attributes and decorators.
-func hasCommentAbove(lines []string, startLine int) bool {
+func hasCommentAbove(lines []string, startLine int, language string) bool {
 	if startLine <= 1 || startLine-1 > len(lines) {
 		return false
 	}
@@ -350,7 +350,7 @@ func hasCommentAbove(lines []string, startLine int) bool {
 	if strings.TrimSpace(lines[startLine-1]) == "{" && idx >= 1 {
 		idx--
 	}
-	idx, ok := skipAttributesAbove(lines, idx, "//")
+	idx, ok := skipAttributesAbove(lines, idx, language)
 	if !ok || idx < 0 {
 		return false
 	}
@@ -366,74 +366,40 @@ func hasCommentAbove(lines []string, startLine int) bool {
 
 // skipAttributesAbove steps backwards from idx over at most maxAttributeLines of balanced
 // single-line or multi-line attributes and decorators, returning the index above them.
-func skipAttributesAbove(lines []string, idx int, lineComment string) (int, bool) {
+func skipAttributesAbove(lines []string, idx int, language string) (int, bool) {
 	remaining := maxAttributeLines
 	for steps := 0; steps < maxAttributeLines && remaining > 0 && idx >= 0; steps++ {
 		trimmed := strings.TrimSpace(lines[idx])
-		if !isAttributeOrDecorator(trimmed) && !closesAttributeGroup(trimmed, lineComment) {
+		if !isAttributeOrDecorator(trimmed) && !strings.ContainsAny(trimmed, "])") {
 			return idx, true
 		}
-		nextIdx, used, ok := stepAttributeGroup(lines, idx, remaining, lineComment)
+		start, ok := attributeGroupStart(lines, idx, remaining, language)
+		if start < 0 {
+			return idx, !isAttributeOrDecorator(trimmed)
+		}
 		if !ok {
 			return -1, false
 		}
-		idx = nextIdx
-		remaining -= used
+		remaining -= idx - start + 1
+		idx = start - 1
 	}
 	return idx, true
 }
 
-// closesAttributeGroup reports whether a trimmed line ends with a closing bracket or parenthesis
-// that may terminate a multi-line attribute or decorator.
-func closesAttributeGroup(trimmed, lineComment string) bool {
-	code, closed := stripAttributeLine(trimmed, lineComment)
-	return closed && countParenDelta(code) < 0 && (strings.HasSuffix(code, "]") || strings.HasSuffix(code, ")"))
-}
-
-// stepAttributeGroup consumes one balanced attribute or decorator ending at idx within remaining lines.
-func stepAttributeGroup(lines []string, idx, remaining int, lineComment string) (int, int, bool) {
-	trimmed := strings.TrimSpace(lines[idx])
-	code, closed := stripAttributeLine(trimmed, lineComment)
-	if !closed {
-		return -1, 0, false
-	}
-	delta := countParenDelta(code)
-	if isAttributeOrDecorator(trimmed) {
-		if delta == 0 && onlyCompleteAttributes(code) {
-			return idx - 1, 1, true
-		}
-		return -1, 0, false
-	}
-	if delta >= 0 {
-		return -1, 0, false
-	}
-	return scanAttributeStart(lines, idx, remaining, -delta, code, lineComment)
-}
-
-// scanAttributeStart walks backwards from idx-1 until bracket depth reaches zero on an attribute header.
-// Blank lines and standalone line comments consume the same line budget as code.
-func scanAttributeStart(lines []string, idx, remaining, depth int, tail, lineComment string) (int, int, bool) {
-	parts := make([]string, 1, remaining)
-	parts[0] = tail
-	for step := 1; step < remaining && idx-step >= 0 && depth > 0; step++ {
-		trimmed := strings.TrimSpace(lines[idx-step])
-		if trimmed == "" || strings.HasPrefix(trimmed, lineComment) {
+// attributeGroupStart finds the closest annotation that ends at idx. Lexing forward
+// gives comments and literals their opening context. Every physical line uses the budget.
+func attributeGroupStart(lines []string, idx, remaining int, language string) (int, bool) {
+	for start := idx; start >= 0 && idx-start < remaining; start-- {
+		if !isAttributeOrDecorator(strings.TrimSpace(lines[start])) {
 			continue
 		}
-		code, closed := stripAttributeLine(trimmed, lineComment)
-		if !closed || isBlockCommentBoundary(trimmed) {
-			break
-		}
-		parts = append(parts, code)
-		depth -= countParenDelta(code)
-		if depth == 0 {
-			slices.Reverse(parts)
-			if onlyCompleteAttributes(strings.Join(parts, "\n")) {
-				return idx - step - 1, step + 1, true
-			}
+		code, supported := hiss.MaskAttributeLines(language, lines[start:idx+1])
+		tail := code[strings.LastIndexByte(code, '\n')+1:]
+		if strings.TrimSpace(tail) != "" && onlyCompleteAttributes(strings.TrimSpace(code)) {
+			return start, supported
 		}
 	}
-	return -1, 0, false
+	return -1, false
 }
 
 // attributePrefix includes an opening delimiter when the annotation has a body.
@@ -487,37 +453,6 @@ func attributeBodyWidth(code string) int {
 		expected = expected[:last]
 	}
 	return 0
-}
-
-// isBlockCommentBoundary reports whether a trimmed line starts or ends a standalone block comment.
-func isBlockCommentBoundary(trimmed string) bool {
-	return strings.HasPrefix(trimmed, "/*") || strings.HasSuffix(trimmed, "*/")
-}
-
-// stripAttributeLine removes literal contents and trailing line comments and reports whether its quotes close.
-func stripAttributeLine(line, lineComment string) (string, bool) {
-	var b strings.Builder
-	var inQuote byte
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-		if inQuote != 0 {
-			switch ch {
-			case '\\':
-				i++
-			case inQuote:
-				inQuote = 0
-			}
-			continue
-		}
-		if strings.HasPrefix(line[i:], lineComment) {
-			break
-		}
-		if ch == '"' || ch == '\'' || ch == '`' {
-			inQuote = ch
-		}
-		b.WriteByte(ch)
-	}
-	return strings.TrimSpace(b.String()), inQuote == 0
 }
 
 // isAttributeOrDecorator reports whether a trimmed line is an attribute or decorator annotation.

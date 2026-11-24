@@ -80,8 +80,7 @@ type braceTracker struct {
 	inFunc     bool
 	pending    bool
 	pendingAge int
-	// header is the 1-based line the function signature starts on, recorded by noteFunction so
-	// FunctionSpan.Start names the header line rather than the opening brace line.
+	// header is the 1-based signature line exported for documentation coverage.
 	header int
 	// start is the line the body opens on -- the line carrying the opening brace, never the
 	// line the signature starts on. HISS-04 measures the brace-delimited body, so a
@@ -148,13 +147,13 @@ func (t *braceTracker) enter(idx, level int) {
 	}
 }
 
-// finish records the completed function span from its header line and enforces HISS-04 from its brace line.
+// finish records the header for documentation and uses the brace line for finding anchors and length.
 func (t *braceTracker) finish(endLine int) {
 	t.inFunc = false
 	if t.scopeOnly {
 		return
 	}
-	noteFunction(t.rep, t.name, t.header, endLine)
+	noteFunction(t.rep, funcSpan{name: t.name, start: t.start, end: endLine, header: t.header})
 	funcLen := endLine - t.start + 1
 	if funcLen > t.maxLOC {
 		recordViolation(t.rep, "HISS-04", t.rel, t.start, t.name,
@@ -221,6 +220,79 @@ type literalStripper struct {
 	// substitutions holds, per open ${...} of a template literal, the depth of the braces the
 	// substitution's own code opened, so its closing brace is told apart from theirs.
 	substitutions []int
+	// Attribute matching retains a literal token and drops code inside template substitutions.
+	attribute     bool
+	rawOpen       *regexp.Regexp
+	rawFence      bool
+	unclosedQuote bool
+}
+
+var (
+	rustRawOpen = regexp.MustCompile(`^(?:br|cr|r)(#{0,255})"`)
+	// A C++ raw delimiter has at most 16 printable ASCII characters, excluding space, (, ), and \.
+	cppRawOpen = regexp.MustCompile(`^(?:u8|u|U|L)?R"([!-'\x2a-\x5b\x5d-~]{0,16})\(`)
+)
+
+// MaskAttributeLines removes comments and literal contents while preserving structural code
+// and line breaks. The bool reports whether the candidate closes all lexical spans and
+// confines each literal to a single physical line.
+func MaskAttributeLines(language string, lines []string) (string, bool) {
+	reader := attributeStripper(language)
+	var code strings.Builder
+	supported := true
+	for i, line := range lines {
+		if i != 0 {
+			code.WriteByte('\n')
+		}
+		code.WriteString(reader.strip(line))
+		if reader.unclosedQuote || len(reader.substitutions) > 0 ||
+			(reader.fence != "" && reader.fence != blockCommentClose) {
+			supported = false
+		}
+	}
+	return code.String(), supported && !reader.open()
+}
+
+// attributeStripper selects the shared scanner's syntax and any raw string delimiter.
+func attributeStripper(language string) literalStripper {
+	reader := literalStripper{syn: cLikeSyntax, attribute: true}
+	switch language {
+	case "rust":
+		reader.rawOpen = rustRawOpen
+	case "cpp", "cuda", "objective-c++":
+		reader.rawOpen = cppRawOpen
+	case "javascript", "typescript", "svelte":
+		reader.syn = scriptSyntax
+	case "python":
+		reader.syn = pythonSyntax
+	}
+	return reader
+}
+
+// openRawFence records the closing delimiter of a Rust or C++ raw string at a token boundary.
+func (s *literalStripper) openRawFence(line string, i int) (int, bool) {
+	if s.rawOpen == nil || (i > 0 && isIdentByte(line[i-1])) {
+		return i, false
+	}
+	match := s.rawOpen.FindStringSubmatchIndex(line[i:])
+	if match == nil {
+		return i, false
+	}
+	delimiter := line[i+match[2] : i+match[3]]
+	s.fence = `"` + delimiter
+	if s.rawOpen == cppRawOpen {
+		s.fence = ")" + delimiter + `"`
+	}
+	s.rawFence = true
+	return i + match[1], true
+}
+
+// markLiteral retains a token where an attribute literal was removed, so an expression
+// after a complete attribute cannot disappear into whitespace.
+func (s *literalStripper) markLiteral(b *strings.Builder) {
+	if s.attribute {
+		b.WriteString(" 0")
+	}
 }
 
 // open reports whether a multi-line span is still open: a comment, a string or a template
@@ -232,26 +304,41 @@ func (s *literalStripper) open() bool {
 // strip returns line with the contents of literals and comments removed, updating the
 // cross-line state. Each line must be passed exactly once and in order.
 func (s *literalStripper) strip(line string) string {
-	var b strings.Builder
+	var code, attribute strings.Builder
 	for i := 0; i < len(line); {
-		if s.fence != "" {
-			i = s.consumeFence(line, i)
-			continue
+		before := code.Len()
+		visible := s.attribute && len(s.substitutions) == 0
+		i = s.stripToken(line, i, &code)
+		if visible {
+			attribute.WriteString(code.String()[before:])
 		}
-		if next, opened := s.openFence(line, i); opened {
-			i = next
-			continue
-		}
-		if strings.HasPrefix(line[i:], s.syn.lineComment) {
-			if !s.urlAt(line, i) {
-				return b.String()
-			}
-			i += len(s.syn.lineComment)
-			continue
-		}
-		i = s.copyOne(line, i, &b)
 	}
-	return b.String()
+	if s.attribute {
+		return attribute.String()
+	}
+	return code.String()
+}
+
+// stripToken consumes the literal, comment or code token at i and returns the next byte.
+func (s *literalStripper) stripToken(line string, i int, b *strings.Builder) int {
+	if s.fence != "" {
+		return s.consumeFence(line, i)
+	}
+	if next, opened := s.openFence(line, i); opened {
+		if s.attribute && s.fence == blockCommentClose {
+			b.WriteByte(' ')
+		} else {
+			s.markLiteral(b)
+		}
+		return next
+	}
+	if strings.HasPrefix(line[i:], s.syn.lineComment) {
+		if !s.urlAt(line, i) {
+			return len(line)
+		}
+		return i + len(s.syn.lineComment)
+	}
+	return s.copyOne(line, i, b)
 }
 
 // consumeFence skips bytes until the open span's closing delimiter, which may not appear on
@@ -263,10 +350,11 @@ func (s *literalStripper) consumeFence(line string, i int) int {
 	if s.fence == templateFence {
 		return s.consumeTemplate(line, i)
 	}
-	if s.fence == blockCommentClose {
+	if s.fence == blockCommentClose || s.rawFence {
 		if idx := strings.Index(line[i:], s.fence); idx >= 0 {
-			s.fence = ""
-			return i + idx + len(blockCommentClose)
+			end := i + idx + len(s.fence)
+			s.fence, s.rawFence = "", false
+			return end
 		}
 		return len(line)
 	}
@@ -297,7 +385,7 @@ func (s *literalStripper) openFence(line string, i int) (int, bool) {
 		s.fence = templateFence
 		return i + 1, true
 	}
-	return i, false
+	return s.openRawFence(line, i)
 }
 
 // consumeTemplate skips template text from i up to the backtick that closes the literal or the
@@ -331,23 +419,31 @@ func (s *literalStripper) copyOne(line string, i int, b *strings.Builder) int {
 		return i + 1
 	case '/':
 		if end := s.regexLiteralEnd(line, i, b.String()); end > i {
+			s.markLiteral(b)
 			return end
 		}
 		b.WriteByte(c)
 		return i + 1
 	case '"', '\'':
-		if c == '\'' && !s.syn.apostropheIsString {
-			if width := charLiteralWidth(line, i); width > 0 {
-				return i + width
-			}
-			b.WriteByte(c)
-			return i + 1
-		}
-		return s.skipQuoted(line, i)
+		return s.copyQuote(line, i, b)
 	default:
 		b.WriteByte(c)
 		return i + 1
 	}
+}
+
+// copyQuote preserves apostrophes outside character literals, such as Rust lifetime markers.
+func (s *literalStripper) copyQuote(line string, i int, b *strings.Builder) int {
+	if line[i] == '\'' && !s.syn.apostropheIsString {
+		if width := charLiteralWidth(line, i); width > 0 {
+			s.markLiteral(b)
+			return i + width
+		}
+		b.WriteByte(line[i])
+		return i + 1
+	}
+	s.markLiteral(b)
+	return s.skipQuoted(line, i)
 }
 
 // skipQuoted skips the quoted string opening at i and returns the index past it. A string that
@@ -355,6 +451,9 @@ func (s *literalStripper) copyOne(line string, i int, b *strings.Builder) int {
 // break, or, under quotesEndWithLine, was never a string: the quote is dropped as text.
 func (s *literalStripper) skipQuoted(line string, i int) int {
 	end, closed, carried := scanQuoted(line, i+1, line[i:i+1])
+	if s.attribute && !closed {
+		s.unclosedQuote = true
+	}
 	if carried {
 		s.fence = line[i : i+1]
 	}
@@ -969,7 +1068,7 @@ func (s *pythonScanner) close(indent int) {
 			break
 		}
 		if !top.class {
-			noteFunction(s.rep, qualifiedName(top.owner, top.name), top.start, s.lastCode)
+			noteFunction(s.rep, funcSpan{name: qualifiedName(top.owner, top.name), start: top.start, end: s.lastCode})
 			checkPythonFuncLen(top.start, s.lastCode, top.name, s.rel, s.rep, s.maxLOC)
 			top.calls.report(s.rep, s.rel)
 		}

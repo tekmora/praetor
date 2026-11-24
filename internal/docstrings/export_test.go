@@ -17,7 +17,7 @@ var ParseRemoteDefaultBranchForTest = parseRemoteDefaultBranch
 
 // SkipPythonDecoratorForTest exposes the decorator scan separately from Python body docstrings.
 func SkipPythonDecoratorForTest(lines []string, idx int) (int, bool) {
-	return skipAttributesAbove(lines, idx, "#")
+	return skipAttributesAbove(lines, idx, "python")
 }
 
 // SetTargetFileReaderForTest replaces targetFileReader and returns a restore function.

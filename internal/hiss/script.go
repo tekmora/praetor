@@ -150,7 +150,7 @@ func isScriptTestPath(rel string) bool {
 // scriptFunc is one open named function.
 type scriptFunc struct {
 	name string
-	// header is the 1-based line the function signature starts on, recorded by noteFunction.
+	// header is the 1-based signature line exported for documentation coverage.
 	header int
 	// start is the line the body opens on; HISS-04 measures from there, as for C and Rust.
 	start int
@@ -344,7 +344,7 @@ func (s *scriptScanner) closeDeeper(code string, col, lineNum int) {
 			return
 		}
 		s.observeBody(top, code[top.from:col], lineNum)
-		noteFunction(s.rep, top.name, top.header, lineNum)
+		noteFunction(s.rep, funcSpan{name: top.name, start: top.start, end: lineNum, header: top.header})
 		if length := lineNum - top.start + 1; length > s.maxLOC {
 			recordViolation(s.rep, "HISS-04", s.rel, top.start, top.name,
 				fmt.Sprintf("Function '%s' (%d LOC) exceeds HISS-04 / NASA Rule 4 limit of %d LOC", top.name, length, s.maxLOC))

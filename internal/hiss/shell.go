@@ -325,7 +325,7 @@ func (s *shellScanner) closeDeeper(lineNum, col int) {
 			return
 		}
 		top.endLine, top.endCol = lineNum, col
-		noteFunction(s.rep, top.name, top.startLine, lineNum)
+		noteFunction(s.rep, funcSpan{name: top.name, start: top.startLine, end: lineNum})
 		if length := lineNum - top.startLine + 1; length > s.maxLOC {
 			recordViolation(s.rep, "HISS-04", s.rel, top.startLine, top.name,
 				fmt.Sprintf("Function '%s' (%d LOC) exceeds HISS-04 / NASA Rule 4 limit of %d LOC", top.name, length, s.maxLOC))
