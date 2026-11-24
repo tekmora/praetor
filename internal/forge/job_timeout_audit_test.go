@@ -639,6 +639,104 @@ func TestJobTimeout_MatchSlowestJob_Boundary_ExpressionSiblings(t *testing.T) {
 	}
 }
 
+// Positive: a literal or omitted-name job declaring strategy.matrix takes "<name> (...)" records
+// when no exact literal or expression job claims them.
+func TestJobTimeout_MatchSlowestJob_Positive_MatrixLiteralFallback(t *testing.T) {
+	const omittedName = "on: push\njobs:\n  test:\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.22\", \"1.23\"]\n    steps:\n      - run: go test ./...\n"
+	if got := slowestBySpec(t, omittedName, jobDurationRecord("test (1.22)", 18)); got["test"] != 18 {
+		t.Fatalf("matrix job test must take test (1.22), got %v", got)
+	}
+	if got := slowestBySpec(t, omittedName, jobDurationRecord("test (1.22)", 18), jobDurationRecord("test (1.23)", 24)); got["test"] != 24 {
+		t.Fatalf("matrix job test must keep maximum across legs, got %v", got)
+	}
+	const explicitAndDynamic = "on: push\njobs:\n" +
+		"  unit:\n    name: test\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.22\"]\n    steps:\n      - run: go test ./...\n" +
+		"  dyn:\n    timeout-minutes: 30\n    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}\n    steps:\n      - run: echo dyn\n"
+	got := slowestBySpec(t, explicitAndDynamic, jobDurationRecord("test (1.22)", 14), jobDurationRecord("dyn (linux)", 9))
+	if got["unit"] != 14 || got["dyn"] != 9 {
+		t.Fatalf("literal-named and dynamic-matrix jobs must take suffixed records, got %v", got)
+	}
+}
+
+// Negative: a job without strategy.matrix never takes "test (1.22)", and "test-integration" or
+// malformed suffixes never reach matrix job "test".
+func TestJobTimeout_MatchSlowestJob_Negative_MatrixBoundaries(t *testing.T) {
+	const nonMatrix = "on: push\njobs:\n" +
+		"  test:\n    timeout-minutes: 30\n    steps:\n      - run: go test ./...\n" +
+		"  null-matrix:\n    name: test\n    timeout-minutes: 30\n    strategy:\n      matrix: null\n    steps:\n      - run: go test ./...\n"
+	if got := slowestBySpec(t, nonMatrix, jobDurationRecord("test (1.22)", 20)); len(got) != 0 {
+		t.Fatalf("non-matrix job test must ignore test (1.22), got %v", got)
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", nonMatrix)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", jobDurationRecord("test (1.22)", 29)), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 0 jobs") {
+		t.Fatalf("non-matrix job test must stay unmeasured on test (1.22); err=%v\nout:\n%s", err, out)
+	}
+	const matrixJob = "on: push\njobs:\n  test:\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.22\"]\n    steps:\n      - run: go test ./...\n"
+	got := slowestBySpec(t, matrixJob,
+		jobDurationRecord("test-integration", 25),
+		jobDurationRecord("test-integration (1.22)", 25),
+		jobDurationRecord("test (1.22) extra", 25),
+		jobDurationRecord("test (", 25))
+	if len(got) != 0 {
+		t.Fatalf("unrelated or non-parenthesized records must not reach matrix job test, got %v", got)
+	}
+}
+
+// Boundary: a record claimed by an exact literal sibling or an expression sibling never reaches
+// a literal matrix job, while unclaimed "<name> (...)" records still reach the literal matrix job.
+func TestJobTimeout_MatchSlowestJob_Boundary_SiblingClaimsPreemptMatrixFallback(t *testing.T) {
+	const matrixJob = "  matrix:\n    name: Platform Neutrality\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        os: [linux]\n    steps:\n      - run: echo matrix\n"
+	const withLiteral = "on: push\njobs:\n" + matrixJob +
+		"  windows:\n    name: Platform Neutrality (Windows)\n    timeout-minutes: 65\n    steps:\n      - run: echo win\n"
+	winRec := jobDurationRecord("Platform Neutrality (Windows)", 50)
+	linRec := jobDurationRecord("Platform Neutrality (linux)", 12)
+	for _, recs := range [...][]WorkflowJobRecord{{winRec, linRec}, {linRec, winRec}} {
+		if got := slowestBySpec(t, withLiteral, recs...); got["windows"] != 50 || got["matrix"] != 12 {
+			t.Fatalf("literal sibling must keep 50 and matrix must keep 12, got %v", got)
+		}
+	}
+	const withSameStemExpr = "on: push\njobs:\n" + matrixJob +
+		"  harness:\n    name: Platform Neutrality (${{ matrix.name }})\n    timeout-minutes: 60\n    steps:\n      - run: echo expr\n"
+	gotExpr := slowestBySpec(t, withSameStemExpr, jobDurationRecord("Platform Neutrality (Windows)", 40))
+	if _, claimed := gotExpr["matrix"]; gotExpr["harness"] != 40 || claimed {
+		t.Fatalf("expression sibling must claim Platform Neutrality (Windows) before matrix fallback, got %v", gotExpr)
+	}
+	const withShardExpr = "on: push\njobs:\n" + matrixJob +
+		"  shard:\n    name: Platform Neutrality (Windows shard ${{ matrix.shard }})\n    timeout-minutes: 110\n    steps:\n      - run: echo shard\n"
+	shardRec := jobDurationRecord("Platform Neutrality (Windows shard 1)", 80)
+	for _, recs := range [...][]WorkflowJobRecord{{shardRec, linRec}, {linRec, shardRec}} {
+		if got := slowestBySpec(t, withShardExpr, recs...); got["shard"] != 80 || got["matrix"] != 12 {
+			t.Fatalf("expression shard sibling must keep 80 and matrix must keep 12, got %v", got)
+		}
+	}
+}
+
+// A matrix job with timeout-minutes 45 and a 44.8-minute measured matrix leg ("test (1.22)")
+// enters the measured path and reports cancel-risk (45 < 1.25 x 44.8 = 56).
+func TestJobTimeout_Measured_MatrixLiteralCancelRisk(t *testing.T) {
+	root := t.TempDir()
+	const wf = "on: push\njobs:\n  test:\n    timeout-minutes: 45\n    strategy:\n      matrix:\n        go: [\"1.22\", \"1.23\"]\n    steps:\n      - run: go test ./...\n"
+	writeWorkflow(t, root, "ci.yml", wf)
+	reader := singleRunJobTimeoutReader("ci.yml", jobDurationRecord("test (1.22)", 44.8), jobDurationRecord("test (1.23)", 12.0))
+	const wantDetail = "job-timeout: .github/workflows/ci.yml:4 job test: timeout-minutes 45 is below 1.25 x measured duration 44.8m (cancel risk)"
+	warnOut, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
+	})
+	if err != nil || !slices.Contains(strings.Split(warnOut, "\n"), "[WARN] "+wantDetail+jobTimeoutWarningSuffix()) {
+		t.Fatalf("expected warn cancel-risk finding for 44.8m matrix run; err=%v\nout:\n%s", err, warnOut)
+	}
+	_, err = AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: reader, Branch: "main",
+	})
+	if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), "[FAIL] "+wantDetail) {
+		t.Fatalf("expected fail cancel-risk finding on JobTimeoutFailFrom; got %v", err)
+	}
+}
+
 // The portability.yml shape (harness, windows-shard, windows) keeps each job's own maximum
 // on both a self-contained workflow with disjoint pass bands and the repository's portability.yml.
 func TestJobTimeout_PortabilityShape_IsolatedMaxima(t *testing.T) {

@@ -510,11 +510,15 @@ func updateSlowestJobs(slowest map[string]float64, jobs []WorkflowJobRecord, spe
 	}
 }
 
-// matchSlowestJob assigns dur to the matching jobs in spec. A spec job whose name holds no
-// "${{" expression takes only forge records with exactly its name. A spec job whose name holds
-// a "${{" expression may take prefix matches on its literal text before "${{", but never a
-// record whose name exactly equals another spec job's literal name; when several expression
-// jobs match by prefix, the longest literal prefix wins and ties share the record.
+// matchSlowestJob assigns dur to the matching jobs in spec in three steps:
+//  1. Exact literal match: a spec job whose target holds no "${{" expression and equals forgeName
+//     records dur and ends the search.
+//  2. Expression prefix match: among spec jobs whose target holds "${{" and matches forgeName by
+//     its literal prefix before "${{", the longest prefix wins (ties share the record) and ends
+//     the search.
+//  3. Matrix suffix fallback: only when steps 1 and 2 match nothing, a spec job whose target holds
+//     no "${{" expression and that declares strategy.matrix matches forgeName of the form
+//     "<target> (...)".
 func matchSlowestJob(slowest map[string]float64, forgeName string, dur float64, spec *ghworkflow.Spec) {
 	if spec == nil {
 		return
@@ -523,17 +527,10 @@ func matchSlowestJob(slowest map[string]float64, forgeName string, dur float64, 
 	if matchLiteralJobs(slowest, jobIDs, forgeName, dur, spec) {
 		return
 	}
-	best := longestExpressionPrefixMatch(jobIDs, forgeName, spec)
-	if best == 0 {
+	if matchExpressionJobs(slowest, jobIDs, forgeName, dur, spec) {
 		return
 	}
-	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
-		jobID := jobIDs[i]
-		target := specJobTarget(jobID, spec.Jobs[jobID])
-		if jobMatches(target, forgeName) && len(expressionJobPrefix(target)) == best {
-			recordSlowest(slowest, jobID, dur)
-		}
-	}
+	matchMatrixFallbackJobs(slowest, jobIDs, forgeName, dur, spec)
 }
 
 // matchLiteralJobs updates every literal spec job whose name equals forgeName and reports whether any matched.
@@ -550,6 +547,23 @@ func matchLiteralJobs(slowest map[string]float64, jobIDs []string, forgeName str
 	return matched
 }
 
+// matchExpressionJobs updates every expression spec job sharing the longest matching literal prefix
+// and reports whether any matched.
+func matchExpressionJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) bool {
+	best := longestExpressionPrefixMatch(jobIDs, forgeName, spec)
+	if best == 0 {
+		return false
+	}
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		target := specJobTarget(jobID, spec.Jobs[jobID])
+		if jobMatches(target, forgeName) && len(expressionJobPrefix(target)) == best {
+			recordSlowest(slowest, jobID, dur)
+		}
+	}
+	return true
+}
+
 // longestExpressionPrefixMatch returns the byte length of the longest matching expression-job prefix.
 func longestExpressionPrefixMatch(jobIDs []string, forgeName string, spec *ghworkflow.Spec) int {
 	best := 0
@@ -562,6 +576,28 @@ func longestExpressionPrefixMatch(jobIDs []string, forgeName string, spec *ghwor
 		}
 	}
 	return best
+}
+
+// matchMatrixFallbackJobs updates every literal-target spec job declaring strategy.matrix whose
+// target matches forgeName as "<target> (...)".
+func matchMatrixFallbackJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) {
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		job := spec.Jobs[jobID]
+		if matrixFallbackMatches(specJobTarget(jobID, job), job, forgeName) {
+			recordSlowest(slowest, jobID, dur)
+		}
+	}
+}
+
+// matrixFallbackMatches reports whether job has a literal target, declares strategy.matrix,
+// and matches a GitHub matrix-suffixed record named "<target> (...)".
+func matrixFallbackMatches(target string, job ghworkflow.Job, forgeName string) bool {
+	if target == "" || strings.Contains(target, "${{") || job.Strategy.Matrix.Kind == 0 || job.Strategy.Matrix.ShortTag() == "!!null" {
+		return false
+	}
+	rest, ok := strings.CutPrefix(forgeName, target+" (")
+	return ok && strings.HasSuffix(rest, ")")
 }
 
 // specJobTarget returns job.Name when set, or jobID when the workflow omits a display name.
