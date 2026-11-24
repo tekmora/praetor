@@ -537,6 +537,7 @@ func reconcileContractDemand(idx *FrameworkIndex, dep *DependencyDemand) bool {
 	return true
 }
 
+// markAmbiguousClaimants keeps the demand a gap and names the claimants that could not be told apart.
 func markAmbiguousClaimants(idx *FrameworkIndex, dep *DependencyDemand, claimants []string) {
 	dep.Status, dep.FrameworkReplacement, dep.Relationship = StatusGap, "", nil
 	dep.Notes = fmt.Sprintf("%s: ambiguous claimants for %s: %s", idx.Contract, dep.Capability, strings.Join(claimants, ", "))

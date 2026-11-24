@@ -99,6 +99,8 @@ func assertDemand(t *testing.T, dep DependencyDemand, status CapabilityStatus, r
 	}
 }
 
+// TestFrameworkContractObservesDeclaredPackagesAndReplacements proves declared packages, replacements and an
+// ambiguous claim resolve as the contract states.
 func TestFrameworkContractObservesDeclaredPackagesAndReplacements(t *testing.T) {
 	root := setupContractCheckout(t, validContract)
 	index, err := InspectFramework(t.Context(), acmeSource(root))
@@ -160,6 +162,8 @@ type contractClaimantRole struct {
 	kind   LibraryRelationshipKind
 }
 
+// TestFrameworkContractClaimantSelection proves exact, single and ambiguous claimant selection for every role and
+// that permuting the claimant order never changes the result.
 func TestFrameworkContractClaimantSelection(t *testing.T) {
 	index := FrameworkIndex{
 		Name: contractFrameworkModule, Basis: FrameworkSourceObserved,
@@ -185,6 +189,7 @@ func TestFrameworkContractClaimantSelection(t *testing.T) {
 	}
 }
 
+// checkContractClaimantCases runs the claimant cases of one contract role against the index.
 func checkContractClaimantCases(t *testing.T, index *FrameworkIndex, role contractClaimantRole) {
 	t.Helper()
 	for _, tc := range [...]struct {
@@ -217,6 +222,7 @@ func checkContractClaimantCases(t *testing.T, index *FrameworkIndex, role contra
 	}
 }
 
+// checkContractClaimantOutcome asserts the status, package and notes one resolved demand carries.
 func checkContractClaimantOutcome(t *testing.T, got DependencyDemand, role contractClaimantRole, winner string, capability CapabilityKey) {
 	t.Helper()
 	status, replacement := role.status, winner
