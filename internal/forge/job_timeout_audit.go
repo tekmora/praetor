@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -156,7 +157,7 @@ func formatJobTimeoutPathInfo(canMeasure bool, opts JobTimeoutOptions, measured,
 }
 
 // auditWorkflowJobTimeouts checks every job in a single workflow file for a timeout-minutes
-// declaration and, when measurements are available, compares it against the observed P95 duration.
+// declaration and compares it with the maximum observed job duration from up to three successful runs.
 func auditWorkflowJobTimeouts(ctx context.Context, file workflowFile, opts JobTimeoutOptions, canMeasure bool) (workflowAuditResult, error) {
 	spec, err := ghworkflow.Parse(file.Data)
 	if err != nil {
@@ -229,22 +230,39 @@ func judgeJob(rel, jobID string, job ghworkflow.Job, jobLine int, hasS bool, s f
 		return jobVerdict{finding: f, isMeasured: hasS, isStatic: !hasS}
 	}
 	if hasS {
-		return judgeMeasuredJob(rel, line, jobID, declared, s)
+		return judgeMeasuredJob(rel, line, jobID, declared, s, jobTimeoutRunawayFloor(rel, jobID, job))
 	}
 	return judgeStaticJob(rel, line, jobID, declared)
 }
 
+// jobTimeoutRunawayFloor reserves the generated installation step's full budget for the
+// managed API comparison job, even when recent successful runs needed little installation time.
+func jobTimeoutRunawayFloor(rel, jobID string, job ghworkflow.Job) float64 {
+	if rel != ghworkflow.APICompatibilityWorkflowFile || jobID != ghworkflow.APICompatibilityJobID {
+		return ceilingFloorMinutes
+	}
+	for i := 0; i < len(job.Steps) && i < ghworkflow.MaxStepsPerJob; i++ {
+		step := &job.Steps[i]
+		if step.Name == ghworkflow.APICompatibilityInstallStepName && step.If == ghworkflow.HostedGateNotDraft &&
+			step.TimeoutMinutes.Value == strconv.Itoa(ghworkflow.APICompatibilityInstallTimeout) &&
+			strings.HasPrefix(step.Run, ghworkflow.APICompatibilityUpdateCommand+"\n"+ghworkflow.APICompatibilityInstallCommand+" ") {
+			return ceilingFloorMinutes + ghworkflow.APICompatibilityInstallTimeout
+		}
+	}
+	return ceilingFloorMinutes
+}
+
 // judgeMeasuredJob compares declared timeout-minutes against slowest measured duration s.
-func judgeMeasuredJob(rel string, line int, jobID string, declared int, s float64) jobVerdict {
+func judgeMeasuredJob(rel string, line int, jobID string, declared int, s, floor float64) jobVerdict {
 	declFloat := float64(declared)
 	if declFloat < cancelRiskMultiplier*s {
 		reason := fmt.Sprintf("timeout-minutes %d is below 1.25 x measured duration %.1fm (cancel risk)", declared, s)
 		f := &jobTimeoutFinding{Workflow: rel, Line: line, JobID: jobID, Kind: jobTimeoutKindCancelRisk, Reason: reason}
 		return jobVerdict{finding: f, isMeasured: true}
 	}
-	ceil := math.Max(ceilingFloorMinutes, runawayMultiplier*s)
+	ceil := math.Max(floor, runawayMultiplier*s)
 	if declFloat > ceil {
-		reason := fmt.Sprintf("timeout-minutes %d is above max(30, 4 x %.1fm) bound of %.0fm (runaway)", declared, s, ceil)
+		reason := fmt.Sprintf("timeout-minutes %d is above max(%.0f, 4 x %.1fm) bound of %.0fm (runaway)", declared, floor, s, ceil)
 		f := &jobTimeoutFinding{Workflow: rel, Line: line, JobID: jobID, Kind: jobTimeoutKindRunaway, Reason: reason}
 		return jobVerdict{finding: f, isMeasured: true}
 	}
@@ -271,8 +289,7 @@ func judgeStaticJob(rel string, line int, jobID string, declared int) jobVerdict
 // applyExceptions returns the judged lines and how many of them are findings: a finding of a
 // workflow without a live exception, or an entry that excuses nothing. failing marks findings
 // [FAIL] instead of [WARN]; an exception's [PASS] line names only its excused jobs and kinds.
-// A workflow in staticOnly without a finding marks its live entry used, so the entry the static
-// path needs is not called stale on the measured path.
+// A workflow in staticOnly also has a use for a static-ceiling entry on the offline path.
 func applyExceptions(findings []jobTimeoutFinding, staticOnly []string, entries []config.Exception, today time.Time, failing bool) ([]string, int) {
 	severity := jobTimeoutWarn
 	if failing {
@@ -281,7 +298,9 @@ func applyExceptions(findings []jobTimeoutFinding, staticOnly []string, entries 
 	used := make([]bool, len(entries))
 	byWorkflow, wfOrder := groupFindingsByWorkflow(findings)
 	lines, count := judgeWorkflowFindings(byWorkflow, wfOrder, entries, today, used, severity)
-	lines = append(lines, staticOnlyExceptionLines(staticOnly, entries, today, used)...)
+	staticLines, staticCount := staticOnlyExceptionLines(staticOnly, byWorkflow, entries, today, used, severity)
+	lines = append(lines, staticLines...)
+	count += staticCount
 	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
 		if !used[i] {
 			why := "the workflow it names has none"
@@ -310,19 +329,22 @@ func groupFindingsByWorkflow(findings []jobTimeoutFinding) (map[string][]jobTime
 	return byWorkflow, wfOrder
 }
 
-// jobTimeoutExceptionFor returns the last live entry matching both workflow and finding kind.
+// jobTimeoutExceptionFor returns the last live and first expired entries matching workflow and kind.
 // Only matching entries are marked used; unknown fingerprints excuse nothing.
-func jobTimeoutExceptionFor(entries []config.Exception, workflow, kind string, today time.Time, used []bool) *config.Exception {
-	var live *config.Exception
+func jobTimeoutExceptionFor(entries []config.Exception, workflow, kind string, today time.Time, used []bool) (live, expired *config.Exception) {
 	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
 		if entries[i].Fingerprint != "" && entries[i].Fingerprint != kind {
 			continue
 		}
-		if match, _ := config.ExceptionFor(entries[i:i+1], workflow, today, used[i:i+1]); match != nil {
+		match, stale := config.ExceptionFor(entries[i:i+1], workflow, today, used[i:i+1])
+		if match != nil {
 			live = match
 		}
+		if expired == nil {
+			expired = stale
+		}
 	}
-	return live
+	return live, expired
 }
 
 // judgeWorkflowFindings prints unexcused findings at severity and counts them. Pass lines
@@ -334,7 +356,7 @@ func judgeWorkflowFindings(byWorkflow map[string][]jobTimeoutFinding, wfOrder []
 		excused := make(map[*config.Exception][]jobTimeoutFinding)
 		var order []*config.Exception
 		for _, f := range byWorkflow[wf] {
-			if live := jobTimeoutExceptionFor(entries, wf, f.Kind, today, used); live != nil {
+			if live, _ := jobTimeoutExceptionFor(entries, wf, f.Kind, today, used); live != nil {
 				if _, exists := excused[live]; !exists {
 					order = append(order, live)
 				}
@@ -363,17 +385,29 @@ func formatJobTimeoutFindingLine(severity, detail string) string {
 	return line
 }
 
-// staticOnlyExceptionLines marks static-ceiling entries used when measurements pass jobs
-// above the static bound, even if another job in the workflow has an unrelated finding.
-func staticOnlyExceptionLines(staticOnly []string, entries []config.Exception, today time.Time, used []bool) []string {
+// staticOnlyExceptionLines reports and counts expired static-ceiling entries for workflows
+// whose measured jobs passed above the static bound. A live entry still covers the offline path.
+func staticOnlyExceptionLines(staticOnly []string, byWorkflow map[string][]jobTimeoutFinding, entries []config.Exception, today time.Time, used []bool, severity string) ([]string, int) {
 	var lines []string
+	count := 0
 	for _, wf := range staticOnly {
-		if live := jobTimeoutExceptionFor(entries, wf, jobTimeoutKindStaticCeiling, today, used); live != nil {
+		live, expired := jobTimeoutExceptionFor(entries, wf, jobTimeoutKindStaticCeiling, today, used)
+		if live != nil {
 			lines = append(lines, fmt.Sprintf("[INFO] %s: %s: the exceptions entry (until %s) covers jobs above the %dm static bound; the measured path finds none",
 				jobTimeoutGate, wf, live.Expires, staticCeilingMinutes))
+		} else if expired != nil && !slices.ContainsFunc(byWorkflow[wf], isStaticCeilingFinding) {
+			detail := fmt.Sprintf("the exceptions entry for %s expired %s; bring the timeout back to the %dm bound or renew the entry with a reason",
+				wf, expired.Expires, staticCeilingMinutes)
+			lines = append(lines, formatJobTimeoutFindingLine(severity, detail))
+			count++
 		}
 	}
-	return lines
+	return lines, count
+}
+
+// isStaticCeilingFinding reports whether the offline bound already produced a finding.
+func isStaticCeilingFinding(f jobTimeoutFinding) bool {
+	return f.Kind == jobTimeoutKindStaticCeiling
 }
 
 // auditJobID returns jobID with terminal control characters replaced so audit lines cannot be forged.

@@ -41,7 +41,7 @@ const (
 	// holds its negation.
 	BuildTag = "apicompatgate"
 	// WorkflowFile is the repository-relative hosted API compatibility gate.
-	WorkflowFile = ".github/workflows/praetor-api.yml"
+	WorkflowFile = ghworkflow.APICompatibilityWorkflowFile
 	// StatusContext is the exact required check emitted by WorkflowFile.
 	StatusContext = "Go API Compatibility"
 	// MaxAssets bounds all asset iteration.
@@ -85,7 +85,7 @@ permissions:
   contents: read
 
 jobs:
-  api-compatibility:
+  ` + ghworkflow.APICompatibilityJobID + `:
     name: Go API Compatibility
     runs-on: ubuntu-26.04
     # Twice the slowest adopter's p95 (golusoris/golusoris, 12.3 minutes

@@ -46,15 +46,15 @@ func assertJobTimeoutAuditFails(t *testing.T, day time.Time, out string, err err
 	}
 }
 
-// The CLI warns the day before the cutoff and fails on and after it. Each subtest
-// pins the shared audit clock for its duration.
+// TestAuditJobTimeouts_CLI_DatedSwitch pins the audit clock and checks that the CLI warns
+// the day before the cutoff and fails on and after it.
 func TestAuditJobTimeouts_CLI_DatedSwitch(t *testing.T) {
 	for _, tc := range [...]struct {
 		name     string
 		day      time.Time
 		wantFail bool
 	}{
-		{"day_before", auditTodayBeforeJobTimeoutFail(), false},
+		{"day_before", forge.JobTimeoutFailFrom.AddDate(0, 0, -1), false},
 		{"cutoff", forge.JobTimeoutFailFrom, true},
 		{"day_after", forge.JobTimeoutFailFrom.AddDate(0, 0, 1), true},
 	} {

@@ -1,2 +1,3 @@
 type: changed
-title: The job-timeout audit gate fails from 2026-12-08 after its warn period, and an exception for a job above the static ceiling stays in use on the measured path
+title: Job-timeout findings fail audits from 2026-12-08. Fix workflow timeouts or renew applicable dated exceptions before the cutoff.
+breaking: true

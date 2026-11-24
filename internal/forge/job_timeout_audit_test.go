@@ -18,6 +18,7 @@ import (
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/tools/apicompat"
 )
 
 type fakeJobTimeoutReader struct {
@@ -120,6 +121,41 @@ func TestJobTimeout_Static_CeilingAndBoundaries(t *testing.T) {
 	}
 	if !strings.Contains(out, "job above: timeout-minutes 121 is above 120m bound") {
 		t.Errorf("121 minutes must warn; output:\n%s", out)
+	}
+}
+
+// TestJobTimeout_RenderedAPIInstallationBudget audits an actual configured rendering with
+// a fast successful run and checks the allowance stays scoped to the generated job budget.
+func TestJobTimeout_RenderedAPIInstallationBudget(t *testing.T) {
+	rendered, err := apicompat.RenderWorkflow(apicompat.Workflow, apicompat.Settings{SystemPackages: []string{"libudev-dev"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Base(apicompat.WorkflowFile)
+	for _, tc := range [...]struct {
+		name, file, workflow string
+		wantFail             bool
+	}{
+		{"configured budget", name, rendered, false},
+		{"above budget", name, strings.Replace(rendered, "timeout-minutes: 40", "timeout-minutes: 46", 1), true},
+		{"unconfigured job", name, strings.Replace(apicompat.Workflow, "timeout-minutes: 25", "timeout-minutes: 40", 1), true},
+		{"other workflow", "other.yml", rendered, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeWorkflow(t, root, tc.file, tc.workflow)
+			out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{Root: root, Today: JobTimeoutFailFrom,
+				Reader: singleRunJobTimeoutReader(tc.file, jobDurationRecord(apicompat.StatusContext, 5)), Branch: "main"})
+			if tc.wantFail {
+				if err == nil || !strings.Contains(err.Error(), "(runaway)") {
+					t.Fatalf("want runaway finding, got %v\n%s", err, out)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(out, "measured path for 1 jobs") {
+				t.Fatalf("the configured budget must pass on the measured path, got %v\n%s", err, out)
+			}
+		})
 	}
 }
 
@@ -343,6 +379,36 @@ func TestJobTimeout_StaticOnlyExceptionUsedOnBothPaths(t *testing.T) {
 	}
 }
 
+// TestJobTimeout_ExpiredStaticOnlyException covers warn and fail severity, one expired
+// diagnostic for two measured jobs, and no duplicate when an unmeasured job also exceeds the bound.
+func TestJobTimeout_ExpiredStaticOnlyException(t *testing.T) {
+	root := t.TempDir()
+	const workflow = "on: push\njobs:\n  shard:\n    timeout-minutes: 150\n    steps:\n      - run: echo shard\n" +
+		"  other:\n    timeout-minutes: 150\n    steps:\n      - run: echo other\n"
+	writeWorkflow(t, root, "expired.yml", workflow)
+	const expired = "the exceptions entry for .github/workflows/expired.yml expired 2026-12-01"
+	entry := config.Exception{Rule: config.ExceptionRuleJobTimeout, Path: ".github/workflows/expired.yml",
+		Fingerprint: jobTimeoutKindStaticCeiling, Expires: "2026-12-01"}
+	opts := JobTimeoutOptions{Root: root, Today: JobTimeoutFailFrom.AddDate(0, 0, -1),
+		Reader: singleRunJobTimeoutReader("expired.yml", jobDurationRecord("shard", 60), jobDurationRecord("other", 60)),
+		Branch: "main", Exceptions: []config.Exception{entry}}
+	out, err := AuditJobTimeouts(t.Context(), opts)
+	if err != nil || strings.Count(out, "[WARN] job-timeout: "+expired) != 1 {
+		t.Fatalf("one warning for the expired entry, got err=%v, out:\n%s", err, out)
+	}
+	opts.Today = JobTimeoutFailFrom
+	_, err = AuditJobTimeouts(t.Context(), opts)
+	if err == nil || strings.Count(err.Error(), "[FAIL] job-timeout: "+expired) != 1 {
+		t.Fatalf("one failure for the expired entry, got %v", err)
+	}
+	opts.Reader = singleRunJobTimeoutReader("expired.yml", jobDurationRecord("shard", 60))
+	_, err = AuditJobTimeouts(t.Context(), opts)
+	if err == nil || strings.Count(err.Error(), "[FAIL] job-timeout:") != 1 ||
+		!strings.Contains(err.Error(), "job other: timeout-minutes 150 is above 120m bound") {
+		t.Fatalf("one failure for the static-ceiling finding, got %v", err)
+	}
+}
+
 // The repository's portability waiver excuses only static ceilings. Measured risks and
 // missing declarations must still fail, including when another job uses the waiver.
 func TestJobTimeout_PortabilityExceptionScope(t *testing.T) {
@@ -378,22 +444,38 @@ func TestJobTimeout_PortabilityExceptionScope(t *testing.T) {
 				opts.Branch = "main"
 			}
 			out, err := AuditJobTimeouts(t.Context(), opts)
-			assertPortabilityTimeoutFinding(t, out, err, tc.finding)
+			assertPortabilityTimeoutFinding(t, out, err, tc.finding, tc.minutes > 0)
 		})
 	}
 }
 
 // assertPortabilityTimeoutFinding checks a failing kind or the retained static exception.
-func assertPortabilityTimeoutFinding(t *testing.T, out string, err error, finding string) {
+func assertPortabilityTimeoutFinding(t *testing.T, out string, err error, finding string, measured bool) {
 	t.Helper()
 	if finding == "" {
-		if err != nil || !strings.Contains(out, "excuses job harness static-ceiling") {
-			t.Fatalf("static ceiling must stay excepted; out=%s err=%v", out, err)
-		}
+		assertPortabilityTimeoutPass(t, out, err, measured)
 		return
 	}
 	if err == nil || !strings.Contains(err.Error(), "[FAIL] job-timeout:") || !strings.Contains(err.Error(), finding) {
 		t.Fatalf("want failing %s; out=%s err=%v", finding, out, err)
+	}
+}
+
+// assertPortabilityTimeoutPass checks the exact jobs covered by the static waiver.
+func assertPortabilityTimeoutPass(t *testing.T, out string, err error, measured bool) {
+	t.Helper()
+	want := "job harness static-ceiling"
+	if measured {
+		if !strings.Contains(out, "measured path for 1 jobs") {
+			t.Errorf("the shard must remain measured; output:\n%s", out)
+		}
+	} else {
+		want += ", job shard static-ceiling"
+	}
+	_, waiver, _ := strings.Cut(out, "; excuses ")
+	covered, _, _ := strings.Cut(waiver, "\n")
+	if err != nil || covered != want {
+		t.Fatalf("want waiver to cover %q; out=%s err=%v", want, out, err)
 	}
 }
 

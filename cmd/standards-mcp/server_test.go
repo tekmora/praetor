@@ -192,6 +192,8 @@ func newFixtureServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
+	// Fixtures exercising other gates keep job-timeout findings in the warning period.
+	srv.auditToday = func() time.Time { return forge.JobTimeoutFailFrom.AddDate(0, 0, -1) }
 	return srv, root
 }
 

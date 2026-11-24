@@ -116,10 +116,11 @@ type ServerOptions struct {
 
 // Server implements the MCP server instance.
 type Server struct {
-	rootDir string
-	version string
-	opts    ServerOptions
-	tools   map[string]mcp.Tool
+	rootDir    string
+	version    string
+	opts       ServerOptions
+	tools      map[string]mcp.Tool
+	auditToday func() time.Time
 	// order lists the tool names sorted ascending, so tools/list bytes do not depend on
 	// the order the constructors run in.
 	order     []string
@@ -167,12 +168,13 @@ func NewServerWithOptions(opts ServerOptions) (*Server, error) {
 	}
 
 	s := &Server{
-		rootDir:  root,
-		version:  opts.Version,
-		opts:     opts,
-		tools:    make(map[string]mcp.Tool),
-		order:    make([]string, 0, 32),
-		sessions: newSSERegistry(),
+		rootDir:    root,
+		version:    opts.Version,
+		opts:       opts,
+		tools:      make(map[string]mcp.Tool),
+		auditToday: time.Now,
+		order:      make([]string, 0, 32),
+		sessions:   newSSERegistry(),
 
 		toolsMode: toolsMode,
 	}

@@ -22,9 +22,9 @@ const (
 	// from the manifest itself.
 	ExceptionsEnv = "APICOMPAT_EXCEPTIONS"
 	// InstallStepName names the step that installs api.system_packages.
-	InstallStepName = "Install system packages for the Go build"
+	InstallStepName = ghworkflow.APICompatibilityInstallStepName
 	// InstallTimeoutMinutes bounds the install step.
-	InstallTimeoutMinutes = 15
+	InstallTimeoutMinutes = ghworkflow.APICompatibilityInstallTimeout
 	// installJobTimeoutMarker preserves the comparison budget when installation is configured.
 	// The plain workflow stays within the measured window of adopters without system packages.
 	installJobTimeoutMarker = "    # Add the install step's full budget to the comparison job.\n"
@@ -37,7 +37,7 @@ func adjustInstallJobTimeout(text string, add bool) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read the comparison job timeout: %w", err)
 	}
-	minutes, err := strconv.Atoi(spec.Jobs["api-compatibility"].TimeoutMinutes.Value)
+	minutes, err := strconv.Atoi(spec.Jobs[ghworkflow.APICompatibilityJobID].TimeoutMinutes.Value)
 	if err != nil || minutes <= InstallTimeoutMinutes {
 		return "", errors.New("the API compatibility workflow lacks a sufficient literal job timeout")
 	}
@@ -59,7 +59,7 @@ const (
 	envMarker         = "          BASE: ${{ github.event.pull_request.base.sha }}\n"
 	exceptionsComment = "          # yamllint disable-line rule:line-length\n"
 	exceptionsKey     = "          " + ExceptionsEnv + ": "
-	installPrefix     = "          sudo apt-get install -y --no-install-recommends"
+	installPrefix     = "          " + ghworkflow.APICompatibilityInstallCommand
 	installIndent     = "            "
 	installStepOpen   = "      - name: " + InstallStepName
 )
@@ -92,7 +92,7 @@ func installStep(packages []string) string {
 	return installStepOpen + ghworkflow.HostedGateStepIf + "\n" +
 		"        timeout-minutes: " + strconv.Itoa(InstallTimeoutMinutes) + "\n" +
 		"        run: |\n" +
-		"          sudo apt-get update\n" +
+		"          " + ghworkflow.APICompatibilityUpdateCommand + "\n" +
 		installPrefix + " \\\n" +
 		installIndent + strings.Join(packages, " \\\n"+installIndent) + "\n"
 }

@@ -25,7 +25,7 @@ const (
 	maxOutputOracleFiles            = 128
 	maxOutputOracleFileBytes        = 1 << 20
 	maxOutputOracleTotalBytes       = 8 << 20
-	expectedMCPOutputCallsiteDigest = "sha256:c18a3bb0b91832a4975fc58612c77b49cb04532b549df3dfdb09c52e2c91656b" // Context registry import moved capability callsites; census unchanged.
+	expectedMCPOutputCallsiteDigest = "sha256:73f422d2230828cbef1ef16e2dca51b058b46ef0593e644b4eb71a5edf62838e" // Job-timeout gate changed audit callsite positions and summary; census unchanged.
 )
 
 type outputCallsite struct{ identity, kind string }

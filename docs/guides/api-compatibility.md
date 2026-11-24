@@ -159,7 +159,10 @@ timeout, and runs `sudo apt-get update` and then `sudo apt-get install -y --no-i
 with exactly the declared names, one per line so that no line passes yamllint's 80 columns (`TestRenderWorkflow_Positive_InstallStepRunsBeforeTheChecker` in
 `tools/apicompat/render_test.go`). The job also reserves those 15 minutes in addition to its
 25-minute comparison budget, giving 40 minutes when installation is configured
-(`TestAPICompatibilityJobTimeoutIncludesSystemPackages`). An absent or empty list renders the workflow byte-identical to
+(`TestAPICompatibilityJobTimeoutIncludesSystemPackages`). The measured job-timeout audit adds
+those 15 minutes to its usual 30-minute runaway floor for this generated install step, so a
+quick run still permits the 40-minute job budget (`TestJobTimeout_RenderedAPIInstallationBudget`).
+An absent or empty list renders the workflow byte-identical to
 the text before the key existed (`TestRenderWorkflow_Boundary_EmptySettingsKeepTheBytes`). Nothing
 sets `CGO_ENABLED`: a module is never compared with cgo silently switched off.
 
