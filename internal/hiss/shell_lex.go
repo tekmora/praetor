@@ -60,6 +60,7 @@ type shellHeredoc struct {
 // shellLexer carries the cross-line state of one script.
 type shellLexer struct {
 	stack []shellFrame
+	word  bool
 	// pending holds the here-documents the current line opened; their bodies start on the
 	// next line, in order.
 	pending []shellHeredoc
@@ -77,13 +78,18 @@ func (l *shellLexer) line(text string) (string, bool) {
 		l.bodyLine(text)
 		return "", true
 	}
+	l.word = false
 	var b strings.Builder
 	for i := 0; i < len(text); {
 		i = l.step(text, i, &b)
 	}
+	l.startBodies()
+	return b.String(), false
+}
+
+func (l *shellLexer) startBodies() {
 	l.bodies = append(l.bodies, l.pending...)
 	l.pending = l.pending[:0]
-	return b.String(), false
 }
 
 // bodyLine reads one line of a here-document body, closing it at its delimiter line.
@@ -125,6 +131,7 @@ func (l *shellLexer) pop() {
 // quote sat inside a parameter expansion, which is blanked whole.
 func (l *shellLexer) closeQuote(quote byte, b *strings.Builder) {
 	l.pop()
+	l.word = true
 	if frame := l.top(); frame == nil || frame.ctx != shellParam {
 		b.WriteByte(quote)
 	}
@@ -138,7 +145,10 @@ func (l *shellLexer) step(text string, i int, b *strings.Builder) int {
 	}
 	switch frame.ctx {
 	case shellSingle:
-		return l.closeAt(text, i, '\'', b)
+		if text[i] == '\'' {
+			l.closeQuote('\'', b)
+		}
+		return i + 1
 	case shellAnsi:
 		return l.ansi(text, i, b)
 	case shellDouble:
@@ -150,6 +160,7 @@ func (l *shellLexer) step(text string, i int, b *strings.Builder) int {
 	case shellBacktick:
 		if text[i] == '`' {
 			l.pop()
+			l.word = true
 			b.WriteByte(')')
 			return i + 1
 		}
@@ -160,7 +171,12 @@ func (l *shellLexer) step(text string, i int, b *strings.Builder) int {
 // code reads one token of code: top-level code, or the code of a command or backquoted
 // substitution.
 func (l *shellLexer) code(text string, i int, b *strings.Builder) int {
-	switch c := text[i]; c {
+	c := text[i]
+	if l.startsComment(c) {
+		return len(text)
+	}
+	l.word = strings.IndexByte(" \t;&|()<>", c) < 0
+	switch c {
 	case '\\':
 		if i+1 >= len(text) {
 			b.WriteByte('\\')
@@ -176,13 +192,17 @@ func (l *shellLexer) code(text string, i int, b *strings.Builder) int {
 		return l.redirect(text, i, b)
 	case '(', ')':
 		return l.paren(text, i, b)
-	case '#':
-		if i == 0 || strings.IndexByte(" \t;&|()<>", text[i-1]) >= 0 {
-			return len(text)
-		}
 	}
 	b.WriteByte(text[i])
 	return i + 1
+}
+
+func (l *shellLexer) startsComment(c byte) bool {
+	return c == '#' && !l.word && shellReadsCommands(l.top())
+}
+
+func shellReadsCommands(frame *shellFrame) bool {
+	return frame == nil || frame.ctx == shellCommand || frame.ctx == shellBacktick
 }
 
 // openQuote opens a single-quoted, double-quoted or backquoted span.
@@ -196,6 +216,7 @@ func (l *shellLexer) openQuote(c byte, i int, b *strings.Builder) int {
 		b.WriteByte('"')
 	default:
 		l.push(shellBacktick)
+		l.word = false
 		b.WriteString("$(")
 	}
 	return i + 1
@@ -206,12 +227,16 @@ func (l *shellLexer) openQuote(c byte, i int, b *strings.Builder) int {
 func (l *shellLexer) dollar(text string, i int, b *strings.Builder) int {
 	rest := text[i+1:]
 	switch {
+	case strings.HasPrefix(rest, "$"):
+		b.WriteString(shellExpansion)
+		return i + 2
 	case strings.HasPrefix(rest, "(("):
 		l.push(shellArithExpansion)
 		b.WriteString(shellExpansion)
 		return i + 3
 	case strings.HasPrefix(rest, "("):
 		l.push(shellCommand)
+		l.word = false
 		b.WriteString("$(")
 		return i + 2
 	case strings.HasPrefix(rest, "{"):
@@ -238,6 +263,7 @@ func (l *shellLexer) redirect(text string, i int, b *strings.Builder) int {
 	switch {
 	case strings.HasPrefix(rest, "("):
 		l.push(shellCommand)
+		l.word = false
 		b.WriteString(text[i : i+2])
 		return i + 2
 	case text[i] == '<' && strings.HasPrefix(rest, "<<"):
@@ -289,20 +315,11 @@ func (l *shellLexer) paren(text string, i int, b *strings.Builder) int {
 		frame.depth++
 	} else if frame.depth == 0 {
 		l.pop()
+		l.word = true
 	} else {
 		frame.depth--
 	}
 	return i + 1
-}
-
-// closeAt skips quoted text up to the closing quote byte, which ends the span.
-func (l *shellLexer) closeAt(text string, i int, quote byte, b *strings.Builder) int {
-	end := strings.IndexByte(text[i:], quote)
-	if end < 0 {
-		return len(text)
-	}
-	l.closeQuote(quote, b)
-	return i + end + 1
 }
 
 // ansi reads $'...' text, where a backslash escapes the byte after it.
@@ -327,6 +344,9 @@ func (l *shellLexer) double(text string, i int, b *strings.Builder) int {
 	case '`':
 		return l.openQuote('`', i, b)
 	case '$':
+		if strings.HasPrefix(text[i+1:], "$") {
+			return i + 2
+		}
 		if strings.HasPrefix(text[i+1:], "(") || strings.HasPrefix(text[i+1:], "{") {
 			return l.dollar(text, i, b)
 		}

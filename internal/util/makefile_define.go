@@ -156,12 +156,12 @@ func makefileSilentCall(reference string) bool {
 // makefileContinues reports whether line ends in an odd run of backslashes, which joins the next
 // physical line to it. A carriage return left by a CRLF file does not break the run.
 func makefileContinues(line string) bool {
-	line = strings.TrimSuffix(line, "\r")
-	run := 0
-	for run < len(line) && run < MaxMakefileLineBytes && line[len(line)-1-run] == '\\' {
-		run++
-	}
-	return run%2 == 1
+	return EndsWithUnescapedBackslash(strings.TrimSuffix(line, "\r"))
+}
+
+// EndsWithUnescapedBackslash reports whether line ends in an odd run of backslashes.
+func EndsWithUnescapedBackslash(line string) bool {
+	return (len(line)-len(strings.TrimRight(line, "\\")))%2 == 1
 }
 
 // makefileCallsEval reports whether line holds a call that parses text as makefile syntax: an

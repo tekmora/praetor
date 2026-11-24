@@ -343,45 +343,16 @@ func TestAuditTestTimeouts_Positive_ContinuedCommentWithinBound(t *testing.T) {
 	}
 }
 
-// checkGoTestTimeoutsWithoutCommentSkip is the pre-fix scan path, kept to prove the comment skip.
-func checkGoTestTimeoutsWithoutCommentSkip(rel string, n int, line string, defaults map[string]exprValue) []string {
-	if !goTestCommand.MatchString(line) {
-		return nil
-	}
-	matches := goTimeoutFlag.FindAllStringSubmatch(line, maxMatchesPerLine)
-	var out []string
-	for i := 0; i < len(matches) && i < maxMatchesPerLine; i++ {
-		if finding := judgeTimeout(fmt.Sprintf("%s:%d", rel, n+1), matches[i][1], defaults); finding != "" {
-			out = append(out, finding)
-		}
-	}
-	return out
-}
-
-// Mutant: without the comment skip, a Makefile comment mentioning go test yields a false finding.
-func TestAuditTestTimeouts_Mutant_CommentLineNotSkipped(t *testing.T) {
+func TestAuditTestTimeouts_CommentLineSkipped(t *testing.T) {
 	line := "# -timeout replaces go test's ten-minute default"
-	findings := checkGoTestTimeoutsWithoutCommentSkip("Makefile", 36, line, nil)
-	if len(findings) == 0 {
-		t.Fatalf("mutant without comment skip: want a finding, got none")
-	}
 	if findings := checkGoTestTimeouts("Makefile", 36, line, nil); len(findings) != 0 {
-		t.Fatalf("with comment skip: want no findings, got %v", findings)
+		t.Fatalf("comment line: got %v; want no findings", findings)
 	}
 }
 
-// Mutant: joining continued physical lines through a backslash-ended comment hides the 45m go test
-// command on the next physical line.
-func TestAuditTestTimeouts_Mutant_ContinuedCommentJoined(t *testing.T) {
+func TestAuditTestTimeouts_ContinuedRecipeComment(t *testing.T) {
 	body := "test:\n\t# note \\\n\tgo test -race -timeout 45m ./x\n"
-	joined, err := scanMakefileTimeouts(body, makefileScanOptions{splitAtComments: false})
-	if err != nil || len(joined) != 0 {
-		t.Fatalf("mutant joining through comment: got %v, %v; want the 45m finding suppressed", joined, err)
-	}
-	kept, err := makefileTimeouts(body)
-	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:3 sets 45m") {
-		t.Fatalf("with comment boundary kept: got %v, %v; want Makefile:3 sets 45m", kept, err)
-	}
+	assertMakefileTimeout(t, body, "Makefile:3 sets 45m")
 }
 
 // makefileCommentSemanticsCases covers top-level GNU make comment continuation, recipe comments
@@ -400,16 +371,16 @@ var makefileCommentSemanticsCases = []struct {
 		wantPass: true,
 	},
 	{
-		name: "top-level comment two backslash lines then go test",
+		name: "C13-06 bare top-level command after continued comment",
 		body: "# note \\\n# also \\\n# end\n" +
 			"go test -timeout 45m ./pkg/\n",
-		wantErr: "Makefile:4 sets 45m",
+		wantPass: true,
 	},
 	{
 		name: "top-level comment without continuation then go test",
 		body: "# disabled\n" +
 			"go test -timeout 45m ./pkg/\n",
-		wantErr: "Makefile:2 sets 45m",
+		wantPass: true,
 	},
 	{
 		name:    "quoted hash in continued recipe",
@@ -441,7 +412,7 @@ var makefileCommentSemanticsCases = []struct {
 }
 
 // TestAuditTestTimeouts_MakefileCommentSemantics covers top-level GNU make comment continuation,
-// recipe comments with open shell quotes, and scanner mutants.
+// and recipe comments with open shell quotes.
 func TestAuditTestTimeouts_MakefileCommentSemantics(t *testing.T) {
 	for _, tc := range makefileCommentSemanticsCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -463,40 +434,16 @@ func TestAuditTestTimeouts_MakefileCommentSemantics(t *testing.T) {
 	}
 }
 
-// Mutant: without recipeEOLCommentEndsCommand, a recipe line whose shell comment runs to the
-// continuation backslash still splices the next physical line, pinning -timeout to the comment line.
-func TestAuditTestTimeouts_Mutant_RecipeEOLCommentContinuationJoined(t *testing.T) {
+func TestAuditTestTimeouts_RecipeCommentEndsAtNewline(t *testing.T) {
 	body := "test:\n\techo a #c\\\n\tgo test -timeout 45m ./pkg/\n"
-	got, err := scanMakefileTimeouts(body, makefileScanOptions{
-		splitAtComments:             true,
-		topLevelCommentContinue:     true,
-		trackShellQuotes:            true,
-		recipeEOLCommentEndsCommand: false,
-	})
-	if err != nil || len(got) != 1 || !strings.Contains(got[0], "Makefile:2 sets 45m") {
-		t.Fatalf("mutant recipeEOLCommentEndsCommand off: got %v, %v; want Makefile:2 45m", got, err)
-	}
-	kept, err := makefileTimeouts(body)
-	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:3 sets 45m") {
-		t.Fatalf("with recipe EOL comment flush: got %v, %v; want Makefile:3 45m", kept, err)
-	}
+	assertMakefileTimeout(t, body, "Makefile:3 sets 45m")
 }
 
-// Mutant: without top-level comment continuation, go test inside a continued make comment is audited.
-func TestAuditTestTimeouts_Mutant_TopLevelCommentContinueOff(t *testing.T) {
+func TestAuditTestTimeouts_TopLevelCommentContinues(t *testing.T) {
 	body := "# Disabled command: \\\n" +
 		"go test -timeout 45m ./pkg/\n" +
 		"test:\n\t@true\n"
-	got, err := scanMakefileTimeouts(body, makefileScanOptions{
-		splitAtComments: true, topLevelCommentContinue: false,
-	})
-	if err != nil || len(got) == 0 || !strings.Contains(got[0], "Makefile:2 sets 45m") {
-		t.Fatalf("mutant top-level off: got %v, %v; want Makefile:2 45m", got, err)
-	}
-	kept, err := makefileTimeouts(body)
-	if err != nil || len(kept) != 0 {
-		t.Fatalf("with top-level continuation: got %v, %v; want no finding", kept, err)
-	}
+	assertMakefileTimeout(t, body, "")
 }
 
 // makefileGNUContinuationCases covers GNU make odd/even backslash continuation for recipes and
@@ -622,9 +569,9 @@ var makefileGNUContinuationCases = []struct {
 		wantPass: true,
 	},
 	{
-		name:    "top-level two trailing backslashes end comment",
-		body:    "# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
-		wantErr: "Makefile:2 sets 45m",
+		name:     "top-level two trailing backslashes end comment",
+		body:     "# note \\\\\n\tgo test -timeout 45m ./pkg/\n",
+		wantPass: true,
 	},
 	{
 		name:    "recipe even backslash pair ends command",
@@ -669,150 +616,152 @@ func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
 	}
 }
 
-var hashStartsShellCommentCases = []struct {
-	name         string
-	line         string
-	i            int
-	start        int
-	startsInWord bool
-	prevEscaped  bool
-	want         bool
-}{
-	{name: "payload start not in word", line: "\t#x", i: 1, start: 1, startsInWord: false, prevEscaped: false, want: true},
-	{name: "payload start in word", line: "\t#x", i: 1, start: 1, startsInWord: true, prevEscaped: false, want: false},
-	{name: "comment after unescaped word break", line: "echo a #c", i: 7, start: 0, startsInWord: true, prevEscaped: false, want: true},
-	{name: "hash inside word not comment", line: "a#b", i: 1, start: 0, startsInWord: true, prevEscaped: false, want: false},
-	{name: "word break suppressed by escape", line: "a\\ #", i: 3, start: 0, startsInWord: false, prevEscaped: true, want: false},
-	{name: "boundary i equals start zero", line: "#", i: 0, start: 0, startsInWord: false, prevEscaped: false, want: true},
-}
-
-func TestHashStartsShellComment(t *testing.T) {
-	for _, tc := range hashStartsShellCommentCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := hashStartsShellComment(tc.line, tc.i, tc.start, tc.startsInWord, tc.prevEscaped)
-			if got != tc.want {
-				t.Fatalf("hashStartsShellComment(%q, %d, %d, %v, %v) = %v; want %v",
-					tc.line, tc.i, tc.start, tc.startsInWord, tc.prevEscaped, got, tc.want)
-			}
-		})
-	}
-}
-
-var shellCommentRunsToEOLBeforeContinuationCases = []struct {
-	name          string
-	line          string
-	startsInWord  bool
-	quoteInSingle bool
-	quoteInDouble bool
-	want          bool
-}{
-	{
-		name:         "payload hash continues word",
-		line:         "\t#x\\",
-		startsInWord: true,
-		want:         false,
-	},
-	{
-		name:         "payload hash at command start",
-		line:         "\t#x\\",
-		startsInWord: false,
-		want:         true,
-	},
-	{
-		name:         "comment after word break before continuation",
-		line:         "\techo a #c\\",
-		startsInWord: true,
-		want:         true,
-	},
-	{
-		name:         "word continues without comment hash",
-		line:         "\techo a\\",
-		startsInWord: false,
-		want:         false,
-	},
-	{
-		name:         "empty line boundary",
-		line:         "",
-		startsInWord: false,
-		want:         false,
-	},
-	{
-		name:         "no continuation backslash",
-		line:         "\techo a",
-		startsInWord: false,
-		want:         false,
-	},
-	{
-		name:          "hash inside carried double quote not comment",
-		line:          "\t# b\" go test \\",
-		startsInWord:  false,
-		quoteInDouble: true,
-		want:          false,
-	},
-	{
-		name:          "comment after quote closes before continuation backslash",
-		line:          "\t# b\" go test #c\\",
-		startsInWord:  false,
-		quoteInDouble: true,
-		want:          true,
-	},
-	{
-		name:          "comment after quote closes on same line",
-		line:          "\t#y' #c\\",
-		startsInWord:  true,
-		quoteInSingle: true,
-		want:          true,
-	},
-}
-
-func TestShellCommentRunsToEOLBeforeContinuation(t *testing.T) {
-	for _, tc := range shellCommentRunsToEOLBeforeContinuationCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := shellCommentRunsToEOLBeforeContinuation(
-				tc.line, tc.startsInWord, tc.quoteInSingle, tc.quoteInDouble,
-			)
-			if got != tc.want {
-				t.Fatalf(
-					"shellCommentRunsToEOLBeforeContinuation(%q, %v, %v, %v) = %v; want %v",
-					tc.line, tc.startsInWord, tc.quoteInSingle, tc.quoteInDouble, got, tc.want,
-				)
-			}
-		})
-	}
-}
-
-// TestAuditTestTimeouts_Boundary_WordSpliceKeepsRecipeShellText proves the scanner keeps a tab-led # line
-// after a word-joining continuation (`echo a\`) as shell text: the shell reads `a#b; go test ...`. The red run
-// against the scanner without continuationBackslashJoinsWord is recorded in the PR (round 4).
 func TestAuditTestTimeouts_Boundary_WordSpliceKeepsRecipeShellText(t *testing.T) {
 	body := "test:\n\techo a\\\n\t#b; go test -timeout 45m ./pkg/\n"
-	scanner := makefileScanner{opts: makefileScanOptions{
-		splitAtComments: true, topLevelCommentContinue: true, trackShellQuotes: true,
-	}}
-	lines := strings.Split(body, "\n")
-	scanner.startPhysicalLine(1, lines[1])
-	if scanner.recipeCommentEndsCommand(lines[2]) {
-		t.Fatal("word-splice: want # line treated as shell text, not comment boundary")
-	}
-	got, err := makefileTimeouts(body)
-	if err != nil || len(got) != 1 || !strings.Contains(got[0], "Makefile:2 sets 45m") {
-		t.Fatalf("full audit: got %v, %v; want Makefile:2 sets 45m", got, err)
+	assertMakefileTimeout(t, body, "Makefile:2 sets 45m")
+}
+
+func TestAuditTestTimeouts_RecipeQuoteAcrossContinuation(t *testing.T) {
+	body := "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n"
+	assertMakefileTimeout(t, body, "Makefile:2 sets 45m")
+}
+
+var makefileShellReaderCases = []struct {
+	name string
+	body string
+	want string
+}{
+	{
+		name: "C13-01 hash attached to substitution assignment",
+		body: "test:\n\tNOTE=$$(printf x)#tag go test \\\n\t-timeout 45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "C13-02 empty recipe payload preserves continued word",
+		body: "test:\n\techo a\\\n\t\\\n\t#b; go test -timeout 45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "C13-03 split flag",
+		body: "test:\n\tgo test -time\\\n\tout 45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "split flag at the bound",
+		body: "test:\n\tgo test -time\\\n\tout 30m ./pkg/\n",
+	},
+	{
+		name: "second tab stays and splits the word",
+		body: "test:\n\tgo test -time\\\n\t\tout 45m ./pkg/\n",
+	},
+	{
+		name: "C13-04 inline comment timeout",
+		body: "test:\n\tgo test -timeout 30m ./pkg/ # -timeout 99m\\\n\ttrue\n",
+	},
+	{
+		name: "C13-04 quoted command text",
+		body: "test:\n\techo 'go test -timeout 99m ./pkg/'\n",
+	},
+	{
+		name: "another command's timeout text",
+		body: "test:\n\tgo test -timeout 30m ./pkg/; echo -timeout 99m\n",
+	},
+	{
+		name: "make expands dollars before the shell runs substitution",
+		body: "test:\n\techo \"$$(go test -timeout 45m ./pkg/)\"\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "two escaped dollars produce the shell process ID",
+		body: "test:\n\techo \"$$$$(go test -timeout 99m ./pkg/)\"\n",
+	},
+	{
+		name: "brace make reference stays an opaque word",
+		body: "test:\n\t${GO_TEST} --timeout=45m ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "make reference does not become shell code",
+		body: "test:\n\techo $(call example,go test -timeout 99m ./pkg/)\n",
+	},
+	{
+		name: "shell substitution is not the make test wrapper",
+		body: "test:\n\t$$(GO_TEST) -timeout 99m ./pkg/\n",
+	},
+	{
+		name: "quoted value from source",
+		body: "test:\n\tgo test -timeout \"45m\" ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "quoted value at the bound",
+		body: "test:\n\tgo test -timeout='30m' ./pkg/\n",
+	},
+	{
+		name: "quoted assigned value from source",
+		body: "test:\n\tgo test --timeout='45m' ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "quoted flag with adjacent quoted value fragments",
+		body: "test:\n\tgo test '-timeout' \"4\"'5m' ./pkg/\n",
+		want: "Makefile:2 sets 45m",
+	},
+	{
+		name: "quoted timeout text is one argument",
+		body: "test:\n\tgo test '-timeout 99m' ./pkg/\n",
+	},
+	{
+		name: "quoted unreadable value keeps its blanks",
+		body: "test:\n\tgo test -timeout=\"45 m\" ./pkg/\n",
+		want: "Makefile:2 sets 45 m, an unreadable timeout",
+	},
+	{
+		name: "make timeout reference keeps its original spelling",
+		body: "test:\n\tgo test -timeout $(DURATION) ./pkg/\n",
+		want: "Makefile:2 sets $(DURATION), an unreadable timeout",
+	},
+	{
+		name: "continued make comment swallows a tabbed command",
+		body: "test:\n# disabled \\\n\tgo test -timeout 99m ./pkg/\n\tgo test -timeout 45m ./control/\n",
+		want: "Makefile:4 sets 45m",
+	},
+	{
+		name: "recipe begins after an inline rule separator",
+		body: "test: ; go test -timeout 45m ./pkg/\n",
+		want: "Makefile:1 sets 45m",
+	},
+	{
+		name: "tab alone does not open a recipe",
+		body: "\tgo test -timeout 99m ./pkg/\n",
+	},
+	{
+		name: "defined make text does not open a recipe",
+		body: "define SAMPLE\ntest:\n\tgo test -timeout 99m ./pkg/\nendef\n",
+	},
+}
+
+func TestAuditTestTimeouts_MakefileShellReader(t *testing.T) {
+	for _, tc := range makefileShellReaderCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertMakefileTimeout(t, tc.body, tc.want)
+		})
 	}
 }
 
-// Mutant: without shell-quote tracking, a quoted hash line ends the command and hides -timeout.
-func TestAuditTestTimeouts_Mutant_ShellQuoteTrackingOff(t *testing.T) {
-	body := "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n"
-	got, err := scanMakefileTimeouts(body, makefileScanOptions{
-		splitAtComments: true, trackShellQuotes: false,
-	})
-	if err != nil || len(got) != 0 {
-		t.Fatalf("mutant quotes off: got %v, %v; want 45m suppressed", got, err)
+func assertMakefileTimeout(t *testing.T, body, want string) {
+	t.Helper()
+	got, err := makefileTimeouts(body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	kept, err := makefileTimeouts(body)
-	if err != nil || len(kept) != 1 || !strings.Contains(kept[0], "Makefile:2 sets 45m") {
-		t.Fatalf("with quote tracking: got %v, %v; want Makefile:2 sets 45m", kept, err)
+	if want == "" && len(got) == 0 {
+		return
 	}
+	if want != "" && len(got) == 1 && strings.Contains(got[0], want) {
+		return
+	}
+	t.Fatalf("makefileTimeouts = %v; want %q", got, want)
 }
 
 const repositoryControlTimeoutRecipe = "\tgo test -timeout 45m ./control/\n"
