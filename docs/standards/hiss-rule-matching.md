@@ -768,3 +768,13 @@ A fixture whose rule reads more than one file is a single `*.txtar` file in the
 dependency tooling as one of the repository's own manifests; inside an archive it is not. An
 archive with no file, more than 16 files, a repeated name or a path that leaves the fixture root
 fails the replay (`TestParseArchive_*` in `internal/hisscoverage/archive_test.go`).
+
+Each bucket (`positive/`, `negative/`, `gap/`, `measured/`) replays up to 256 regular files and
+enumerates at most 4,096 directory entries (`internal/hisscoverage/verify.go`). Nested
+subdirectories inside a bucket are skipped without recursive replay or findings and never consume
+the 256-file bound; multi-file fixtures belong in `*.txtar` archives instead. A bucket exceeding
+256 regular files (or 4,096 directory entries) records an incomplete-replay finding naming the
+bucket so `Verify` fails rather than certifying a truncated scan
+(`TestVerifyBucketPast256RegularFilesIsIncomplete` and
+`TestVerifyBucketDirectoriesDoNotConsumeFixtureBound` in
+`internal/hisscoverage/replay_bucket_test.go`).

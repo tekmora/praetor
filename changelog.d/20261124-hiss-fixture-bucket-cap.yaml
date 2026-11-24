@@ -1,0 +1,3 @@
+type: fixed
+title: Fail HISS coverage verification when a fixture bucket exceeds its 256-file bound and skip subdirectories without consuming the bound
+issue: "2051"

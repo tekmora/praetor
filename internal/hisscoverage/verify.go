@@ -27,12 +27,17 @@ const (
 	FixtureDir = ".config/hiss/testdata"
 	// maxCatalogBytes bounds the catalog read (HISS-02).
 	maxCatalogBytes = 256 * 1024
-	// maxFixturesPerBucket bounds one positive, negative, gap or measured directory (HISS-02).
+	// maxFixturesPerBucket bounds the regular files replayed in one positive, negative, gap or
+	// measured directory (HISS-02). A regular file past it makes the replay incomplete.
 	maxFixturesPerBucket = 256
 	// maxFixtureMarkerLines bounds the leading comment lines inspected for a hiss-fixture marker (HISS-02).
 	maxFixtureMarkerLines = 32
 	// fixtureMarkerPrefix introduces an intentional gap marker inside a leading fixture comment.
 	fixtureMarkerPrefix = "hiss-fixture:"
+	// maxBucketEntries bounds how many directory entries one bucket read enumerates into memory
+	// (HISS-02), so subdirectories cannot grow the listing without limit while regular files are
+	// counted separately against maxFixturesPerBucket.
+	maxBucketEntries = 4096
 )
 
 // Bucket names within a fixture directory. A measured fixture holds a shape the scanner
@@ -145,7 +150,8 @@ func (r *Report) Passed() bool {
 	return r != nil && len(r.Findings) == 0
 }
 
-// Verify replays the fixture corpus and reports every claim the corpus contradicts.
+// Verify replays the fixture corpus and reports every claim the corpus contradicts or leaves
+// incompletely replayed.
 //
 // The check runs in both directions. A state claiming detection must report each of its
 // positive fixtures, and a state claiming none must leave its gap fixtures undetected. The
@@ -153,6 +159,10 @@ func (r *Report) Passed() bool {
 // gains coverage, the gap fixture it was supposed to miss now fires and the catalog must be
 // updated to say so. An incomplete (unparsed or truncated) or zero-file fixture scan never
 // certifies a negative, gap, measured, positive or delegated claim.
+// Each bucket replays up to maxFixturesPerBucket (256) regular files;
+// nested directories are skipped without being entered or consuming that bound, and a bucket
+// past the regular-file or directory-entry bound records an incomplete-replay finding so the
+// report fails rather than certifying a partial scan.
 func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, error) {
 	if ctx == nil {
 		return nil, errors.New("hisscoverage: verify requires a context")
@@ -456,24 +466,30 @@ func markedGapDetail(r fixtureResult, lang string) string {
 	return ""
 }
 
-// replayBucket scans every fixture in one bucket and reports whether the rule fired on it.
-// An absent bucket is not an error: a claim may legitimately have no negative or gap case.
-// base is the claim's directory, <FixtureDir>/<rule>/<language>, so its name is the language
-// the fixtures are staged as (hiss.FixturePath).
+// replayBucket scans up to maxFixturesPerBucket regular files in one bucket and reports whether
+// the rule fired on each. Subdirectories do not consume maxFixturesPerBucket and are skipped
+// without recursive replay or findings; multi-file fixtures use .txtar archives (archive.go). A
+// 257th regular file, or a directory listing past maxBucketEntries, records an incomplete-replay
+// finding naming the bucket so Report.Passed is false rather than certifying a truncated scan.
+// An absent bucket is not an error: a claim may legitimately have no negative or gap case. base
+// is the claim's directory, <FixtureDir>/<rule>/<language>, so its name is the language the
+// fixtures are staged as (hiss.FixturePath).
 func replayBucket(ctx context.Context, base, bucket, ruleID string, report *Report) ([]fixtureResult, error) {
 	dir := filepath.Join(base, bucket)
 	staged := fixtureStage{ruleID: ruleID, language: filepath.Base(base)}
-	entries, err := os.ReadDir(dir)
+	entries, err := readBucketEntries(ctx, dir)
 	if err != nil {
-		if util.DirectoryAbsent(dir, err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read fixtures %s: %w", dir, err)
+		return nil, err
 	}
-	results := make([]fixtureResult, 0, len(entries))
-	for i := 0; i < len(entries) && i < maxFixturesPerBucket; i++ {
+	results := make([]fixtureResult, 0, min(len(entries), maxFixturesPerBucket))
+	for i := 0; i < len(entries) && i < maxBucketEntries; i++ {
 		if entries[i].IsDir() {
 			continue
+		}
+		if bucketCapReached(entries[i], len(results)) {
+			recordIncompleteBucket(report, ruleID, staged.language, bucket, entries[i].Name(),
+				maxFixturesPerBucket, "regular files")
+			return results, nil
 		}
 		result, err := staged.reported(ctx, dir, entries[i].Name())
 		if err != nil {
@@ -482,7 +498,55 @@ func replayBucket(ctx context.Context, base, bucket, ruleID string, report *Repo
 		report.Fixtures++
 		results = append(results, result)
 	}
+	if len(entries) > maxBucketEntries {
+		recordIncompleteBucket(report, ruleID, staged.language, bucket, entries[maxBucketEntries].Name(),
+			maxBucketEntries, "directory entries")
+	}
 	return results, nil
+}
+
+// bucketCapReached reports whether entry is a regular fixture past maxFixturesPerBucket.
+func bucketCapReached(entry os.DirEntry, replayed int) bool {
+	return entry.Type().IsRegular() && replayed >= maxFixturesPerBucket
+}
+
+// readBucketEntries reads at most maxBucketEntries+1 entries from dir in name order, returning
+// nil without error when dir is genuinely absent (util.DirectoryAbsent).
+func readBucketEntries(ctx context.Context, dir string) ([]os.DirEntry, error) {
+	root, err := contextopt.OpenDirectory(ctx, dir)
+	if err != nil {
+		if util.DirectoryAbsent(dir, err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read fixtures %s: %w", dir, err)
+	}
+	listing, openErr := root.Open(".")
+	if openErr != nil {
+		return nil, fmt.Errorf("read fixtures %s: %w", dir, errors.Join(openErr, root.Close()))
+	}
+	entries, readErr := listing.ReadDir(maxBucketEntries + 1)
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if closeErr := errors.Join(readErr, listing.Close(), root.Close()); closeErr != nil {
+		return nil, fmt.Errorf("read fixtures %s: %w", dir, closeErr)
+	}
+	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
+	return entries, nil
+}
+
+// recordIncompleteBucket records a non-certifying finding when a fixture bucket exceeds its
+// regular-file or directory-entry bound before every entry has been replayed.
+func recordIncompleteBucket(report *Report, ruleID, lang, bucket, fixture string, bound int, kind string) {
+	report.Findings = append(report.Findings, Finding{
+		Rule:     ruleID,
+		Language: lang,
+		Bucket:   bucket,
+		Fixture:  fixture,
+		Detail: fmt.Sprintf(
+			"incomplete replay: bucket %s/%s/%s exceeds %d %s; report is non-certifying",
+			ruleID, lang, bucket, bound, kind),
+	})
 }
 
 // fixtureStage is the rule a bucket's fixtures are replayed for and the language they are
