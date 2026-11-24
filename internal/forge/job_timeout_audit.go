@@ -495,6 +495,7 @@ func jobsReadError(err error) string {
 	return "read run jobs: " + msg
 }
 
+// updateSlowestJobs records the maximum successful job duration per spec job from one run.
 func updateSlowestJobs(slowest map[string]float64, jobs []WorkflowJobRecord, spec *ghworkflow.Spec) {
 	for i := 0; i < len(jobs) && i < maxWorkflowRunJobs; i++ {
 		jobRec := jobs[i]
@@ -509,37 +510,95 @@ func updateSlowestJobs(slowest map[string]float64, jobs []WorkflowJobRecord, spe
 	}
 }
 
+// matchSlowestJob assigns dur to the matching jobs in spec. A spec job whose name holds no
+// "${{" expression takes only forge records with exactly its name. A spec job whose name holds
+// a "${{" expression may take prefix matches on its literal text before "${{", but never a
+// record whose name exactly equals another spec job's literal name; when several expression
+// jobs match by prefix, the longest literal prefix wins and ties share the record.
 func matchSlowestJob(slowest map[string]float64, forgeName string, dur float64, spec *ghworkflow.Spec) {
-	for jobID, job := range spec.Jobs {
-		target := job.Name
-		if target == "" {
-			target = jobID
+	if spec == nil {
+		return
+	}
+	jobIDs := ghworkflow.SortedJobIDs(spec.Jobs)
+	if matchLiteralJobs(slowest, jobIDs, forgeName, dur, spec) {
+		return
+	}
+	best := longestExpressionPrefixMatch(jobIDs, forgeName, spec)
+	if best == 0 {
+		return
+	}
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		target := specJobTarget(jobID, spec.Jobs[jobID])
+		if jobMatches(target, forgeName) && len(expressionJobPrefix(target)) == best {
+			recordSlowest(slowest, jobID, dur)
 		}
+	}
+}
+
+// matchLiteralJobs updates every literal spec job whose name equals forgeName and reports whether any matched.
+func matchLiteralJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) bool {
+	matched := false
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		target := specJobTarget(jobID, spec.Jobs[jobID])
+		if !strings.Contains(target, "${{") && jobMatches(target, forgeName) {
+			recordSlowest(slowest, jobID, dur)
+			matched = true
+		}
+	}
+	return matched
+}
+
+// longestExpressionPrefixMatch returns the byte length of the longest matching expression-job prefix.
+func longestExpressionPrefixMatch(jobIDs []string, forgeName string, spec *ghworkflow.Spec) int {
+	best := 0
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		target := specJobTarget(jobIDs[i], spec.Jobs[jobIDs[i]])
 		if jobMatches(target, forgeName) {
-			if dur > slowest[jobID] {
-				slowest[jobID] = dur
+			if n := len(expressionJobPrefix(target)); n > best {
+				best = n
 			}
 		}
 	}
+	return best
 }
 
+// specJobTarget returns job.Name when set, or jobID when the workflow omits a display name.
+func specJobTarget(jobID string, job ghworkflow.Job) string {
+	if job.Name != "" {
+		return job.Name
+	}
+	return jobID
+}
+
+// recordSlowest updates jobID's maximum observed duration when dur exceeds any prior value.
+func recordSlowest(slowest map[string]float64, jobID string, dur float64) {
+	if prev, ok := slowest[jobID]; !ok || dur > prev {
+		slowest[jobID] = dur
+	}
+}
+
+// jobMatches reports whether a single spec job target matches forgeName before sibling precedence:
+// a literal target requires an exact match, and an expression target requires its literal prefix before "${{".
 func jobMatches(target, forgeName string) bool {
-	if forgeName == target {
-		return true
+	if !strings.Contains(target, "${{") {
+		return forgeName == target
 	}
-	targetPrefix := matchJobPrefix(target)
-	forgePrefix := matchJobPrefix(forgeName)
-	return targetPrefix != "" && targetPrefix == forgePrefix
+	prefix := expressionJobPrefix(target)
+	return prefix != "" && strings.HasPrefix(forgeName, prefix)
 }
 
-func matchJobPrefix(name string) string {
-	if idx := strings.Index(name, "${{"); idx != -1 {
-		name = name[:idx]
+// expressionJobPrefix returns the non-blank literal prefix before the first "${{" in target, or "".
+func expressionJobPrefix(target string) string {
+	idx := strings.Index(target, "${{")
+	if idx <= 0 {
+		return ""
 	}
-	if idx := strings.Index(name, " ("); idx != -1 {
-		name = name[:idx]
+	if strings.TrimSpace(target[:idx]) == "" {
+		return ""
 	}
-	return strings.TrimSpace(name)
+	return target[:idx]
 }
 
 func parseJobDuration(startedAt, completedAt string) (float64, bool) {

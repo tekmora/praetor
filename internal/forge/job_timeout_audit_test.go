@@ -543,7 +543,7 @@ func TestJobTimeout_WarnOnlyBeforeFailFrom(t *testing.T) {
 	}
 }
 
-// Job name mapping matches matrix jobs and prefix before ${{ or ' ('.
+// Literal job names require exact matches; expression job names match their literal prefix before "${{".
 func TestJobMatches_MatrixAndPrefix(t *testing.T) {
 	cases := []struct {
 		target string
@@ -551,15 +551,123 @@ func TestJobMatches_MatrixAndPrefix(t *testing.T) {
 		want   bool
 	}{
 		{"Build (${{ matrix.os }})", "Build (ubuntu-latest)", true},
-		{"test", "test (1.22)", true},
+		{"Platform Neutrality (Windows shard ${{ matrix.shard }})", "Platform Neutrality (Windows shard 1)", true},
+		{"Platform Neutrality (${{ matrix.name }})", "Platform Neutrality skipped", false},
+		{"${{ matrix.name }}", "linux", false},
+		{"Build", "Build (extra)", false},
+		{"test", "test (1.22)", false},
 		{"lint", "lint", true},
-		{"test", "test-other (1.22)", false},
 		{"unit", "integration", false},
 	}
 	for _, tc := range cases {
 		if got := jobMatches(tc.target, tc.forge); got != tc.want {
 			t.Errorf("jobMatches(%q, %q) = %v, want %v", tc.target, tc.forge, got, tc.want)
 		}
+	}
+}
+
+// slowestBySpec parses workflowYAML and matches records through updateSlowestJobs.
+func slowestBySpec(t *testing.T, workflowYAML string, records ...WorkflowJobRecord) map[string]float64 {
+	t.Helper()
+	spec, err := ghworkflow.Parse([]byte(workflowYAML))
+	if err != nil {
+		t.Fatalf("parse workflow: %v", err)
+	}
+	slowest := make(map[string]float64)
+	updateSlowestJobs(slowest, records, &spec)
+	return slowest
+}
+
+// Positive: an exact literal job takes its record and prevents a sibling expression job from taking it,
+// regardless of record order; AuditJobTimeouts keeps the expression job on its own 5-minute measurement.
+func TestJobTimeout_MatchSlowestJob_Positive_LiteralPrecedence(t *testing.T) {
+	const wf = "on: push\njobs:\n" +
+		"  windows:\n    name: Platform Neutrality (Windows)\n    timeout-minutes: 45\n    steps:\n      - run: echo win\n" +
+		"  harness:\n    name: Platform Neutrality (${{ matrix.name }})\n    timeout-minutes: 30\n    steps:\n      - run: echo lin\n"
+	winRec := jobDurationRecord("Platform Neutrality (Windows)", 30)
+	linRec := jobDurationRecord("Platform Neutrality (linux)", 5)
+	for _, recs := range [...][]WorkflowJobRecord{{winRec, linRec}, {linRec, winRec}} {
+		got := slowestBySpec(t, wf, recs...)
+		if got["windows"] != 30 || got["harness"] != 5 {
+			t.Fatalf("slowest = %v, want windows=30 harness=5", got)
+		}
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", wf)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", winRec, linRec), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 2 jobs") {
+		t.Fatalf("expected both jobs measured at their own durations; err=%v\nout:\n%s", err, out)
+	}
+}
+
+// Negative: a literal job "Build" never takes a record "Build (extra)".
+func TestJobTimeout_MatchSlowestJob_Negative_LiteralRejectsSuffix(t *testing.T) {
+	const wf = "on: push\njobs:\n  build:\n    name: Build\n    timeout-minutes: 30\n    steps:\n      - run: echo build\n"
+	extra := jobDurationRecord("Build (extra)", 50)
+	if got := slowestBySpec(t, wf, extra); len(got) != 0 {
+		t.Fatalf("literal job Build must ignore Build (extra), got %v", got)
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", wf)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", extra), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 0 jobs (forge runs of main), static path for 1 jobs") {
+		t.Fatalf("expected Build to stay unmeasured and pass; err=%v\nout:\n%s", err, out)
+	}
+}
+
+// Boundary: an expression job with no matching prefix (or starting with an expression) takes nothing,
+// while two expression siblings with the same prefix share prefix records as before.
+func TestJobTimeout_MatchSlowestJob_Boundary_ExpressionSiblings(t *testing.T) {
+	const unmatched = "on: push\njobs:\n" +
+		"  matrix:\n    name: Build (${{ matrix.os }})\n    timeout-minutes: 30\n    steps:\n      - run: echo 1\n" +
+		"  bare:\n    name: ${{ matrix.os }}\n    timeout-minutes: 30\n    steps:\n      - run: echo 2\n"
+	if got := slowestBySpec(t, unmatched, jobDurationRecord("Lint (linux)", 20), jobDurationRecord("linux", 20)); len(got) != 0 {
+		t.Fatalf("unmatched or prefixless expression jobs must take nothing, got %v", got)
+	}
+	const siblings = "on: push\njobs:\n" +
+		"  linux:\n    name: Platform Neutrality (${{ matrix.linux }})\n    timeout-minutes: 50\n    steps:\n      - run: echo 1\n" +
+		"  macos:\n    name: Platform Neutrality (${{ matrix.macos }})\n    timeout-minutes: 50\n    steps:\n      - run: echo 2\n"
+	got := slowestBySpec(t, siblings,
+		jobDurationRecord("Platform Neutrality (ubuntu-26.04)", 12),
+		jobDurationRecord("Platform Neutrality (macos-26)", 28))
+	if got["linux"] != 28 || got["macos"] != 28 {
+		t.Fatalf("expression siblings sharing prefix must both get 28, got %v", got)
+	}
+}
+
+// The portability.yml shape (harness, windows-shard, windows) keeps each job's own maximum
+// on both a self-contained workflow with disjoint pass bands and the repository's portability.yml.
+func TestJobTimeout_PortabilityShape_IsolatedMaxima(t *testing.T) {
+	const wf = "on: push\njobs:\n" +
+		"  harness:\n    name: Platform Neutrality (${{ matrix.name }})\n    timeout-minutes: 60\n    steps:\n      - run: echo 1\n" +
+		"  windows-shard:\n    name: Platform Neutrality (Windows shard ${{ matrix.shard }})\n    timeout-minutes: 110\n    steps:\n      - run: echo 2\n" +
+		"  windows:\n    name: Platform Neutrality (Windows)\n    timeout-minutes: 20\n    steps:\n      - run: echo 3\n"
+	records := []WorkflowJobRecord{
+		jobDurationRecord("Platform Neutrality (Linux)", 12),
+		jobDurationRecord("Platform Neutrality (macOS)", 20),
+		jobDurationRecord("Platform Neutrality (Windows shard 1)", 80),
+		jobDurationRecord("Platform Neutrality (Windows shard 2)", 25),
+		jobDurationRecord("Platform Neutrality (Windows)", 10),
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "portability.yml", wf)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("portability.yml", records...), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 3 jobs") {
+		t.Fatalf("portability shape must pass with 3 measured jobs; err=%v\nout:\n%s", err, out)
+	}
+	realBytes, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "portability.yml"))
+	if err != nil {
+		t.Fatalf("read portability.yml: %v", err)
+	}
+	got := slowestBySpec(t, string(realBytes), records...)
+	if got["harness"] != 20 || got["windows-shard"] != 80 || got["windows"] != 10 {
+		t.Fatalf("portability.yml slowest = %v, want harness=20 windows-shard=80 windows=10", got)
 	}
 }
 
