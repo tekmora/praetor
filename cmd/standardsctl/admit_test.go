@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +25,12 @@ import (
 )
 
 const admitHoldLeaseEnv = "ADMIT_TEST_HOLD_EXECUTOR_LEASE"
+
+const (
+	admitRemoteCancelMarkerPoll  = 10 * time.Millisecond
+	admitRemoteCancelMarkerWait  = 30 * time.Second
+	admitRemoteCancelAfterCancel = 8 * time.Second
+)
 
 // needShell skips a test whose step is a POSIX shell command where no sh is on PATH (a Windows
 // runner without Git's usr/bin); the admission logic itself is covered by internal/admission.
@@ -416,31 +423,120 @@ func TestRunAdmit_RemoteHeadroomUsesPodCgroup(t *testing.T) {
 	_ = f
 }
 
-// TestRunAdmit_RemoteCancellationCleansWorkspace proves that cancelling root context aborts the remote execution and removes the remote workspace.
-func TestRunAdmit_RemoteCancellationCleansWorkspace(t *testing.T) {
-	f := newAdmitFixture(t)
-	f.inventory(t, "best")
+type remoteCancelPoll struct {
+	sawMarker  bool
+	canceledAt time.Time
+}
+
+// pollRemoteCancelMarker waits for marker, then calls cancel even if the wait expires.
+func pollRemoteCancelMarker(marker string, cancel context.CancelFunc, pause func(time.Duration)) remoteCancelPoll {
+	const maxPolls = int(admitRemoteCancelMarkerWait / admitRemoteCancelMarkerPoll)
+	deadline := time.Now().Add(admitRemoteCancelMarkerWait)
+	for attempt := 0; attempt < maxPolls && time.Now().Before(deadline); attempt++ {
+		if _, err := os.Stat(marker); err == nil {
+			cancel()
+			return remoteCancelPoll{sawMarker: true, canceledAt: time.Now()}
+		}
+		pause(admitRemoteCancelMarkerPoll)
+	}
+	cancel()
+	return remoteCancelPoll{canceledAt: time.Now()}
+}
+
+// assertRemoteCancelOutcome checks cancel reached the remote step and finished within admitRemoteCancelAfterCancel of cancel.
+func assertRemoteCancelOutcome(t *testing.T, executor string, poll remoteCancelPoll, code int, out, log string) {
+	t.Helper()
+	if !poll.sawMarker {
+		t.Fatalf("remote step never wrote start marker within %s", admitRemoteCancelMarkerWait)
+	}
+	wantSSH := "executor " + executor + ": SSH run"
+	if code != 1 || !strings.Contains(log, wantSSH) {
+		t.Fatalf("cancellation: %d %q %q", code, out, log)
+	}
+	if since := time.Since(poll.canceledAt); since >= admitRemoteCancelAfterCancel {
+		t.Fatalf("cancellation took %s after cancel, want < %s", since, admitRemoteCancelAfterCancel)
+	}
+}
+
+// runRemoteCancellationCase runs admit with cancel-on-marker and asserts workspace cleanup.
+func runRemoteCancellationCase(t *testing.T, f *admitFixture, executor string) {
+	t.Helper()
+	f.inventory(t, executor)
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 	rootCtx = ctx
 	marker := filepath.Join(t.TempDir(), "started")
-	started := make(chan bool, 1)
-	go func() {
-		for range 500 {
-			if _, err := os.Stat(marker); err == nil {
-				started <- true
-				cancel()
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		started <- false
-		cancel()
-	}()
-	start := time.Now()
+	done := make(chan remoteCancelPoll, 1)
+	go func() { done <- pollRemoteCancelMarker(marker, cancel, time.Sleep) }()
 	out, log, code := runAdmitCaptured(t, "--", "sh", "-c", `: > "$1"; exec sleep 15`, "step", marker)
-	if !<-started || code != 1 || !strings.Contains(log, "executor best: SSH run") || time.Since(start) >= 8*time.Second {
-		t.Fatalf("cancellation: %d %q %q", code, out, log)
+	assertRemoteCancelOutcome(t, executor, <-done, code, out, log)
+	f.assertClean(t)
+}
+
+// TestRunAdmit_RemoteCancellationCleansWorkspace proves that cancelling root context aborts the remote execution and removes the remote workspace.
+func TestRunAdmit_RemoteCancellationCleansWorkspace(t *testing.T) {
+	f := newAdmitFixture(t)
+	runRemoteCancellationCase(t, &f, "best")
+	t.Run("LateStart", func(t *testing.T) {
+		late := newAdmitFixture(t)
+		// Planted: the late-start stub host sleeps 6 s before the step runs, after the old 500×10ms poll gave
+		// up and inside admitRemoteCancelMarkerWait.
+		runRemoteCancellationCase(t, &late, "late-start")
+	})
+}
+
+// TestPollRemoteCancelMarkerIterationCap exhausts the polls before the wall-time limit.
+func TestPollRemoteCancelMarkerIterationCap(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "absent")
+	const want = int(admitRemoteCancelMarkerWait / admitRemoteCancelMarkerPoll)
+	var attempts int
+	canceled := false
+	poll := pollRemoteCancelMarker(marker, func() { canceled = true }, func(time.Duration) {
+		attempts++
+		if attempts > want {
+			t.Fatalf("marker poll exceeded %d attempts", want)
+		}
+	})
+	if attempts != want || !canceled || poll.sawMarker {
+		t.Fatalf("marker poll: attempts=%d, canceled=%t, found=%t", attempts, canceled, poll.sawMarker)
+	}
+}
+
+const admitSignalMarkerEnv = "ADMIT_TEST_SSH_READY"
+
+// TestRunAdmit_RemoteSignalClosesLease sends SIGTERM to the CLI after SSH starts reading.
+func TestRunAdmit_RemoteSignalClosesLease(t *testing.T) {
+	if os.Getenv(admitSignalMarkerEnv) != "" {
+		os.Args = []string{"praetorctl", "admit", "--", "true"}
+		main()
+		t.Fatal("signalled admit returned success")
+	}
+	f := newAdmitFixture(t)
+	f.inventory(t, "lease-eof")
+	marker := filepath.Join(t.TempDir(), "ssh-ready")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), admitRemoteCancelMarkerWait+admitRemoteCancelAfterCancel)
+	defer cancel()
+	//nolint:forbidigo,nolintlint // the fixture sends a real process signal to the CLI
+	child := exec.CommandContext(ctx, self, "-test.run=^TestRunAdmit_RemoteSignalClosesLease$")
+	child.Env = append(admitFixtureEnvironment(), admitSignalMarkerEnv+"="+marker)
+	var log bytes.Buffer
+	child.Stderr = &log
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var signalErr error
+	poll := pollRemoteCancelMarker(marker, func() { signalErr = child.Process.Signal(syscall.SIGTERM) }, time.Sleep)
+	var exit *exec.ExitError
+	if err := child.Wait(); !errors.As(err, &exit) || exit.ExitCode() != 143 || !poll.sawMarker || signalErr != nil {
+		t.Fatalf("admit signal: ready=%t, signal=%v, wait=%v, stderr %q", poll.sawMarker, signalErr, err, log.String())
+	}
+	if elapsed := time.Since(poll.canceledAt); elapsed >= admitRemoteCancelAfterCancel ||
+		!strings.Contains(log.String(), "remote cleanup complete") || !strings.Contains(log.String(), "interrupted by terminated") {
+		t.Fatalf("admit signal after %s: stderr %q", elapsed, log.String())
 	}
 	f.assertClean(t)
 }
@@ -678,6 +774,7 @@ case "$command" in
             slow) exec sleep 15 ;;
             headroom) available=20971520; memmax=17179869184; memcur=10737418240 ;;
             unreadable-cgroup) memmax=__UNREADABLE__ ;;
+            late-start|lease-eof) available=33554432; cpumax="1200000 100000" ;;
             evict|term-evict|bad-mem|max-mem|large-mem|missing-mem) cpumax="1200000 100000" ;;
             *) exit 99 ;;
         esac
@@ -692,6 +789,14 @@ case "$command" in
             missing-mem) memmax=__UNREADABLE__ ;;
             evict) echo 'fixture mid-run disconnect' >&2; exit 255 ;;
             term-evict) echo 'fixture wrapper sigterm' >&2; exit 143 ;;
+            late-start) sleep 6 ;;
+            lease-eof)
+                trap 'echo "fixture SSH got TERM" >&2; exit 143' TERM
+                : > "$ADMIT_TEST_SSH_READY"
+                cat >/dev/null
+                echo 'remote cleanup complete' >&2
+                exit 143
+                ;;
         esac
         write_cgroups "$memmax" 0 "1200000 100000"
         export ADMIT_STUB_HOST="$host"

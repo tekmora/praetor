@@ -18,8 +18,8 @@ import (
 // commandBytesCleanup keeps descendants in a process group the command owns and records that
 // group in runningCommandGroups, so a signal that ends this process reaches the command too
 // (TerminateCommandsOnSignal).
-func commandBytesCleanup(cmd *exec.Cmd) (start func() error, cleanup func() error) {
-	return runningCommandGroups.track(cmd)
+func commandBytesCleanup(cmd *exec.Cmd, contextOnly bool) (start func() error, cleanup func() error) {
+	return runningCommandGroups.track(cmd, contextOnly)
 }
 
 // signalProcessGroup sends sig to the process group led by pid. A group that no longer exists
@@ -97,21 +97,25 @@ var errCommandsTerminated = errors.New("util: this process is ending on a signal
 // the command tree observes that signal, so without this record a signalled praetor would
 // die and leave its commands running.
 type commandGroupRegistry struct {
-	mu sync.Mutex
-	// groups maps each group leader's pid to a channel closed once its command returned and
-	// the rest of its group was killed.
-	groups     map[int]<-chan struct{}
+	mu         sync.Mutex
+	groups     map[int]commandGroup // keyed by group leader PID
 	terminated bool
 	// parentDeath is the signal the kernel sends each command when this process dies, where the
 	// platform has one (parentDeathSignal); 0 sends none.
 	parentDeath syscall.Signal
 }
 
+// commandGroup records cleanup completion and whether graceful cancellation uses the context alone.
+type commandGroup struct {
+	returned    <-chan struct{}
+	contextOnly bool
+}
+
 // runningCommandGroups is the process-wide registry commandBytesCleanup records into.
 var runningCommandGroups = newCommandGroupRegistry()
 
 func newCommandGroupRegistry() *commandGroupRegistry {
-	return &commandGroupRegistry{groups: make(map[int]<-chan struct{}), parentDeath: parentDeathSignal}
+	return &commandGroupRegistry{groups: make(map[int]commandGroup), parentDeath: parentDeathSignal}
 }
 
 // track makes cmd run in a process group of its own, recorded in r while it runs. Where the
@@ -123,7 +127,7 @@ func newCommandGroupRegistry() *commandGroupRegistry {
 // later if it is still running. start starts the command and records the group. cleanup,
 // called once the command returned, kills what is left of the group and forgets it, so a
 // grandchild cannot outlive the call.
-func (r *commandGroupRegistry) track(cmd *exec.Cmd) (start func() error, cleanup func() error) {
+func (r *commandGroupRegistry) track(cmd *exec.Cmd, contextOnly bool) (start func() error, cleanup func() error) {
 	cmd.SysProcAttr = commandSysProcAttr(r.parentDeath)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -132,7 +136,7 @@ func (r *commandGroupRegistry) track(cmd *exec.Cmd) (start func() error, cleanup
 		return signalProcessGroup(cmd.Process.Pid, syscall.SIGTERM)
 	}
 	returned := make(chan struct{})
-	start = func() error { return r.start(cmd, returned) }
+	start = func() error { return r.start(cmd, commandGroup{returned: returned, contextOnly: contextOnly}) }
 	cleanup = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -149,10 +153,9 @@ func (r *commandGroupRegistry) track(cmd *exec.Cmd) (start func() error, cleanup
 	return start, cleanup
 }
 
-// start starts cmd and records its group with returned, the channel closed once the command
-// returned. It holds the registry across Start, so a concurrent terminate either reaches the
-// new group or refuses the start; it never misses it.
-func (r *commandGroupRegistry) start(cmd *exec.Cmd, returned <-chan struct{}) error {
+// start starts cmd and records its group. It holds the registry across Start, so a
+// concurrent terminate either sees the group or refuses the start.
+func (r *commandGroupRegistry) start(cmd *exec.Cmd, group commandGroup) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.terminated {
@@ -161,7 +164,7 @@ func (r *commandGroupRegistry) start(cmd *exec.Cmd, returned <-chan struct{}) er
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	r.groups[cmd.Process.Pid] = returned
+	r.groups[cmd.Process.Pid] = group
 	return nil
 }
 
@@ -186,29 +189,29 @@ func (r *commandGroupRegistry) release(pid int) {
 func (r *commandGroupRegistry) terminate(sig syscall.Signal, graceOver <-chan struct{}) (unlock func(), err error) {
 	r.mu.Lock()
 	r.terminated = true
-	err = r.signalGroups(sig)
-	for pid, returned := range r.groups {
-		if !commandReturned(returned, graceOver) {
+	err = r.signalGroups(sig, true)
+	for pid, group := range r.groups {
+		if !commandReturned(group.returned, graceOver) {
 			err = errors.Join(err, signalGroupReporting(pid, syscall.SIGKILL))
 		}
 	}
 	return r.mu.Unlock, err
 }
 
-// forward sends sig to every recorded group and, unlike terminate, neither waits for the
-// commands nor refuses later starts: the work that is being cancelled still runs its cleanup
-// commands, such as removing an isolated worktree, once the signalled ones have returned.
+// forward signals groups that accept immediate forwarding and allows later cleanup commands.
 func (r *commandGroupRegistry) forward(sig syscall.Signal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.signalGroups(sig)
+	return r.signalGroups(sig, false)
 }
 
-// signalGroups sends sig to every recorded group. The caller holds r.mu.
-func (r *commandGroupRegistry) signalGroups(sig syscall.Signal) error {
+// signalGroups sends sig to each selected group. The caller holds r.mu.
+func (r *commandGroupRegistry) signalGroups(sig syscall.Signal, includeContextOnly bool) error {
 	var err error
-	for pid := range r.groups {
-		err = errors.Join(err, signalGroupReporting(pid, sig))
+	for pid, group := range r.groups {
+		if includeContextOnly || !group.contextOnly {
+			err = errors.Join(err, signalGroupReporting(pid, sig))
+		}
 	}
 	return err
 }

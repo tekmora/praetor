@@ -83,16 +83,15 @@ func endOnSignal(groups *commandGroupRegistry, sig os.Signal, exit func(code int
 	exitWith(exit, 128+int(number))
 }
 
-// forwardToCommands sends sig to every running command group without refusing later starts,
+// forwardToCommands sends sig to eligible running command groups without refusing later starts,
 // for CancelCommandsOnSignal: each command receives the signal it would have received in this
 // process's own group, and the cleanup commands the cancelled work runs next still start.
 func forwardToCommands(sig os.Signal) error {
 	return forwardSignal(runningCommandGroups, sig)
 }
 
-// forwardSignal sends sig to every group recorded in groups. A signal without a number, which
-// signal.Notify never delivers on Unix, is not forwarded: the cancellation that follows still
-// asks each group to stop with SIGTERM (commandGroupRegistry.track).
+// forwardSignal sends sig to groups that accept immediate forwarding. The context
+// cancellation that follows still stops bounded commands (commandGroupRegistry.track).
 func forwardSignal(groups *commandGroupRegistry, sig os.Signal) error {
 	number, ok := sig.(syscall.Signal)
 	if !ok {

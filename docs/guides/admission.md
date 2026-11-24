@@ -64,8 +64,8 @@ and `ssh_user` is the SSH account. `workspace_root` is an existing, writable abs
 directory below `/`. `memory_gib` is a positive integer; when present, `cores` is a positive integer used with
 the pod cgroup. `cpu-offload` is the supported class. Home executors run in a pod whose cgroup
 is the memory barrier: the pod carries a small CPU request, a memory limit equal to the step's
-`MemoryMax`, and an `emptyDir` workspace. The executor needs a POSIX login shell, Git and GNU
-coreutils over SSH. Its SSH host key must already be trusted by the workstation.
+`MemoryMax`, and an `emptyDir` workspace. The executor needs a POSIX login shell, Bash, Git and
+GNU coreutils over SSH. Its SSH host key must already be trusted by the workstation.
 
 Admission reads `/proc/loadavg`, `/proc/meminfo`, and the pod cgroup counters under
 `/sys/fs/cgroup/` over SSH with a two-second bound per executor. Free memory for ranking is

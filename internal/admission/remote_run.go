@@ -18,15 +18,18 @@ import (
 )
 
 const (
-	snapshotTimeout = 5 * time.Minute
-	remoteOverhead  = snapshotTimeout + 30*time.Second
+	snapshotTimeout   = 5 * time.Minute
+	remoteOverhead    = snapshotTimeout + 30*time.Second
+	remoteCancelGrace = 2 * time.Second
 	// MaxRemoteStepTimeout leaves room for transfer and cleanup in a Go duration.
 	MaxRemoteStepTimeout = time.Duration(1<<63-1) - remoteOverhead - time.Second
 	maxRemoteArgs        = 256
 )
 
 // RunRemote runs a noninteractive step in a disposable executor workspace. The SSH input
-// carries the source bundle and stays open as a lease until the command ends.
+// carries the source bundle and stays open as a lease until the command ends. When ctx is
+// canceled first, the lease closes before the command ends: the executor sees EOF, stops
+// the step and removes its workspace, and SSH gets a short grace to report that cleanup.
 func RunRemote(ctx context.Context, executor Executor, step Step, timeout time.Duration, jobs int, memoryMaxBytes uint64) (code int, resultErr error) {
 	jobs, memoryMaxBytes, err := validateRemoteRun(executor, step, timeout, jobs, memoryMaxBytes)
 	if err != nil {
@@ -129,6 +132,9 @@ func readSnapshot(ctx context.Context) (gitSnapshot, error) {
 func runRemoteSnapshot(ctx context.Context, executor Executor, step Step, snapshot gitSnapshot, bundle *os.File, timeout time.Duration, jobs int, memoryMaxBytes uint64) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout+remoteOverhead+time.Second)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return remoteRunFailure(ctx, executor.Name, false, err)
+	}
 	input, lease, err := os.Pipe()
 	if err != nil {
 		return 0, fmt.Errorf("executor %s: open SSH input: %w", executor.Name, err)
@@ -137,13 +143,15 @@ func runRemoteSnapshot(ctx context.Context, executor Executor, step Step, snapsh
 	go func() {
 		_, copyErr := io.Copy(lease, bundle)
 		if copyErr != nil {
-			copyErr = errors.Join(copyErr, lease.Close())
+			copyErr = errors.Join(copyErr, closeLease(lease))
 		}
 		transfer <- copyErr
 	}()
 	command := remoteCommand(executor, step, snapshot, timeout, jobs, memoryMaxBytes)
 	stepErr := &remoteStepStderr{inner: step.Stderr}
-	sshErr := util.RunCommandPassthrough(ctx, "", "ssh", input, step.Stdout, stepErr, executor.sshArgs(command)...)
+	sshCtx, finishSSH := remoteSSHContext(ctx, lease)
+	sshErr := util.RunCommandPassthrough(util.WithCommandContextCancellation(sshCtx), "", "ssh", input, step.Stdout, stepErr, executor.sshArgs(command)...)
+	sshErr = errors.Join(sshErr, finishSSH())
 	closeErr := errors.Join(input.Close(), closeLease(lease))
 	copyErr := <-transfer
 	if sshErr != nil {
@@ -151,6 +159,33 @@ func runRemoteSnapshot(ctx context.Context, executor Executor, step Step, snapsh
 		return code, errors.Join(err, closeErr)
 	}
 	return 0, errors.Join(copyErr, closeErr)
+}
+
+// remoteSSHContext keeps SSH open briefly after the step context ends so the remote watcher
+// can see EOF on the lease, stop the step, and finish workspace cleanup.
+func remoteSSHContext(ctx context.Context, lease *os.File) (context.Context, func() error) {
+	deadline, _ := ctx.Deadline() // runRemoteSnapshot always supplies a deadline.
+	sshCtx, cancelSSH := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(remoteCancelGrace))
+	closed := make(chan error, 1)
+	stop := context.AfterFunc(ctx, func() {
+		err := closeLease(lease)
+		timer := time.NewTimer(remoteCancelGrace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancelSSH()
+		case <-sshCtx.Done():
+		}
+		closed <- err
+	})
+	return sshCtx, func() error {
+		stopped := stop()
+		cancelSSH()
+		if stopped {
+			return ctx.Err()
+		}
+		return errors.Join(ctx.Err(), <-closed)
+	}
 }
 
 // closeLease closes an open lease file descriptor, ignoring already-closed errors.
@@ -210,11 +245,11 @@ if [ "$have" != "$want" ]; then
     exit 1
 fi
 run=$(mktemp -d -- "$root/praetor-admit.XXXXXXXXXX")
-watcher= runner=
+watcher= runner= starting= stopping=
 cleanup() {
-    rc=$?
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
+    rc=$1
     if [ -n "$watcher" ]; then
         kill -KILL "$watcher" 2>/dev/null || :
         wait "$watcher" 2>/dev/null || :
@@ -229,10 +264,18 @@ cleanup() {
     fi
     exit "$rc"
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+stop() {
+    # Defer cleanup until the shell records the PID of the child it is starting.
+    if [ -n "$starting" ]; then
+        stopping=$1
+    else
+        cleanup "$1"
+    fi
+}
+trap 'cleanup "$?"' EXIT
+trap 'stop 129' HUP
+trap 'stop 130' INT
+trap 'stop 143' TERM
 cd -- "$run"
 physical=$(pwd -P)
 git init -q --template= --object-format="$format"
@@ -246,11 +289,19 @@ case $(pwd -P)/ in
 esac
 exec 3<&0
 parent=$$
+export MAKEFLAGS=-j"$jobs" GOMAXPROCS="$jobs"
+starting=yes
 ( IFS= read -r unused <&3 || kill -TERM "$parent" ) &
 watcher=$!
-export MAKEFLAGS=-j"$jobs" GOMAXPROCS="$jobs"
+starting=
+if [ -n "$stopping" ]; then cleanup "$stopping"; fi
+# The idle lease becomes readable on EOF, even if the watcher has not run yet.
+bash -c 'if read -t 0; then exit 143; fi' <&3 || cleanup "$?"
+starting=yes
 "$@" </dev/null 3<&- &
 runner=$!
+starting=
+if [ -n "$stopping" ]; then cleanup "$stopping"; fi
 rc=0
 wait "$runner" || rc=$?
 runner=

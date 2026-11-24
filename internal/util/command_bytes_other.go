@@ -17,7 +17,7 @@ var terminatingSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 // has no SIGTERM to ask a console program to stop, so cancellation terminates the direct child
 // at once, without the grace Unix gives. The command stays in this process's console group,
 // so the console's Ctrl-C reaches it directly and git runs its own cleanup there.
-func commandBytesCleanup(cmd *exec.Cmd) (start func() error, cleanup func() error) {
+func commandBytesCleanup(cmd *exec.Cmd, _ bool) (start func() error, cleanup func() error) {
 	return cmd.Start, func() error { return nil }
 }
 
