@@ -57,6 +57,7 @@ func makefileRecipeEnd(physical []string, start, maxLines int) (int, error) {
 	return limit, fmt.Errorf("%s:%d has an unfinished continuation", makefileLabel, limit)
 }
 
+// recipeText extracts a MakefileRecipe from tab-prefixed recipe lines or inline rule recipes.
 func (s *makefileScanner) recipeText(parts []string, start int) (MakefileRecipe, bool) {
 	if s.depth == 0 && strings.HasPrefix(parts[0], "\t") && s.recipe != makefileRecipeClosed {
 		kind := s.next(parts[0])
@@ -71,6 +72,7 @@ func (s *makefileScanner) recipeText(parts []string, start int) (MakefileRecipe,
 	return makefileInlineRecipe(parts, start)
 }
 
+// makefileInlineRecipe parses an inline target rule recipe starting after a semicolon separator.
 func makefileInlineRecipe(parts []string, start int) (MakefileRecipe, bool) {
 	raw := strings.Join(parts, "\n")
 	_, _, _, end := makefileSplitSyntax(raw)
@@ -81,6 +83,7 @@ func makefileInlineRecipe(parts []string, start int) (MakefileRecipe, bool) {
 	return makefileRecipeBody(strings.Split(raw[end+1:], "\n"), start), true
 }
 
+// makefileRecipeBody strips leading tab indentation and recipe command prefixes, constructing a MakefileRecipe.
 func makefileRecipeBody(parts []string, start int) MakefileRecipe {
 	var shell strings.Builder
 	for i, part := range parts {

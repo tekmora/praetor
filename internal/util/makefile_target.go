@@ -156,6 +156,7 @@ func makefileSplit(line string) (assign, colon, reference int) {
 	return assign, colon, reference
 }
 
+// makefileSplitSyntax locates operator tokens (assignment, rule colon, reference, end) within a Makefile line.
 func makefileSplitSyntax(line string) (assign, colon, reference, end int) {
 	assign, colon, reference = -1, -1, -1
 	for i := 0; i < len(line) && i < MaxMakefileLineBytes; {
@@ -428,6 +429,7 @@ func makefileJoinText(parts []string) string {
 	return makefileJoinSyntax(parts)
 }
 
+// makefileJoinSyntax joins backslash-continued Makefile lines into a single normalized syntax string.
 func makefileJoinSyntax(parts []string) string {
 	if len(parts) == 1 {
 		return parts[0]

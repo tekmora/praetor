@@ -49,6 +49,7 @@ type shellCodeReader struct {
 	literals map[int]int
 }
 
+// newShellCodeReader constructs a shellCodeReader by splitting script lines and resolving backslash splices up to maxLines.
 func newShellCodeReader(script string, maxLines int) (shellCodeReader, bool) {
 	physical := strings.Split(strings.ReplaceAll(script, "\r\n", "\n"), "\n")
 	if len(physical) > maxLines {
@@ -78,6 +79,7 @@ func newShellCodeReader(script string, maxLines int) (shellCodeReader, bool) {
 	return shellCodeReader{text: text, code: text, lines: lines}, true
 }
 
+// readable reports whether the lexer finished without parsing errors or unclosed shell structures.
 func (r *shellCodeReader) readable() bool {
 	return !r.lex.misread && !r.lex.open()
 }
@@ -122,6 +124,7 @@ func (r *shellCodeReader) scanLine() string {
 	return code.String()
 }
 
+// advanceSplices advances the physical line index across backslash-spliced lines up to the given flat offset.
 func (r *shellCodeReader) advanceSplices(at int) {
 	for r.physical+1 < len(r.lines) && r.lines[r.physical].spliced && r.lines[r.physical].end <= at {
 		if frame := r.lex.top(); frame != nil && frame.ctx == shellSingle && r.words != nil {
@@ -131,6 +134,7 @@ func (r *shellCodeReader) advanceSplices(at int) {
 	}
 }
 
+// scanToken steps the lexer over the next token at index i, updating words and returning the next index.
 func (r *shellCodeReader) scanToken(text string, i int, code *strings.Builder) int {
 	depth, length, before := len(r.lex.stack), code.Len(), r.lex.top()
 	next := min(r.lex.step(text, i, code), len(text))
@@ -165,6 +169,7 @@ func (r *shellCodeReader) maskLiterals(literals map[int]int) bool {
 	return true
 }
 
+// flatOffset translates a raw script byte offset into flattened text coordinates and its physical line index.
 func (r *shellCodeReader) flatOffset(raw int) (offset, physical int) {
 	physical = sort.Search(len(r.lines), func(i int) bool { return r.lines[i].rawStart > raw }) - 1
 	if physical < 0 {
@@ -177,6 +182,7 @@ func (r *shellCodeReader) flatOffset(raw int) (offset, physical int) {
 	return min(line.end, line.start+raw-line.rawStart), physical
 }
 
+// finishLine updates words and lexer state upon crossing a physical line boundary.
 func (r *shellCodeReader) finishLine() {
 	if r.words != nil {
 		r.words.newline(r.physical+1, shellReadsCommands(r.lex.top()))

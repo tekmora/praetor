@@ -82,6 +82,7 @@ var shellCodeContinuationCases = []struct {
 	{"comment ends before empty splice", "echo x #c\\\n\\\nnext", []string{"echo x ", "next", ""}},
 }
 
+// TestShellCode_ContinuationBoundaries pins ShellCode behavior across line continuations, splices, and comment boundaries.
 func TestShellCode_ContinuationBoundaries(t *testing.T) {
 	for _, tc := range shellCodeContinuationCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +94,7 @@ func TestShellCode_ContinuationBoundaries(t *testing.T) {
 	}
 }
 
+// TestShellCodeCommands_SourceWords tests extraction of command words, source text, and values across substitutions and continuations.
 func TestShellCodeCommands_SourceWords(t *testing.T) {
 	script := "NOTE=$(printf x)#tag go test -time\\\nout \"45m\" # -timeout 99m\\\ntrue"
 	commands, ok := ShellCodeCommands(script, 3, nil)
@@ -114,6 +116,7 @@ func TestShellCodeCommands_SourceWords(t *testing.T) {
 	}
 }
 
+// TestShellCodeCommands_QuotedContinuationSource verifies retention or removal of spliced newlines within single and double quotes.
 func TestShellCodeCommands_QuotedContinuationSource(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -132,6 +135,7 @@ func TestShellCodeCommands_QuotedContinuationSource(t *testing.T) {
 	}
 }
 
+// TestShellCodeCommands_Bounds pins upper limits and rejection of unclosed constructs and command counts exceeding bounds.
 func TestShellCodeCommands_Bounds(t *testing.T) {
 	for _, script := range []string{
 		"echo a\\\n\\\n#b",
@@ -148,6 +152,7 @@ func TestShellCodeCommands_Bounds(t *testing.T) {
 	}
 }
 
+// TestShellCodeCommands_OpaqueSourceSpans verifies handling of opaque literal spans and rejection of invalid span ranges.
 func TestShellCodeCommands_OpaqueSourceSpans(t *testing.T) {
 	script := "$(VAR) 'x'\\y; true"
 	commands, ok := ShellCodeCommands(script, 1, map[int]int{0: len("$(VAR)")})

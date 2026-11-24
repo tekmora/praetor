@@ -344,10 +344,12 @@ func TestAuditTestTimeouts_Positive_ContinuedCommentWithinBound(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_CommentLineSkipped pins the behavior that commented recipe lines are ignored during timeout auditing.
 func TestAuditTestTimeouts_CommentLineSkipped(t *testing.T) {
 	assertMakefileTimeout(t, "test:\n\t# go test -timeout 99m ./pkg/\n", "")
 }
 
+// TestAuditTestTimeouts_ContinuedRecipeComment pins detection of timeouts when a recipe comment ends in a backslash continuation.
 func TestAuditTestTimeouts_ContinuedRecipeComment(t *testing.T) {
 	body := "test:\n\t# note \\\n\tgo test -race -timeout 45m ./x\n"
 	assertMakefileTimeout(t, body, "Makefile:3 sets 45m")
@@ -432,11 +434,13 @@ func TestAuditTestTimeouts_MakefileCommentSemantics(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_RecipeCommentEndsAtNewline pins termination of inline recipe comments at newlines despite trailing backslashes.
 func TestAuditTestTimeouts_RecipeCommentEndsAtNewline(t *testing.T) {
 	body := "test:\n\techo a #c\\\n\tgo test -timeout 45m ./pkg/\n"
 	assertMakefileTimeout(t, body, "Makefile:3 sets 45m")
 }
 
+// TestAuditTestTimeouts_TopLevelCommentContinues pins continuation of top-level Makefile comments across backslash line breaks.
 func TestAuditTestTimeouts_TopLevelCommentContinues(t *testing.T) {
 	body := "# Disabled command: \\\n" +
 		"go test -timeout 45m ./pkg/\n" +
@@ -629,11 +633,13 @@ func TestAuditTestTimeouts_MakefileGNUContinuation(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_Boundary_WordSpliceKeepsRecipeShellText pins detection of timeouts in recipe shell commands spliced across continuations.
 func TestAuditTestTimeouts_Boundary_WordSpliceKeepsRecipeShellText(t *testing.T) {
 	body := "test:\n\techo a\\\n\t#b; go test -timeout 45m ./pkg/\n"
 	assertMakefileTimeout(t, body, "Makefile:2 sets 45m")
 }
 
+// TestAuditTestTimeouts_RecipeQuoteAcrossContinuation pins detection of timeouts when quotes span line continuations in recipe commands.
 func TestAuditTestTimeouts_RecipeQuoteAcrossContinuation(t *testing.T) {
 	body := "test:\n\tNOTE=\"a \\\n\t# b\" go test \\\n\t-timeout 45m ./pkg/\n"
 	assertMakefileTimeout(t, body, "Makefile:2 sets 45m")
@@ -774,6 +780,7 @@ var makefileShellReaderCases = []struct {
 	},
 }
 
+// TestAuditTestTimeouts_MakefileShellReader runs table cases verifying timeout extraction from varied Makefile structures.
 func TestAuditTestTimeouts_MakefileShellReader(t *testing.T) {
 	for _, tc := range makefileShellReaderCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -782,6 +789,7 @@ func TestAuditTestTimeouts_MakefileShellReader(t *testing.T) {
 	}
 }
 
+// assertMakefileTimeout parses a Makefile body and asserts that detected timeout diagnostics match the expected string.
 func assertMakefileTimeout(t *testing.T, body, want string) {
 	t.Helper()
 	got, err := makefileTimeouts(body)

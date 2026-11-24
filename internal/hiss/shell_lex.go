@@ -87,6 +87,7 @@ func (l *shellLexer) line(text string) (string, bool) {
 	return b.String(), false
 }
 
+// startBodies transfers pending here-document descriptors into the active bodies list.
 func (l *shellLexer) startBodies() {
 	l.bodies = append(l.bodies, l.pending...)
 	l.pending = l.pending[:0]
@@ -197,10 +198,12 @@ func (l *shellLexer) code(text string, i int, b *strings.Builder) int {
 	return i + 1
 }
 
+// startsComment reports whether the character c begins a shell comment given the current lexer state.
 func (l *shellLexer) startsComment(c byte) bool {
 	return c == '#' && !l.word && shellReadsCommands(l.top())
 }
 
+// shellReadsCommands reports whether the given frame is in a command-reading context rather than a quote or literal.
 func shellReadsCommands(frame *shellFrame) bool {
 	return frame == nil || frame.ctx == shellCommand || frame.ctx == shellBacktick
 }

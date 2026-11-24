@@ -52,6 +52,7 @@ type shellCodeView struct {
 	removed      []int
 }
 
+// write appends raw source text and emitted code bytes to the view, padding code with placeholders to align lengths.
 func (v *shellCodeView) write(raw, code string) {
 	v.source.WriteString(raw)
 	v.code.WriteString(code)
@@ -67,12 +68,14 @@ type shellCodeWords struct {
 	overBound bool
 }
 
+// masked writes raw source text into active views without emitting corresponding code tokens.
 func (w *shellCodeWords) masked(raw string) {
 	for _, view := range w.views {
 		view.write(raw, "")
 	}
 }
 
+// markLiteral records an opaque literal span width at the current offset in the active view.
 func (w *shellCodeWords) markLiteral(width int) {
 	if width == 0 {
 		return
@@ -84,6 +87,7 @@ func (w *shellCodeWords) markLiteral(width int) {
 	view.literals[view.source.Len()] = width
 }
 
+// token dispatches a scanned token to active views, tracking nesting depth and stripped quote syntax.
 func (w *shellCodeWords) token(raw, code string, before *shellFrame, lexer *shellLexer, depth, line int) {
 	if len(lexer.stack) > depth && shellReadsCommands(lexer.top()) {
 		w.masked(raw)
@@ -123,14 +127,17 @@ func shellWordSyntax(raw string, before, after *shellFrame, change int) int {
 	}
 }
 
+// shellLiteralQuote reports whether the shell frame represents a single or double quote context.
 func shellLiteralQuote(frame *shellFrame) bool {
 	return frame != nil && (frame.ctx == shellSingle || frame.ctx == shellDouble)
 }
 
+// shellEscapeRemovesSlash reports whether an escaped backslash is stripped in the given frame context.
 func shellEscapeRemovesSlash(frame *shellFrame, next byte) bool {
 	return shellReadsCommands(frame) || frame.ctx == shellDouble && strings.IndexByte("\"\\$`", next) >= 0
 }
 
+// newline handles line boundary transitions by flushing completed views or masking newlines.
 func (w *shellCodeWords) newline(nextLine int, commands bool) {
 	if !commands {
 		w.masked("\n")
@@ -144,6 +151,7 @@ func (w *shellCodeWords) newline(nextLine int, commands bool) {
 	}
 }
 
+// flush parses accumulated view code into shell commands and appends resolved commands.
 func (w *shellCodeWords) flush(view *shellCodeView) {
 	commands := splitShellCommands(view.code.String())
 	if len(commands) > maxShellCommands {
@@ -161,6 +169,7 @@ func (w *shellCodeWords) flush(view *shellCodeView) {
 	}
 }
 
+// sourceWords builds ShellCodeWord records for command arguments by extracting matched source and values.
 func (v *shellCodeView) sourceWords(cmd shellCmd, start int) []ShellCodeWord {
 	source := v.source.String()
 	words := make([]ShellCodeWord, 0, len(cmd.words)-start)
@@ -176,6 +185,7 @@ func (v *shellCodeView) sourceWords(cmd shellCmd, start int) []ShellCodeWord {
 	return words
 }
 
+// spelling returns the source text between start and end with removed escape and quote characters excluded.
 func (v *shellCodeView) spelling(start, end int) string {
 	source := v.source.String()
 	i := sort.SearchInts(v.removed, start)
