@@ -78,7 +78,7 @@ func TestDuplicateEndLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, true)
+			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, "fixture", true)
 			if got := endLineLocations(t, group.Locations); !slices.Equal(got, tc.want) || group.LOC != tc.loc {
 				t.Errorf("locations = %+v, LOC = %d; want %+v, LOC = %d", got, group.LOC, tc.want, tc.loc)
 			}
@@ -107,7 +107,7 @@ func TestDuplicateEndLineMissingEnd(t *testing.T) {
 	for i := 0; i < len(cases); i++ {
 		tc := cases[i]
 		t.Run(tc.name, func(t *testing.T) {
-			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, true)
+			group := buildDuplicateGroup(tc.pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, "fixture", true)
 			if got := endLineLocations(t, group.Locations); !slices.Equal(got, tc.want) {
 				t.Errorf("locations = %+v, want %+v", got, tc.want)
 			}
@@ -115,22 +115,18 @@ func TestDuplicateEndLineMissingEnd(t *testing.T) {
 	}
 }
 
-// TestDuplicateEndLineHash excludes end lines from the pinned Root:Path:Line hash.
+// TestDuplicateEndLineHash ties the group fingerprint to span ends reported by jscpd.
 func TestDuplicateEndLineHash(t *testing.T) {
-	const want = "51279eef4c75c6f537796d4527c1b738ec3201476ba88b12c60cbde5de2625cf"
-	// SHA-256 of "python\nfixture:a.py:21\nfixture:b.py:33\nfixture:c.py:163\n".
-	for _, tc := range []struct {
-		name string
-		end  int
-	}{{"original_ends", 174}, {"changed_end", 180}} {
-		t.Run(tc.name, func(t *testing.T) {
-			pairs := unequalEndLinePairs()
-			pairs[1].SecondFile.End = tc.end
-			group := buildDuplicateGroup(pairs, []rootMapping{{raw: "fixture", abs: "fixture"}}, true)
-			if group.Hash != want {
-				t.Errorf("hash = %s, want Root:Path:Line baseline %s", group.Hash, want)
-			}
-		})
+	roots := []rootMapping{{raw: "fixture", abs: "fixture"}}
+	pairs := unequalEndLinePairs()
+	baseline := buildDuplicateGroup(pairs, roots, "fixture", false)
+	pairs[1].SecondFile.End = 180
+	changed := buildDuplicateGroup(pairs, roots, "fixture", false)
+	if baseline.Hash == changed.Hash {
+		t.Fatalf("hash must change when a scanner end line changes: %s", baseline.Hash)
+	}
+	if len(baseline.Hash) != 64 || len(changed.Hash) != 64 {
+		t.Fatalf("hash length = %d/%d, want 64 hex digits", len(baseline.Hash), len(changed.Hash))
 	}
 }
 

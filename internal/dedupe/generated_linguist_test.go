@@ -97,8 +97,11 @@ func TestScanRepo_Positive_LinguistGeneratedPythonSkippedFromForeign(t *testing.
 	if report.SkippedGeneratedFiles < 2 {
 		t.Errorf("SkippedGeneratedFiles = %d, want >= 2", report.SkippedGeneratedFiles)
 	}
-	if report.ForeignScanned["python"] != 2 || report.Unscanned["python"] != 4 {
-		t.Errorf("foreign/inventory counts = %v/%v, want python=2/4", report.ForeignScanned, report.Unscanned)
+	if report.ForeignScanned["python"] != 2 || len(report.Unscanned) != 0 {
+		t.Errorf("foreign/unscanned counts = %v/%v, want python=2 and empty unscanned", report.ForeignScanned, report.Unscanned)
+	}
+	if counts, err := dedupe.SourceLanguageCounts(t.Context(), root); err != nil || counts["python"] != 4 {
+		t.Errorf("inventory counts/err = %v/%v, want python=4", counts, err)
 	}
 	for _, g := range report.ForeignDuplicates {
 		for _, loc := range g.Locations {

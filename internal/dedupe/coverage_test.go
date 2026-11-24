@@ -26,8 +26,8 @@ func setPinnedJscpdStub(t *testing.T) {
 	t.Setenv("PRAETOR_TEST_FAKE_JSCPD_REPORT_CONTENT", `{"duplicates":[]}`)
 }
 
+// TestScanRepo_Positive_PolyglotVerdictIsPartial pins that polyglot repositories report partial coverage when foreign scanners are skipped and full passing coverage when jscpd runs.
 func TestScanRepo_Positive_PolyglotVerdictIsPartial(t *testing.T) {
-	setPinnedJscpdStub(t)
 	dir := t.TempDir()
 	writeFile(t, dir, "tooling/add.go", polyglotGoSource)
 	writeFile(t, dir, "crates/core/src/lib.rs", "pub fn add() {}\n")
@@ -35,25 +35,44 @@ func TestScanRepo_Positive_PolyglotVerdictIsPartial(t *testing.T) {
 	writeFile(t, dir, "crates/core/native/shim.c", "int shim(void) { return 0; }\n")
 	writeFile(t, dir, "README.md", "# polyglot\n")
 
-	report, err := dedupe.ScanRepoContext(t.Context(), dir)
+	want := map[string]int{"rust": 2, "c": 1}
+	assertSkippedPolyglotReport(t, dir, want)
+
+	setPinnedJscpdStub(t)
+	scanned, err := dedupe.ScanRepoContext(t.Context(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Applicable || !report.Passed || !report.Partial || report.TotalFilesScanned != 1 {
-		t.Fatalf("a clean Go module beside Rust and C must pass partially: %+v", report)
+	if !scanned.Applicable || !scanned.Passed || scanned.Partial || len(scanned.Unscanned) != 0 {
+		t.Fatalf("when jscpd scans all foreign files, verdict must be full and passing: %+v", scanned)
 	}
-	if want := map[string]int{"rust": 2, "c": 1}; !maps.Equal(report.Unscanned, want) {
-		t.Fatalf("Unscanned = %v, want %v", report.Unscanned, want)
+	if !maps.Equal(scanned.ForeignScanned, want) {
+		t.Fatalf("ForeignScanned = %v, want %v", scanned.ForeignScanned, want)
 	}
-	if got := report.UnscannedLanguages(); len(got) != 2 || got[0] != "c" || got[1] != "rust" {
+}
+
+// assertSkippedPolyglotReport checks that skipping jscpd keeps foreign files in Unscanned and fails closed.
+func assertSkippedPolyglotReport(t *testing.T, dir string, want map[string]int) {
+	t.Helper()
+	t.Setenv("PRAETOR_JSCPD_BIN", "/nonexistent/jscpd")
+	skipped, err := dedupe.ScanRepoContext(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skipped.Applicable || skipped.Passed || !skipped.Partial || skipped.TotalFilesScanned != 1 {
+		t.Fatalf("a Go module with skipped foreign scan must fail closed as partial: %+v", skipped)
+	}
+	if !maps.Equal(skipped.Unscanned, want) {
+		t.Fatalf("Unscanned = %v, want %v", skipped.Unscanned, want)
+	}
+	if got := skipped.UnscannedLanguages(); len(got) != 2 || got[0] != "c" || got[1] != "rust" {
 		t.Fatalf("UnscannedLanguages() = %v, want [c rust]", got)
 	}
 }
 
-// A Go tool beside a JVM and JavaScript tree was still reported as a plain pass while the
-// language table knew only nine languages: every language the scan cannot read has to count.
+// A Go tool beside a JVM and JavaScript tree counts every foreign language in Unscanned when
+// jscpd is skipped, and moves them to ForeignScanned once jscpd runs.
 func TestScanRepo_Positive_JVMAndModuleSourcesMakeTheVerdictPartial(t *testing.T) {
-	setPinnedJscpdStub(t)
 	dir := t.TempDir()
 	writeFile(t, dir, "tooling/add.go", polyglotGoSource)
 	writeFile(t, dir, "java/A.java", "class A {}\n")
@@ -61,19 +80,27 @@ func TestScanRepo_Positive_JVMAndModuleSourcesMakeTheVerdictPartial(t *testing.T
 	writeFile(t, dir, "tools/build.mjs", "export const x = 1;\n")
 	writeFile(t, dir, "src/Program.cs", "class Program {}\n")
 
-	report, err := dedupe.ScanRepoContext(t.Context(), dir)
+	t.Setenv("PRAETOR_JSCPD_BIN", "/nonexistent/jscpd")
+	skipped, err := dedupe.ScanRepoContext(t.Context(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Passed || !report.Partial {
-		t.Fatalf("a clean Go tool beside Java, Kotlin, JavaScript and C# must pass partially: %+v", report)
-	}
 	want := map[string]int{"java": 1, "kotlin": 1, "javascript": 1, "csharp": 1}
-	if !maps.Equal(report.Unscanned, want) {
-		t.Fatalf("Unscanned = %v, want %v", report.Unscanned, want)
+	if !skipped.Partial || skipped.Passed || !maps.Equal(skipped.Unscanned, want) {
+		t.Fatalf("skipped jscpd must leave JVM/JS/C# in Unscanned and fail closed: %+v", skipped)
+	}
+
+	setPinnedJscpdStub(t)
+	scanned, err := dedupe.ScanRepoContext(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scanned.Passed || scanned.Partial || len(scanned.Unscanned) != 0 || !maps.Equal(scanned.ForeignScanned, want) {
+		t.Fatalf("scanned jscpd must move JVM/JS/C# to ForeignScanned: %+v", scanned)
 	}
 }
 
+// TestScanRepo_Positive_ForeignScannedLeavesVerdictPartial pins that foreign source files scanned by jscpd produce an applicable, passing, and non-partial report.
 func TestScanRepo_Positive_ForeignScannedLeavesVerdictPartial(t *testing.T) {
 	if os.Getenv("PRAETOR_JSCPD_BIN") == "" {
 		t.Setenv("PRAETOR_TEST_FAKE_JSCPD", "1")
@@ -88,11 +115,11 @@ func TestScanRepo_Positive_ForeignScannedLeavesVerdictPartial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Applicable || !report.Passed || !report.Partial {
-		t.Fatalf("expected applicable passed partial verdict, got: %+v", report)
+	if !report.Applicable || !report.Passed || report.Partial {
+		t.Fatalf("expected applicable passed full verdict when jscpd read every foreign file, got: %+v", report)
 	}
-	if want := map[string]int{"c": 1}; !maps.Equal(report.Unscanned, want) {
-		t.Fatalf("Unscanned = %v, want %v", report.Unscanned, want)
+	if len(report.Unscanned) != 0 {
+		t.Fatalf("Unscanned = %v, want empty after foreign scan read c", report.Unscanned)
 	}
 	if want := map[string]int{"c": 1}; !maps.Equal(report.ForeignScanned, want) {
 		t.Fatalf("ForeignScanned = %v, want %v", report.ForeignScanned, want)

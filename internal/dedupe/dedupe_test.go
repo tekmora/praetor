@@ -1816,26 +1816,37 @@ func BetaGit() {
 	}
 }
 
+// TestScanRepo_ScopedExceptions pins that scoped HISS-19 exceptions with fingerprints and line ranges correctly excuse duplicate groups across Go and foreign scans.
 func TestScanRepo_ScopedExceptions(t *testing.T) {
 	for _, foreign := range []bool{false, true} {
 		t.Run(fmt.Sprintf("foreign=%v", foreign), func(t *testing.T) {
 			root, path, groups := scopedExceptionFixture(t, foreign)
 			first := groups[0]
 			start, end := first.Locations[0].Line, first.Locations[1].Line
+			unscopedExcepted, unscopedStale := 2, 0
+			linesOnlyExcepted, linesOnlyStale := 1, 0
+			oneCopyStale := 0
+			if foreign {
+				// Foreign jscpd groups require fingerprint; entries without fingerprint stay unused and stale.
+				unscopedExcepted, unscopedStale = 0, 1
+				linesOnlyExcepted, linesOnlyStale = 0, 1
+				oneCopyStale = 1
+			}
 			cases := []struct {
 				name, scope     string
 				excepted, stale int
 			}{
-				{"unscoped", "", 2, 0},
+				{"unscoped", "", unscopedExcepted, unscopedStale},
 				{"hash prefix", "fingerprint: " + first.Hash[:8], 1, 0},
 				{"odd hash prefix", "fingerprint: " + first.Hash[:9], 1, 0},
 				{"full hash", "fingerprint: " + first.Hash, 1, 0},
 				{"uppercase", "fingerprint: " + strings.ToUpper(first.Hash[:8]), 1, 0},
 				{"stale hash", "fingerprint: 00000000", 0, 1},
-				{"inclusive lines", fmt.Sprintf("lines: %d-%d", start, end), 1, 0},
-				{"one copy", fmt.Sprintf("lines: %d-%d", start, start), 0, 0},
+				{"inclusive lines", fmt.Sprintf("lines: %d-%d", start, end), linesOnlyExcepted, linesOnlyStale},
+				{"one copy", fmt.Sprintf("lines: %d-%d", start, start), 0, oneCopyStale},
 				{"stale lines", "lines: 1000-1001", 0, 1},
 				{"hash and lines", fmt.Sprintf("fingerprint: %s\nlines: %d-%d", first.Hash[:8], start, end), 1, 0},
+				{"hash and one copy", fmt.Sprintf("fingerprint: %s\nlines: %d-%d", first.Hash[:8], start, start), 0, 0},
 				{"hash mismatch with matching lines", fmt.Sprintf("fingerprint: 00000000\nlines: %d-%d", start, end), 0, 1},
 				{"line mismatch with matching hash", "fingerprint: " + first.Hash[:8] + "\nlines: 1000-1001", 0, 1},
 			}
@@ -1919,34 +1930,49 @@ func assertScopedExceptionReport(t *testing.T, report *dedupe.DedupeReport, fore
 	}
 }
 
+// TestScanRepo_ScopedExceptionExpiry pins that expired scoped HISS-19 exceptions report as unexcused duplicates with their expiration date recorded.
 func TestScanRepo_ScopedExceptionExpiry(t *testing.T) {
 	for _, foreign := range []bool{false, true} {
 		t.Run(fmt.Sprintf("foreign=%v", foreign), func(t *testing.T) {
 			root, path, groups := scopedExceptionFixture(t, foreign)
 			first := groups[0]
-			cases := []struct{ name, scope string }{
-				{"hash", "fingerprint: " + first.Hash[:8]},
-				{"lines", fmt.Sprintf("lines: %d-%d", first.Locations[0].Line, first.Locations[1].Line)},
-			}
-			for _, tc := range cases {
+			for _, tc := range scopedExpiryCases(first, foreign) {
 				t.Run(tc.name, func(t *testing.T) {
-					writeStandardsManifest(t, root, fmt.Sprintf("exceptions:\n  - rule: HISS-19\n    path: %s\n    reason: expired scoped clone\n    expires: 2026-10-20\n    %s\n", path, tc.scope))
-					report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
-						RepoPath: root, Today: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
-					})
-					if err != nil {
-						t.Fatal(err)
-					}
-					assertScopedExceptionReport(t, report, foreign, 0, 0)
-					found := report.Duplicates
-					if foreign {
-						found = report.ForeignDuplicates
-					}
-					assertScopedExpiry(t, found, first.Hash)
+					runScopedExpiryCase(t, root, path, tc.scope, first.Hash, foreign)
 				})
 			}
 		})
 	}
+}
+
+// scopedExpiryCases builds hash and line-scope cases, keeping fingerprint on foreign groups.
+func scopedExpiryCases(first dedupe.DuplicateGroup, foreign bool) [2]struct{ name, scope string } {
+	lineScope := fmt.Sprintf("lines: %d-%d", first.Locations[0].Line, first.Locations[1].Line)
+	if foreign {
+		lineScope = fmt.Sprintf("fingerprint: %s\n    %s", first.Hash[:8], lineScope)
+	}
+	return [2]struct{ name, scope string }{
+		{"hash", "fingerprint: " + first.Hash[:8]},
+		{"lines", lineScope},
+	}
+}
+
+// runScopedExpiryCase executes one expired scoped HISS-19 test case and verifies its annotations.
+func runScopedExpiryCase(t *testing.T, root, path, scope, wantHash string, foreign bool) {
+	t.Helper()
+	writeStandardsManifest(t, root, fmt.Sprintf("exceptions:\n  - rule: HISS-19\n    path: %s\n    reason: expired scoped clone\n    expires: 2026-10-20\n    %s\n", path, scope))
+	report, err := dedupe.ScanRepoWithOptions(t.Context(), dedupe.ScanOptions{
+		RepoPath: root, Today: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertScopedExceptionReport(t, report, foreign, 0, 0)
+	found := report.Duplicates
+	if foreign {
+		found = report.ForeignDuplicates
+	}
+	assertScopedExpiry(t, found, wantHash)
 }
 
 func assertScopedExpiry(t *testing.T, groups []dedupe.DuplicateGroup, hash string) {

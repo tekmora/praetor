@@ -300,6 +300,17 @@ func DedupeExceptionFor(entries []Exception, rel, hash string, line int, today t
 	})
 }
 
+// DedupeExceptionForForeign judges HISS-19 entries for jscpd clone groups. A fingerprint is
+// required; path-only entries never excuse a foreign group. Go duplicates keep DedupeExceptionFor.
+func DedupeExceptionForForeign(entries []Exception, rel, hash string, line int, today time.Time, used []bool) (live, expired *Exception) {
+	return exceptionForMatch(entries, today, used, func(e Exception) bool {
+		if e.Rule != ExceptionRuleDedupe || e.Fingerprint == "" || !e.Matches(rel) {
+			return false
+		}
+		return e.matchesDedupeScope(hash, line)
+	})
+}
+
 func (e Exception) matchesDedupeScope(hash string, line int) bool {
 	if !strings.HasPrefix(strings.ToLower(hash), strings.ToLower(e.Fingerprint)) {
 		return false

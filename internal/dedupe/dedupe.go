@@ -81,20 +81,17 @@ type DedupeReport struct {
 	FindingFunctions int     `json:"finding_functions"`
 	CleanlinessScore float64 `json:"cleanliness_score"`
 	Passed           bool    `json:"passed"`
-	// Applicable reports whether there was anything to scan. This detector reads Go sources
-	// only, so a repository with none is not clean -- it is unexamined, and the difference
-	// matters to every caller that reads the score.
+	// Applicable reports whether Go AST sources were scanned so CleanlinessScore is defined.
+	// A repository without Go sources keeps Applicable false and CleanlinessScore 0 while
+	// ForeignScanned and Passed still record the foreign clone verdict when jscpd ran.
 	Applicable bool `json:"applicable"`
-	// Unscanned counts, per language (util.SourceLanguage), the repository's source files
-	// this detector cannot read. HISS-19 is not measured for them: a clean verdict over the
-	// Go files of a polyglot repository says nothing about the rest (#161).
+	// Unscanned counts, per language (util.SourceLanguage), non-generated source files neither
+	// the Go AST detector nor jscpd scanned (for example when jscpd was skipped).
 	Unscanned map[string]int `json:"unscanned,omitempty"`
-	// Partial reports a verdict that covers the Go sources only while the repository also
-	// holds source listed in Unscanned.
+	// Partial reports an applicable Go verdict while non-Go sources remain in Unscanned.
 	Partial bool `json:"partial"`
 
-	// ForeignDuplicates holds duplicate groups discovered by the foreign scanner (jscpd).
-	// Foreign duplicate groups are reported, not gated (they do not alter CleanlinessScore or Passed).
+	// ForeignDuplicates holds unexcused duplicate groups from the foreign scanner (jscpd).
 	ForeignDuplicates []DuplicateGroup `json:"foreign_duplicates,omitempty"`
 	// ForeignExcepted holds foreign groups fully excused by live HISS-19 exceptions.
 	ForeignExcepted []DuplicateGroup `json:"foreign_excepted,omitempty"`
@@ -102,7 +99,7 @@ type DedupeReport struct {
 	ForeignScanner string `json:"foreign_scanner,omitempty"`
 	// ForeignSkipped records why the foreign scan was skipped, if applicable.
 	ForeignSkipped string `json:"foreign_skipped,omitempty"`
-	// ForeignScanned counts source files per language scanned by the foreign scanner (reported, not gated).
+	// ForeignScanned counts source files per language scanned by the foreign scanner.
 	ForeignScanned map[string]int `json:"foreign_scanned,omitempty"`
 }
 
@@ -826,12 +823,13 @@ func reportAdopterSprawl(starts []adopterGitStart, helper adopterGitFunction, re
 	})
 }
 
+// collectDuplicates partitions duplicate groups into report Duplicates or Excepted based on exception rules and sorts each slice by hash.
 func collectDuplicates(hashMap map[string][]FileLocation, locMap map[string]int, exceptions []config.Exception, today time.Time, used []bool, report *DedupeReport) {
 	for hash, locs := range hashMap {
 		if len(locs) <= 1 {
 			continue
 		}
-		group, allExcepted := classifyDuplicateGroup(DuplicateGroup{Hash: hash, LOC: locMap[hash], Locations: locs}, "", exceptions, today, used)
+		group, allExcepted := classifyDuplicateGroup(DuplicateGroup{Hash: hash, LOC: locMap[hash], Locations: locs}, "", exceptions, today, used, false)
 		if allExcepted {
 			report.Excepted = append(report.Excepted, group)
 		} else {
@@ -911,14 +909,15 @@ func classifyUnusedException(entry config.Exception, report *DedupeReport) {
 		entry.Target(), config.ExceptionRuleDedupe, lang))
 }
 
-func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []config.Exception, today time.Time, used []bool) (DuplicateGroup, bool) {
+// classifyDuplicateGroup checks exception coverage for each location in a duplicate group and returns whether all locations are excused.
+func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []config.Exception, today time.Time, used []bool, foreign bool) (DuplicateGroup, bool) {
 	group.Locations = append([]FileLocation(nil), group.Locations...)
 	allExcepted := true
 	var groupExceptions []ExceptionEntry
 	seen := make(map[*config.Exception]bool)
 
 	for i := range group.Locations {
-		live := judgeLocation(&group.Locations[i], mainRoot, group.Hash, exceptions, today, used)
+		live := judgeLocation(&group.Locations[i], mainRoot, group.Hash, exceptions, today, used, foreign)
 		if live != nil {
 			if !seen[live] {
 				seen[live] = true
@@ -938,12 +937,18 @@ func classifyDuplicateGroup(group DuplicateGroup, mainRoot string, exceptions []
 	return group, allExcepted
 }
 
-func judgeLocation(loc *FileLocation, mainRoot, hash string, exceptions []config.Exception, today time.Time, used []bool) *config.Exception {
+// judgeLocation checks a file location against dedupe exceptions, marking expired dates and returning active exceptions for the main root.
+func judgeLocation(loc *FileLocation, mainRoot, hash string, exceptions []config.Exception, today time.Time, used []bool, foreign bool) *config.Exception {
 	// Entries belong to the main manifest, so the same path in another root cannot use them.
 	if loc.Root != "" && loc.Root != mainRoot {
 		return nil
 	}
-	live, expired := config.DedupeExceptionFor(exceptions, loc.Path, hash, loc.Line, today, used)
+	var live, expired *config.Exception
+	if foreign {
+		live, expired = config.DedupeExceptionForForeign(exceptions, loc.Path, hash, loc.Line, today, used)
+	} else {
+		live, expired = config.DedupeExceptionFor(exceptions, loc.Path, hash, loc.Line, today, used)
+	}
 	if live == nil && expired != nil {
 		loc.Expired = expired.Expires
 	}
@@ -996,7 +1001,8 @@ func calculateScore(report *DedupeReport) {
 	report.Partial = report.Applicable && len(report.Unscanned) > 0
 	if !report.Applicable {
 		report.CleanlinessScore = 0
-		report.Passed = false
+		report.Passed = len(report.ForeignScanned) > 0 && len(report.ForeignDuplicates) == 0 &&
+			len(report.StaleExceptions) == 0 && report.ForeignSkipped == ""
 		return
 	}
 	report.FindingFunctions = countFindingFunctions(report)
@@ -1020,6 +1026,6 @@ func calculateScore(report *DedupeReport) {
 	// order engine-dedupe-jscpd-skip-fails-closed-20261027: any foreign clone scan skip (missing
 	// jscpd, version mismatch) fails closed so missing tooling never silently bypasses non-Go clone
 	// detection. Applicable and not-applicable reports both get Passed=false.
-	report.Passed = len(report.Duplicates) == 0 && len(report.SprawlItems) == 0 &&
-		len(report.StaleExceptions) == 0 && report.ForeignSkipped == ""
+	report.Passed = len(report.Duplicates) == 0 && len(report.ForeignDuplicates) == 0 &&
+		len(report.SprawlItems) == 0 && len(report.StaleExceptions) == 0 && report.ForeignSkipped == ""
 }

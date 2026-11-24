@@ -1078,6 +1078,34 @@ exceptions:
 	}
 }
 
+// TestDedupeExceptionForForeign_3D verifies positive fingerprint matching, negative path-only
+// and expired rejection, and boundary line-scope combinations for foreign clone exceptions.
+func TestDedupeExceptionForForeign_3D(t *testing.T) {
+	entry := validException()
+	entry.Rule, entry.Fingerprint = ExceptionRuleDedupe, "abcdef12"
+	pathOnly := entry
+	pathOnly.Fingerprint = ""
+	if live, _ := DedupeExceptionForForeign([]Exception{pathOnly}, entry.Path, "abcdef1234567890", 10, exceptionsToday, nil); live != nil {
+		t.Fatal("path-only entry must not excuse a foreign clone group")
+	}
+	entries := []Exception{entry}
+	used := make([]bool, 1)
+	live, _ := DedupeExceptionForForeign(entries, entry.Path, "abcdef1234567890", 10, exceptionsToday, used)
+	if live != &entries[0] || !used[0] {
+		t.Fatalf("fingerprint-scoped live=%+v used=%v, want &entries[0] and used[0]=true", live, used)
+	}
+	expiredEntry := entry
+	expiredEntry.Expires = "2026-10-05"
+	expiredSlice := []Exception{expiredEntry}
+	live, expired := DedupeExceptionForForeign(expiredSlice, entry.Path, "abcdef1234567890", 10, exceptionsToday, nil)
+	if live != nil || expired != &expiredSlice[0] {
+		t.Fatalf("expired foreign entry: live=%+v expired=%+v", live, expired)
+	}
+	if live, _ := DedupeExceptionFor([]Exception{pathOnly}, entry.Path, "abcdef1234567890", 10, exceptionsToday, nil); live == nil {
+		t.Fatal("path-only entry must still excuse Go duplicate paths")
+	}
+}
+
 func TestDedupeExceptionForScopedUsage(t *testing.T) {
 	entry := validException()
 	entry.Rule, entry.Fingerprint, entry.Lines = ExceptionRuleDedupe, "abcdef12", "10-20"

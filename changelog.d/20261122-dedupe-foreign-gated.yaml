@@ -1,0 +1,3 @@
+type: changed
+title: "Fail `praetorctl dedupe scan` on unexcused foreign-language duplicate blocks from `jscpd`; before upgrading, inspect clones with `praetorctl dedupe scan --json .` and extract them or add `HISS-19` exceptions with `path`, an 8–64 hex `fingerprint` prefix, and a category `expires` date (`fingerprint` is required for foreign groups, while path-only entries remain valid for Go)"
+breaking: true

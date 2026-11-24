@@ -121,25 +121,7 @@ func printDedupeJSON(report *dedupe.DedupeReport) error {
 func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 	fmt.Printf("=== Codebase Deduplication & Unification Audit: %s ===\n", dir)
 	if !report.Applicable {
-		// Neither a pass nor a failure. The detector reads Go sources and found none, so it
-		// has no verdict to give; printing one would certify a tree it never opened.
-		fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
-		printUnscannedLanguages(report)
-		if report.ForeignScanner != "" {
-			fmt.Printf("  Foreign Scanner:   %s (reported, not gated)\n", report.ForeignScanner)
-		} else if report.ForeignSkipped != "" {
-			fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
-		} else {
-			fmt.Println("  Clone detection for other languages is not implemented.")
-		}
-		printForeignDuplicates(report)
-		printExceptedBlocks("Excepted Foreign Duplicate Blocks", report.ForeignExcepted)
-		printStaleExceptions(report.StaleExceptions)
-		printNotCheckedExceptions(report.NotCheckedExceptions)
-		if len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" {
-			return dedupeVerdict(report)
-		}
-		return nil
+		return printDedupeNotApplicableReport(report)
 	}
 	fmt.Printf("  Files Scanned:     %d\n", report.TotalFilesScanned)
 	if report.SkippedGeneratedFiles > 0 {
@@ -157,7 +139,7 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 		fmt.Printf("  Passed:            %v\n", report.Passed)
 	}
 	if report.ForeignScanner != "" {
-		fmt.Printf("  Foreign Scanner:   %s (reported, not gated)\n", report.ForeignScanner)
+		fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
 	} else if report.ForeignSkipped != "" {
 		fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
 	}
@@ -172,6 +154,58 @@ func printDedupeReport(dir string, report *dedupe.DedupeReport) error {
 	return dedupeVerdict(report)
 }
 
+// printDedupeNotApplicableReport prints the no-Go-sources report: Go AST cleanliness scoring is
+// not applicable, while foreign clone coverage still prints a Passed verdict when jscpd ran, was
+// skipped, or left stale exceptions.
+func printDedupeNotApplicableReport(report *dedupe.DedupeReport) error {
+	if !dedupeHasForeignCoverageOrFailure(report) {
+		// Neither Go nor foreign sources were examined, so there is no verdict to give.
+		fmt.Println("  Not applicable: no Go sources found; this detector reads Go only.")
+		printUnscannedLanguages(report)
+		printDedupeForeignScannerLine(report)
+		printNotCheckedExceptions(report.NotCheckedExceptions)
+		return nil
+	}
+	fmt.Println("  Not applicable: no Go sources found; Go AST cleanliness score is not measured.")
+	printUnscannedLanguages(report)
+	fmt.Printf("  Passed:            %v\n", report.Passed)
+	printDedupeForeignScannerLine(report)
+	printForeignDuplicates(report)
+	printExceptedBlocks("Excepted Foreign Duplicate Blocks", report.ForeignExcepted)
+	printStaleExceptions(report.StaleExceptions)
+	printNotCheckedExceptions(report.NotCheckedExceptions)
+	if dedupeNotApplicableNeedsVerdict(report) {
+		return dedupeVerdict(report)
+	}
+	return nil
+}
+
+// dedupeHasForeignCoverageOrFailure reports whether a Go-free scan examined foreign sources or
+// recorded foreign findings, a skipped foreign scanner, or stale exceptions.
+func dedupeHasForeignCoverageOrFailure(report *dedupe.DedupeReport) bool {
+	return report.ForeignScanner != "" || len(report.ForeignScanned) > 0 ||
+		len(report.ForeignExcepted) > 0 || dedupeNotApplicableNeedsVerdict(report)
+}
+
+// printDedupeForeignScannerLine prints the foreign scanner name, its skipped reason, or a notice that clone detection is not implemented.
+func printDedupeForeignScannerLine(report *dedupe.DedupeReport) {
+	if report.ForeignScanner != "" {
+		fmt.Printf("  Foreign Scanner:   %s\n", report.ForeignScanner)
+		return
+	}
+	if report.ForeignSkipped != "" {
+		fmt.Printf("  Foreign Scanner:   skipped (%s)\n", report.ForeignSkipped)
+		return
+	}
+	fmt.Println("  Clone detection for other languages is not implemented.")
+}
+
+// dedupeNotApplicableNeedsVerdict reports whether a Go-free dedupe report requires returning a verdict due to stale exceptions, a skipped scanner, or foreign duplicates.
+func dedupeNotApplicableNeedsVerdict(report *dedupe.DedupeReport) bool {
+	return len(report.StaleExceptions) > 0 || report.ForeignSkipped != "" || len(report.ForeignDuplicates) > 0
+}
+
+// printForeignDuplicates prints the foreign (non-Go) clone groups with a count per language and their file spans.
 func printForeignDuplicates(report *dedupe.DedupeReport) {
 	if len(report.ForeignDuplicates) == 0 {
 		return
@@ -180,7 +214,7 @@ func printForeignDuplicates(report *dedupe.DedupeReport) {
 	for i := 0; i < len(report.ForeignDuplicates); i++ {
 		langCounts[report.ForeignDuplicates[i].Language]++
 	}
-	fmt.Printf("\nForeign Duplicate Blocks (%d, reported, not gated):\n", len(report.ForeignDuplicates))
+	fmt.Printf("\nForeign Duplicate Blocks (%d):\n", len(report.ForeignDuplicates))
 	for _, lang := range slices.Sorted(maps.Keys(langCounts)) {
 		unit := "groups"
 		if langCounts[lang] == 1 {
@@ -205,13 +239,9 @@ func printForeignDuplicates(report *dedupe.DedupeReport) {
 	}
 }
 
-// formatDedupeLocation includes the span's end only when it extends past the start.
+// formatDedupeLocation renders one clone location as path:line or path:start-end through dedupe.FormatFileLocation.
 func formatDedupeLocation(loc dedupe.FileLocation) string {
-	location := fmt.Sprintf("%s:%d", loc.Path, loc.Line)
-	if loc.EndLine > loc.Line && loc.EndLine != 0 {
-		location += fmt.Sprintf("-%d", loc.EndLine)
-	}
-	return location
+	return dedupe.FormatFileLocation(loc)
 }
 
 func printDuplicateBlocks(duplicates []dedupe.DuplicateGroup) {
@@ -302,15 +332,19 @@ func dedupeVerdict(report *dedupe.DedupeReport) error {
 	if report.ForeignSkipped != "" {
 		return fmt.Errorf("dedupe audit failed: foreign clone scan skipped: %s", report.ForeignSkipped)
 	}
-	if report.Passed || (!report.Applicable && len(report.StaleExceptions) == 0) {
+	if report.Passed {
 		return nil
 	}
-	if len(report.StaleExceptions) > 0 {
-		return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d utility sprawl finding(s), %d stale exception(s); cleanliness %.1f%%",
-			len(report.Duplicates), len(report.SprawlItems), len(report.StaleExceptions), report.CleanlinessScore)
+	if !report.Applicable && len(report.StaleExceptions) == 0 && len(report.ForeignDuplicates) == 0 {
+		return nil
 	}
-	return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d utility sprawl finding(s); cleanliness %.1f%%",
-		len(report.Duplicates), len(report.SprawlItems), report.CleanlinessScore)
+	foreignSuffix := dedupe.ForeignDuplicateVerdictSuffix(report.ForeignDuplicates)
+	if len(report.StaleExceptions) > 0 {
+		return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d foreign duplicate block group(s)%s, %d utility sprawl finding(s), %d stale exception(s); cleanliness %.1f%%",
+			len(report.Duplicates), len(report.ForeignDuplicates), foreignSuffix, len(report.SprawlItems), len(report.StaleExceptions), report.CleanlinessScore)
+	}
+	return fmt.Errorf("dedupe audit failed: %d duplicate function group(s), %d foreign duplicate block group(s)%s, %d utility sprawl finding(s); cleanliness %.1f%%",
+		len(report.Duplicates), len(report.ForeignDuplicates), foreignSuffix, len(report.SprawlItems), report.CleanlinessScore)
 }
 
 func runDedupeCadence(args []string) error {
