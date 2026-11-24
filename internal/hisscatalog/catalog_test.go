@@ -7,10 +7,16 @@ package hisscatalog
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -235,5 +241,122 @@ func TestSplitInvariantRow_Boundary_EscapedPipes(t *testing.T) {
 	}
 	if table, err := InvariantTableRows("# Harness\n\n| **ACME-01** own | x | y | z |\n"); err != nil || len(table) != 0 {
 		t.Errorf("a row outside the section: %+v, %v", table, err)
+	}
+}
+
+// maxHISSSourceFiles bounds the files read when deriving emitted rule IDs from internal/hiss.
+const maxHISSSourceFiles = 256
+
+// emittedScannerRuleIDs parses the production Go sources of internal/hiss and returns the sorted
+// HISS rule IDs passed directly to recordViolation or goScanner.record.
+func emittedScannerRuleIDs(t *testing.T) []string {
+	t.Helper()
+	dir := filepath.Join("..", "hiss")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	set := make(map[string]struct{})
+	for i := 0; i < len(entries) && i < maxHISSSourceFiles; i++ {
+		name := entries[i].Name()
+		if entries[i].IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		collectEmittedFileRules(t, filepath.Join(dir, name), set)
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// collectEmittedFileRules records every HISS rule literal emitted as a violation in path.
+func collectEmittedFileRules(t *testing.T, path string, set map[string]struct{}) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ruleID, emitted := emittedCallRuleID(call); emitted {
+			set[ruleID] = struct{}{}
+		}
+		return true
+	})
+}
+
+// emittedCallRuleID extracts the HISS rule ID literal from a recordViolation or .record call.
+func emittedCallRuleID(call *ast.CallExpr) (string, bool) {
+	argIndex := callRuleArgIndex(call.Fun)
+	if argIndex < 0 || argIndex >= len(call.Args) {
+		return "", false
+	}
+	lit, ok := call.Args[argIndex].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	return value, err == nil && strings.HasPrefix(value, "HISS-")
+}
+
+// callRuleArgIndex returns the argument index carrying the HISS rule ID on violation helper calls.
+func callRuleArgIndex(fun ast.Expr) int {
+	switch target := fun.(type) {
+	case *ast.Ident:
+		if target.Name == "recordViolation" {
+			return 1
+		}
+	case *ast.SelectorExpr:
+		if target.Sel.Name == "record" {
+			return 0
+		}
+	}
+	return -1
+}
+
+// TestScannerRuleIDs_MatchesEmittedScannerRules verifies that the catalog's typed scanner
+// ownership equals the set of rule IDs internal/hiss can emit as violations.
+func TestScannerRuleIDs_MatchesEmittedScannerRules(t *testing.T) {
+	want := emittedScannerRuleIDs(t)
+	if len(want) == 0 {
+		t.Fatal("no emitted rule IDs discovered in internal/hiss")
+	}
+	got := ScannerRuleIDs()
+	if !slices.Equal(got, want) {
+		t.Fatalf("ScannerRuleIDs() = %v, want %v", got, want)
+	}
+}
+
+// TestScannerRuleIDs_WordingChangeDoesNotAlterRouting proves that editing explanatory English in
+// catalog entries cannot add or remove scanner routing.
+func TestScannerRuleIDs_WordingChangeDoesNotAlterRouting(t *testing.T) {
+	want := ScannerRuleIDs()
+	saved := slices.Clone(catalog)
+	t.Cleanup(func() { copy(catalog, saved) })
+
+	for i := 0; i < len(catalog); i++ {
+		switch catalog[i].ID {
+		case "HISS-01", "HISS-02", "HISS-04":
+			catalog[i].Title = "Reworded title"
+			catalog[i].Specification = "Reworded specification."
+			catalog[i].Enforcement = "Static check without naming the package."
+			catalog[i].FailureAction = "Reworded failure."
+		case "HISS-03", "HISS-10":
+			catalog[i].Enforcement = "The internal/hiss scanner decides this rule in prose only."
+		}
+	}
+	if got := ScannerRuleIDs(); !slices.Equal(got, want) {
+		t.Fatalf("after prose wording edit, ScannerRuleIDs() = %v, want %v", got, want)
+	}
+}
+
+// TestScannerRuleIDs_Control_HISS01And02IncludedHISS10Excluded is the baseline control holding
+// both before and after typed scanner routing.
+func TestScannerRuleIDs_Control_HISS01And02IncludedHISS10Excluded(t *testing.T) {
+	ids := ScannerRuleIDs()
+	if !slices.Contains(ids, "HISS-01") || !slices.Contains(ids, "HISS-02") || slices.Contains(ids, "HISS-10") {
+		t.Fatalf("control expectation violated: ScannerRuleIDs() = %v", ids)
 	}
 }
