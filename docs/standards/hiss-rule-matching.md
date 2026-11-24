@@ -752,6 +752,15 @@ bucket holds shapes the scanner reports without enforcing them. Each must yield 
 no violation, and a negative fixture must yield no measurement. So a measurement can neither
 disappear nor start to enforce unnoticed.
 
+An incomplete scan (`ScanReport.Incomplete`: an unparseable file or an analysis-bound truncation) or
+a scan that examined zero files of the claim's language never certifies a positive, negative, gap,
+measured or delegated fixture (`internal/hisscoverage/verify.go`). A `gap/` fixture whose documented
+gap is itself that the scanner fails to parse or declines to examine the input (such as
+`.config/hiss/testdata/HISS-02/systemd/gap/override.conf` or
+`.config/hiss/testdata/HISS-07/ansible/gap/included-tasks.yml`) declares
+`hiss-fixture: unparsed: <reason>` or `hiss-fixture: unexamined: <reason>` in a leading comment; the
+marker is refused outside `gap/` and fails when the scanner begins to parse or examine the file.
+
 A fixture whose rule reads more than one file is a single `*.txtar` file in the
 [txtar format](https://pkg.go.dev/golang.org/x/tools/txtar): each file it holds follows a
 `-- path --` marker line, and the replay stages each one at its path before the scan

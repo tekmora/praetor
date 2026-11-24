@@ -1,3 +1,4 @@
+# hiss-fixture: unexamined: ansible scanner claims playbooks and roles/<role>/tasks or handlers only
 # A task file outside a role's tasks/ or handlers/ directory is not recognised from its contents.
 - name: Refresh the package cache
   ansible.builtin.apt:
