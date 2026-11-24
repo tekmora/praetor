@@ -45,8 +45,8 @@ func unignoredTerminatingSignals() []os.Signal {
 // terminating signal it does not ignore: SIGINT, SIGTERM and SIGHUP on Unix, Ctrl-C and a
 // console close elsewhere. It is TerminateCommandsOnSignal for work that must clean up after
 // itself: the same signals, the same respect for ignored ones, and on Unix the same forwarding
-// to every running command group, so each command still sees the signal it would have seen in
-// this process's own group. It then cancels the context, with a *SignalError cause, instead of
+// to running command groups that accept immediate forwarding (WithCommandContextCancellation).
+// It then cancels the context, with a *SignalError cause, instead of
 // ending the process, and never refuses a later command, so deferred cleanup that runs under
 // context.WithoutCancel (removing an isolated worktree and its branch) still starts its git
 // commands.

@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -427,15 +428,16 @@ type remoteCancelPoll struct {
 	canceledAt time.Time
 }
 
-// pollRemoteCancelMarker waits until marker exists or admitRemoteCancelMarkerWait elapses, then cancels root.
-func pollRemoteCancelMarker(marker string, cancel context.CancelFunc) remoteCancelPoll {
+// pollRemoteCancelMarker waits for marker, then calls cancel even if the wait expires.
+func pollRemoteCancelMarker(marker string, cancel context.CancelFunc, pause func(time.Duration)) remoteCancelPoll {
+	const maxPolls = int(admitRemoteCancelMarkerWait / admitRemoteCancelMarkerPoll)
 	deadline := time.Now().Add(admitRemoteCancelMarkerWait)
-	for time.Now().Before(deadline) {
+	for attempt := 0; attempt < maxPolls && time.Now().Before(deadline); attempt++ {
 		if _, err := os.Stat(marker); err == nil {
 			cancel()
 			return remoteCancelPoll{sawMarker: true, canceledAt: time.Now()}
 		}
-		time.Sleep(admitRemoteCancelMarkerPoll)
+		pause(admitRemoteCancelMarkerPoll)
 	}
 	cancel()
 	return remoteCancelPoll{canceledAt: time.Now()}
@@ -465,7 +467,7 @@ func runRemoteCancellationCase(t *testing.T, f *admitFixture, executor string) {
 	rootCtx = ctx
 	marker := filepath.Join(t.TempDir(), "started")
 	done := make(chan remoteCancelPoll, 1)
-	go func() { done <- pollRemoteCancelMarker(marker, cancel) }()
+	go func() { done <- pollRemoteCancelMarker(marker, cancel, time.Sleep) }()
 	out, log, code := runAdmitCaptured(t, "--", "sh", "-c", `: > "$1"; exec sleep 15`, "step", marker)
 	assertRemoteCancelOutcome(t, executor, <-done, code, out, log)
 	f.assertClean(t)
@@ -481,6 +483,62 @@ func TestRunAdmit_RemoteCancellationCleansWorkspace(t *testing.T) {
 		// up and inside admitRemoteCancelMarkerWait.
 		runRemoteCancellationCase(t, &late, "late-start")
 	})
+}
+
+// TestPollRemoteCancelMarkerIterationCap exhausts the polls before the wall-time limit.
+func TestPollRemoteCancelMarkerIterationCap(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "absent")
+	const want = int(admitRemoteCancelMarkerWait / admitRemoteCancelMarkerPoll)
+	var attempts int
+	canceled := false
+	poll := pollRemoteCancelMarker(marker, func() { canceled = true }, func(time.Duration) {
+		attempts++
+		if attempts > want {
+			t.Fatalf("marker poll exceeded %d attempts", want)
+		}
+	})
+	if attempts != want || !canceled || poll.sawMarker {
+		t.Fatalf("marker poll: attempts=%d, canceled=%t, found=%t", attempts, canceled, poll.sawMarker)
+	}
+}
+
+const admitSignalMarkerEnv = "ADMIT_TEST_SSH_READY"
+
+// TestRunAdmit_RemoteSignalClosesLease sends SIGTERM to the CLI after SSH starts reading.
+func TestRunAdmit_RemoteSignalClosesLease(t *testing.T) {
+	if os.Getenv(admitSignalMarkerEnv) != "" {
+		os.Args = []string{"praetorctl", "admit", "--", "true"}
+		main()
+		t.Fatal("signalled admit returned success")
+	}
+	f := newAdmitFixture(t)
+	f.inventory(t, "lease-eof")
+	marker := filepath.Join(t.TempDir(), "ssh-ready")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), admitRemoteCancelMarkerWait+admitRemoteCancelAfterCancel)
+	defer cancel()
+	//nolint:forbidigo,nolintlint // the fixture sends a real process signal to the CLI
+	child := exec.CommandContext(ctx, self, "-test.run=^TestRunAdmit_RemoteSignalClosesLease$")
+	child.Env = append(admitFixtureEnvironment(), admitSignalMarkerEnv+"="+marker)
+	var log bytes.Buffer
+	child.Stderr = &log
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var signalErr error
+	poll := pollRemoteCancelMarker(marker, func() { signalErr = child.Process.Signal(syscall.SIGTERM) }, time.Sleep)
+	var exit *exec.ExitError
+	if err := child.Wait(); !errors.As(err, &exit) || exit.ExitCode() != 143 || !poll.sawMarker || signalErr != nil {
+		t.Fatalf("admit signal: ready=%t, signal=%v, wait=%v, stderr %q", poll.sawMarker, signalErr, err, log.String())
+	}
+	if elapsed := time.Since(poll.canceledAt); elapsed >= admitRemoteCancelAfterCancel ||
+		!strings.Contains(log.String(), "remote cleanup complete") || !strings.Contains(log.String(), "interrupted by terminated") {
+		t.Fatalf("admit signal after %s: stderr %q", elapsed, log.String())
+	}
+	f.assertClean(t)
 }
 
 // TestRunAdmit_ExecutorModeIsExplicit proves that remote execution requires an explicit inventory path or local flag, refusing unset configurations.
@@ -716,7 +774,7 @@ case "$command" in
             slow) exec sleep 15 ;;
             headroom) available=20971520; memmax=17179869184; memcur=10737418240 ;;
             unreadable-cgroup) memmax=__UNREADABLE__ ;;
-            late-start) available=33554432; cpumax="1200000 100000" ;;
+            late-start|lease-eof) available=33554432; cpumax="1200000 100000" ;;
             evict|term-evict|bad-mem|max-mem|large-mem|missing-mem) cpumax="1200000 100000" ;;
             *) exit 99 ;;
         esac
@@ -732,6 +790,13 @@ case "$command" in
             evict) echo 'fixture mid-run disconnect' >&2; exit 255 ;;
             term-evict) echo 'fixture wrapper sigterm' >&2; exit 143 ;;
             late-start) sleep 6 ;;
+            lease-eof)
+                trap 'echo "fixture SSH got TERM" >&2; exit 143' TERM
+                : > "$ADMIT_TEST_SSH_READY"
+                cat >/dev/null
+                echo 'remote cleanup complete' >&2
+                exit 143
+                ;;
         esac
         write_cgroups "$memmax" 0 "1200000 100000"
         export ADMIT_STUB_HOST="$host"

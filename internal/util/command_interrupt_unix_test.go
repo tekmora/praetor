@@ -344,7 +344,7 @@ func startTracked(t *testing.T, r *commandGroupRegistry, dir, script string) (*e
 	catchHangupForExec()
 	cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
 	cmd.Dir = dir
-	start, cleanup := r.track(cmd)
+	start, cleanup := r.track(cmd, false)
 	if err := start(); err != nil {
 		return cmd, nil, err
 	}
@@ -474,7 +474,7 @@ func TestCommandGroupRegistry_Positive_ReturnedCommandLeavesNoDescendant(t *test
 func TestCommandGroupRegistry_Boundary_GraceAlreadyOver(t *testing.T) {
 	r := newCommandGroupRegistry()
 	exited := exec.CommandContext(t.Context(), "sh", "-c", "exit 0")
-	startExited, _ := r.track(exited)
+	startExited, _ := r.track(exited, false)
 	if err := startExited(); err != nil {
 		t.Fatal(err)
 	}

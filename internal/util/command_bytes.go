@@ -33,6 +33,15 @@ func (b *commandBuffer) Write(p []byte) (int, error) {
 // commandStdinKey scopes child standard input to one operation tree.
 type commandStdinKey struct{}
 
+type commandContextCancelKey struct{}
+
+// WithCommandContextCancellation makes bounded commands skip immediate signal forwarding by
+// CancelCommandsOnSignal on Unix. Their own context still terminates their process groups,
+// allowing a caller to finish a cancellation protocol before cancelling the command.
+func WithCommandContextCancellation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, commandContextCancelKey{}, true)
+}
+
 // MaxCommandOutputBytes is the largest per-stream cap a bounded command accepts, and the cap
 // RunCommand applies to each of standard output and standard error.
 const MaxCommandOutputBytes = 16 << 20
@@ -134,7 +143,7 @@ func runBoundedCommand(ctx context.Context, dir, name string, maxBytes int, stre
 	if err != nil {
 		return CommandBytes{}, err
 	}
-	start, cleanup := commandBytesCleanup(cmd)
+	start, cleanup := commandBytesCleanup(cmd, ctx.Value(commandContextCancelKey{}) == true)
 	defer func() { resultErr = errors.Join(resultErr, cleanup()) }()
 	out := commandBuffer{limit: maxBytes, cancel: cancel}
 	diagnostic := commandBuffer{limit: maxBytes, cancel: cancel}

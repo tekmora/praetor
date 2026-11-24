@@ -27,7 +27,9 @@ const (
 )
 
 // RunRemote runs a noninteractive step in a disposable executor workspace. The SSH input
-// carries the source bundle and stays open as a lease until the command ends.
+// carries the source bundle and stays open as a lease until the command ends. When ctx is
+// canceled first, the lease closes before the command ends: the executor sees EOF, stops
+// the step and removes its workspace, and SSH gets a short grace to report that cleanup.
 func RunRemote(ctx context.Context, executor Executor, step Step, timeout time.Duration, jobs int, memoryMaxBytes uint64) (code int, resultErr error) {
 	jobs, memoryMaxBytes, err := validateRemoteRun(executor, step, timeout, jobs, memoryMaxBytes)
 	if err != nil {
@@ -148,7 +150,7 @@ func runRemoteSnapshot(ctx context.Context, executor Executor, step Step, snapsh
 	command := remoteCommand(executor, step, snapshot, timeout, jobs, memoryMaxBytes)
 	stepErr := &remoteStepStderr{inner: step.Stderr}
 	sshCtx, finishSSH := remoteSSHContext(ctx, lease)
-	sshErr := util.RunCommandPassthrough(sshCtx, "", "ssh", input, step.Stdout, stepErr, executor.sshArgs(command)...)
+	sshErr := util.RunCommandPassthrough(util.WithCommandContextCancellation(sshCtx), "", "ssh", input, step.Stdout, stepErr, executor.sshArgs(command)...)
 	sshErr = errors.Join(sshErr, finishSSH())
 	closeErr := errors.Join(input.Close(), closeLease(lease))
 	copyErr := <-transfer
@@ -263,7 +265,7 @@ cleanup() {
     exit "$rc"
 }
 stop() {
-    # A signal can arrive after the fork but before the shell records the runner PID.
+    # Defer cleanup until the shell records the PID of the child it is starting.
     if [ -n "$starting" ]; then
         stopping=$1
     else
@@ -289,13 +291,17 @@ exec 3<&0
 parent=$$
 export MAKEFLAGS=-j"$jobs" GOMAXPROCS="$jobs"
 starting=yes
+( IFS= read -r unused <&3 || kill -TERM "$parent" ) &
+watcher=$!
+starting=
+if [ -n "$stopping" ]; then cleanup "$stopping"; fi
+# The idle lease becomes readable on EOF, even if the watcher has not run yet.
+bash -c 'if read -t 0; then exit 143; fi' <&3 || cleanup "$?"
+starting=yes
 "$@" </dev/null 3<&- &
 runner=$!
 starting=
 if [ -n "$stopping" ]; then cleanup "$stopping"; fi
-# Record the runner before the watcher can report an already-closed lease.
-( IFS= read -r unused <&3 || kill -TERM "$parent" ) &
-watcher=$!
 rc=0
 wait "$runner" || rc=$?
 runner=
