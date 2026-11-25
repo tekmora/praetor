@@ -34,6 +34,9 @@ func marshalNeedsManifest(repoNeeds *RepoNeeds) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal needs manifest: %w", err)
 	}
+	if len(data) > contextopt.MaxSourceBytes {
+		return nil, fmt.Errorf("needs: %s exceeds %d bytes", NeedsManifestName, contextopt.MaxSourceBytes)
+	}
 	return data, nil
 }
 

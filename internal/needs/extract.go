@@ -33,13 +33,12 @@ var ErrGoModMissing = errors.New("needs: go.mod not found")
 // falling back to a Go manifest would report an unanalysed repository as fully ready.
 // registry supplies the analyzers and the framework targets; nil selects DefaultRegistry.
 func ScanRepo(ctx context.Context, repoPath string, registry *AnalyzerRegistry) (*RepoNeeds, error) {
-	report, _, err := scanRepoLayout(ctx, repoPath, registry)
+	report, _, err := scanRepoLayout(ctx, repoPath, nil, registry)
 	return report, err
 }
 
-// scanRepoLayout is ScanRepo returning the discovered repository beside its row, so a
-// caller can inspect the same projects further without a second discovery walk.
-func scanRepoLayout(ctx context.Context, repoPath string, registry *AnalyzerRegistry) (*RepoNeeds, *fleetRepo, error) {
+// scanRepoLayout returns the row and its discovered projects, scoring against framework when supplied.
+func scanRepoLayout(ctx context.Context, repoPath string, framework *FrameworkIndex, registry *AnalyzerRegistry) (*RepoNeeds, *fleetRepo, error) {
 	if ctx.Err() != nil {
 		return nil, nil, ctx.Err()
 	}
@@ -47,7 +46,7 @@ func scanRepoLayout(ctx context.Context, repoPath string, registry *AnalyzerRegi
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover the projects of repository %q: %w", repoPath, err)
 	}
-	report, err := scanRepository(ctx, repo, registry)
+	report, err := scanRepositoryWithFramework(ctx, repo, framework, registry)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -91,16 +90,12 @@ func ReportRepoWithFramework(ctx context.Context, repoPath string, framework *Fr
 	return report, nil
 }
 
+// scanRepoWithFramework validates the selected framework and returns the report with its discovered projects.
 func scanRepoWithFramework(ctx context.Context, repoPath string, framework *FrameworkIndex, registry *AnalyzerRegistry) (*RepoNeeds, *fleetRepo, error) {
 	if ctx == nil || framework == nil {
 		return nil, nil, errors.New("context and framework index are required")
 	}
-	report, repo, err := scanRepoLayout(ctx, repoPath, registry)
-	if err != nil {
-		return nil, nil, err
-	}
-	applyFrameworkCoverage(ctx, framework, report, registry)
-	return report, repo, nil
+	return scanRepoLayout(ctx, repoPath, framework, registry)
 }
 
 // goModFile is what a Go analysis reads from a module's go.mod.

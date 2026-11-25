@@ -350,8 +350,11 @@ func scanRepository(ctx context.Context, repo *fleetRepo, registry *AnalyzerRegi
 	return row, nil
 }
 
-// scanRepositoryWithFramework scores one repository against the selected framework.
+// scanRepositoryWithFramework scans one repository, scoring against framework when supplied.
 func scanRepositoryWithFramework(ctx context.Context, repo *fleetRepo, framework *FrameworkIndex, registry *AnalyzerRegistry) (*RepoNeeds, error) {
+	if framework != nil {
+		registry = registry.withoutGoContract()
+	}
 	report, err := scanRepository(ctx, repo, registry)
 	if err != nil {
 		return nil, err
