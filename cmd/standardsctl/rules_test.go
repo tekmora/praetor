@@ -55,11 +55,11 @@ func TestRulesAuditCLI_ReportsProseOnlyWithoutFailing(t *testing.T) {
 	}
 }
 
-// TestRulesAuditCLI_TextWriteError requires the command to return the stdout write failure.
+// TestRulesAuditCLI_TextWriteError requires both the missing Makefile and the stdout write failure.
 func TestRulesAuditCLI_TextWriteError(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "AGENTS.md", "## Operational Rules\n\n1. Check.\n\n## Text Register\n")
-	writeFixtureFile(t, root, ".config/rules/enforcement.yaml", "version: 1\nrules: []\n")
+	writeFixtureFile(t, root, ".config/rules/enforcement.yaml", "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:check]\n")
 	out, err := os.Open(filepath.Join(root, "AGENTS.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +76,9 @@ func TestRulesAuditCLI_TextWriteError(t *testing.T) {
 	var writeErr *os.PathError
 	if !errors.As(err, &writeErr) || writeErr.Op != "write" || writeErr.Path != out.Name() {
 		t.Fatalf("rules audit error = %v, want write error for %s", err, out.Name())
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rules audit error = %v, want missing Makefile cause", err)
 	}
 }
 

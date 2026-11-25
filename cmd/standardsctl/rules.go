@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -61,12 +62,10 @@ func runRulesAuditWithReader(args []string, injected protectionReader) error {
 	defer cancel()
 	opts := ruleregistry.AuditOptions{Forge: rulesForgeProvider(flags, injected)}
 	report, auditErr := ruleregistry.AuditWithOptions(ctx, flags.root, opts)
-	if report != nil {
-		if printErr := printRulesReport(report, flags.jsonOutput); printErr != nil {
-			return printErr
-		}
+	if report == nil {
+		return auditErr
 	}
-	return auditErr
+	return errors.Join(auditErr, printRulesReport(report, flags.jsonOutput))
 }
 
 func parseRulesAuditFlags(args []string) (rulesAuditFlags, error) {

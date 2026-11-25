@@ -85,7 +85,7 @@ func (r *makefileEvidenceReader) declaration(line, target string) bool {
 func (r *makefileEvidenceReader) rule(line string, colon int, target string) bool {
 	head := strings.Trim(line[:colon], " \t")
 	names := strings.Fields(head)
-	if strings.Contains(line, "$") || !makefileLiteralWords(head) || !makefileAllowedRule(line, colon, makefileNames) {
+	if !makefileLiteralWords(head) || !makefileAllowedRule(line, colon, makefileNames) {
 		return false
 	}
 	literal, recipe := makefileLiteralRuleTail(line[colon+1:])
@@ -126,10 +126,14 @@ func makefileLiteralWords(text string) bool {
 // makefileLiteralRuleTail checks literal prerequisites on either side of the optional order-only
 // separator and reports whether the rule also has a literal inline command.
 func makefileLiteralRuleTail(tail string) (literal, recipe bool) {
-	code, _, _ := strings.Cut(tail, "#")
-	prerequisites, command, _ := strings.Cut(code, ";")
+	prerequisites, command, _ := strings.Cut(tail, ";")
+	prerequisites, _, comment := strings.Cut(prerequisites, "#")
+	if comment {
+		command = "" // A semicolon inside the Make comment cannot start an inline recipe.
+	}
 	normal, orderOnly, _ := strings.Cut(prerequisites, "|")
-	return makefileLiteralWords(normal) && makefileLiteralWords(orderOnly), makefileLiteralCommand(command)
+	literal = makefileLiteralWords(normal) && makefileLiteralWords(orderOnly) && !strings.Contains(command, "$")
+	return literal, makefileLiteralCommand(command)
 }
 
 // makefileLiteralCommand requires command text after Make's recipe prefixes and before a comment.

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
+	"github.com/cordanaLLM/praetor/internal/util"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -181,6 +183,64 @@ func TestAudit_MakeImplicitSource(t *testing.T) {
 				t.Fatalf("problems = %v", report.Problems)
 			}
 		})
+	}
+}
+
+// TestAudit_MakeUnlistableDirectory requires a listing failure to leave a readable Makefile's pointer unresolved.
+func TestAudit_MakeUnlistableDirectory(t *testing.T) {
+	root := t.TempDir()
+	const body = "check: ; @true\n"
+	writeTestFile(t, root, "Makefile", body)
+	ctx, cancel := context.WithTimeout(t.Context(), contextopt.MaxDuration)
+	defer cancel()
+	// Pin before chmod so the shared lister runs even on systems that need read access to pin.
+	dir, err := contextopt.OpenDirectoryIn(ctx, root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := dir.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	report := &auditDiagnostics{Report: &Report{}}
+	entry := &Entry{Class: ClassCIGate, Evidence: []string{"make:check"}}
+	rule := Rule{ID: "HISS-01"}
+	if row := auditRule(ctx, root, rule, entry, nil, report); row.Status != StatusPresent {
+		t.Fatalf("readable directory: row = %#v, problems = %v", row, report.Problems)
+	}
+	requireSearchOnlyDirectory(t, root)
+	if data, err := contextopt.ReadRootSnapshot(ctx, dir, "Makefile"); err != nil || string(data) != body {
+		t.Fatalf("read Makefile = %q, %v", data, err)
+	}
+	if err := util.MakefileImplicitSourceNear(ctx, dir, "Makefile"); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("sibling check = %v, want permission failure", err)
+	}
+	row := auditRule(ctx, root, rule, entry, nil, report)
+	if row.Status != StatusUnresolved || row.Evidence != "unresolved: make:check" || !errors.Is(report, os.ErrPermission) {
+		t.Fatalf("row = %#v, problems = %v, want unresolved make:check with permission failure", row, report.Problems)
+	}
+}
+
+// requireSearchOnlyDirectory restricts the fixture until cleanup and skips if the account can still list it.
+func requireSearchOnlyDirectory(t *testing.T, root string) {
+	t.Helper()
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o100); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(root, info.Mode().Perm()); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.ReadDir(root); err == nil {
+		t.Skip("the test account can list the search-only directory")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatal(err)
 	}
 }
 

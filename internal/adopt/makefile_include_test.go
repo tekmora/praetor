@@ -163,7 +163,7 @@ func TestIncludeExpanderNamesPathAndCause(t *testing.T) {
 	}
 }
 
-// TestMakefileImplicitSourceNearBoundary checks source names, unreadable directories and the listing limit.
+// TestMakefileImplicitSourceNearBoundary checks source names and the listing limit.
 func TestMakefileImplicitSourceNearBoundary(t *testing.T) {
 	const documentedLimit = 4096
 	big := map[string]string{"d/x.mk": "a:\n"}
@@ -182,9 +182,6 @@ func TestMakefileImplicitSourceNearBoundary(t *testing.T) {
 		if err := os.Remove(filepath.Join(s.repoPath, name)); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := makefileImplicitSourceNear(context.Background(), s.repoPath, "missing/gen.mk"); err == nil {
-		t.Error("unreadable directory counted as clean")
 	}
 	boundary := includeRepo(t, big, "d/x.mk")
 	if err := makefileImplicitSourceNear(t.Context(), boundary.repoPath, "d/x.mk"); err != nil {

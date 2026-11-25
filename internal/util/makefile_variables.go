@@ -312,7 +312,7 @@ func (v makefileVariables) bind(binding makefileBinding) (makefileValue, bool) {
 	default:
 		return makefileValue{}, false
 	}
-	expanded, depth, ok := v.expand(text, binding.line)
+	expanded, depth, ok := v.expand(text, binding.line, false)
 	if !ok || depth >= MaxMakefileVariableDepth {
 		return makefileValue{}, false
 	}
@@ -322,8 +322,9 @@ func (v makefileVariables) bind(binding makefileBinding) (makefileValue, bool) {
 // expand returns text with every reference replaced by the value it names as of the logical line
 // at index line, and how many bindings deep the deepest reference goes. It fails on a byte
 // makefileValueByte rejects, on a reference the reader fixes no value for before that line
-// (lookup), and on a text or result longer than MaxMakefileLineBytes.
-func (v makefileVariables) expand(text string, line int) (string, int, bool) {
+// (lookup), and on a text or result longer than MaxMakefileLineBytes. In a target word, blanks
+// from the source were quoted, while blanks introduced by a reference separate targets.
+func (v makefileVariables) expand(text string, line int, targetWord bool) (string, int, bool) {
 	if len(text) > MaxMakefileLineBytes {
 		return "", 0, false
 	}
@@ -331,10 +332,9 @@ func (v makefileVariables) expand(text string, line int) (string, int, bool) {
 	depth := 0
 	for i := 0; i < len(text) && expanded.Len() <= MaxMakefileLineBytes; {
 		if text[i] != '$' {
-			if !makefileValueByte(text[i]) {
+			if !makefileWriteValueByte(&expanded, text[i], targetWord) {
 				return "", 0, false
 			}
-			expanded.WriteByte(text[i])
 			i++
 			continue
 		}
@@ -353,6 +353,18 @@ func (v makefileVariables) expand(text string, line int) (string, int, bool) {
 	return expanded.String(), depth, true
 }
 
+// makefileWriteValueByte copies one literal byte, restoring the quoting of blanks in a target word.
+func makefileWriteValueByte(expanded *strings.Builder, c byte, targetWord bool) bool {
+	if !makefileValueByte(c) {
+		return false
+	}
+	if targetWord && (c == ' ' || c == '\t') {
+		expanded.WriteByte('\\')
+	}
+	expanded.WriteByte(c)
+	return true
+}
+
 // lookup returns the value reference names, "$(NAME)" or "${NAME}" closed by its own bracket, when
 // the reader fixed one on a line before line. A single-letter "$X", an escaped "$$", a substitution
 // reference and a function call name no fixed variable.
@@ -366,25 +378,21 @@ func (v makefileVariables) lookup(reference string, line int) (makefileValue, bo
 
 // targets returns the target names a rule on the logical line at index line declares, names as
 // makefileRule returns them: a literal name as it is, and a computed one expanded (expand) and
-// split at its blanks, as Make splits it. It reports false when a computed name does not resolve:
+// split at its unquoted blanks, as Make splits it. It reports false when a computed name does not resolve:
 // only Make can say what the line declares.
 func (v makefileVariables) targets(names []string, line int) ([]string, bool) {
 	resolved := make([]string, 0, len(names))
-	for _, name := range names {
+	for i := 0; i < len(names) && i < MaxMakefileLineBytes; i++ {
+		name := names[i]
 		if !strings.Contains(name, "$") {
 			resolved = append(resolved, name)
 			continue
 		}
-		// A blank still inside a name was quoted in the rule head. Splitting the expanded
-		// text would lose that distinction and could invent another target.
-		if strings.ContainsAny(name, " \t") {
-			return nil, false
-		}
-		expanded, _, ok := v.expand(name, line)
+		expanded, _, ok := v.expand(name, line, true)
 		if !ok {
 			return nil, false
 		}
-		resolved = append(resolved, strings.Fields(expanded)...)
+		resolved = append(resolved, makefileTargetWords(expanded)...)
 	}
 	return resolved, true
 }

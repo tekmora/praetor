@@ -674,6 +674,27 @@ func TestMakefileComputedTargetNamesTheFileFixes(t *testing.T) {
 	assertOwnershipRows(t, makefileComputedRows)
 }
 
+// TestMakefileComputedTargetQuotedBlank distinguishes quoted blanks from blanks in a variable value.
+func TestMakefileComputedTargetQuotedBlank(t *testing.T) {
+	for _, blank := range [...]string{" ", "\t"} {
+		head := "doc\\" + blank + "$(NAME) verify-all: ; @true\n"
+		file := "NAME := notes index\n" + head
+		if !util.MakefileHasTarget(file, "verify-all") || !util.MakefileHasTarget(file, "index") {
+			t.Fatal("lost the literal sibling or the target after the blank in NAME")
+		}
+		if util.MakefileHasTarget(file, "notes") || util.MakefileHasTarget(file, "doc") {
+			t.Fatal("split the computed target at its quoted blank")
+		}
+		target := "doc" + blank + "notes"
+		if got := util.MakefileTargetStatus(file, target); got != util.MakefileTargetUnproven {
+			t.Fatalf("computed target %q evidence = %v, want unproven", target, got)
+		}
+		if util.MakefileHasTarget(head, target) || !util.MakefileMayDefineTarget(head, target) {
+			t.Fatalf("unbound NAME should leave %q unresolved", target)
+		}
+	}
+}
+
 // The issue #537 shape declares none of the targets the documentation gate and the verification
 // block append, and the reader resolves each of its five computed names to the path Make declares:
 // every name counts as a rule of its own, and a name the file does not declare counts as none.
@@ -1041,6 +1062,9 @@ func TestMakefileTargetWholeFile(t *testing.T) {
 		want       util.MakefileEvidence
 	}{
 		{"literal file", "# gates\nMODE := fast\n\tOPTS = -v\n\nall: check\ncheck: lint | out\n\t@true\n", util.MakefileTargetPresent},
+		{"reference in Make comment", "check: # documents $(MODE)\n\ttrue\n", util.MakefileTargetPresent},
+		{"semicolon in Make comment", "check: # note ; echo $(MODE)\n", util.MakefileTargetUnproven},
+		{"reference after hash in inline recipe", rule + "other: ; echo '# $(MODE)'\n", util.MakefileTargetUnproven},
 		{"replacement", rule + "check: ;\n", util.MakefileTargetUnproven},
 		{"duplicate without recipe", rule + "other check:\n", util.MakefileTargetUnproven},
 		{"equivalent target spelling", rule + "./check: ;\n", util.MakefileTargetUnproven},

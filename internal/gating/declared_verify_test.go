@@ -189,6 +189,7 @@ func TestDeclaresVerifyTargetReadsTheMakefileMakeReads(t *testing.T) {
 		want  bool
 	}{
 		{"Makefile declares it", map[string]string{"Makefile": verifyAllMakefile}, true},
+		{"literal sibling of a computed target with a quoted blank", map[string]string{"Makefile": "NAME := notes\ndoc\\ $(NAME) verify-all: ; @true\n"}, true},
 		{"lower-case makefile declares it", map[string]string{"makefile": verifyAllMakefile}, true},
 		{"GNUmakefile is read first", map[string]string{"GNUmakefile": "test:\n", "Makefile": verifyAllMakefile}, false},
 		{"target only in a comment", map[string]string{"Makefile": "# verify-all:\ntest:\n"}, false},
