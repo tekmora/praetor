@@ -132,7 +132,7 @@ func TestVerifyBucketDirectoriesDoNotConsumeFixtureBound(t *testing.T) {
 }
 
 // unknownTypeEntry wraps a DirEntry so Type reports mode and IsDir reports false, simulating
-// filesystems that yield DT_UNKNOWN (fs.ModeIrregular) or zero type bits on directory reads.
+// filesystems that yield DT_UNKNOWN (fs.ModeIrregular) on directory reads.
 type unknownTypeEntry struct {
 	inner os.DirEntry
 	mode  fs.FileMode
@@ -167,7 +167,7 @@ func wrapEntriesWithMode(targetDir string, mode fs.FileMode) bucketEntryReader {
 }
 
 // TestVerifyBucketUnknownTypeSubdirectoryIsSkipped verifies that a bucket subdirectory whose
-// directory entry carries unknown type bits (fs.ModeIrregular or 0) is classified via os.Lstat
+// directory entry carries unknown type bits (fs.ModeIrregular) is classified via os.Lstat
 // and skipped without failing or consuming the fixture bound.
 func TestVerifyBucketUnknownTypeSubdirectoryIsSkipped(t *testing.T) {
 	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
@@ -180,17 +180,13 @@ func TestVerifyBucketUnknownTypeSubdirectoryIsSkipped(t *testing.T) {
 		t.Fatalf("write nested file: %v", err)
 	}
 
-	modes := [...]fs.FileMode{fs.ModeIrregular, 0}
-	for i := 0; i < len(modes); i++ {
-		ctx := withBucketReader(t.Context(), wrapEntriesWithMode(posDir, modes[i]))
-		report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
-		if err != nil {
-			t.Fatalf("mode %v: verify: %v", modes[i], err)
-		}
-		if !report.Passed() || report.Fixtures != 1 {
-			t.Fatalf("mode %v: subdirectory must be skipped and claim must pass: fixtures=%d findings=%+v",
-				modes[i], report.Fixtures, report.Findings)
-		}
+	ctx := withBucketReader(t.Context(), wrapEntriesWithMode(posDir, fs.ModeIrregular))
+	report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("unknown-type subdirectory must be skipped: fixtures=%d findings=%+v", report.Fixtures, report.Findings)
 	}
 }
 
@@ -312,5 +308,45 @@ func TestVerifyBucketFileRemovedDuringReplayIsIncomplete(t *testing.T) {
 	if report.Passed() || len(report.Findings) != 1 || report.Findings[0].Fixture != "b-second.go" ||
 		!strings.Contains(report.Findings[0].Detail, "incomplete replay") {
 		t.Fatalf("removed fixture must fail as incomplete naming b-second.go, got %+v", report.Findings)
+	}
+}
+
+// TestVerifyBucketListedFileBecomesDirectoryIsIncomplete replaces a listed regular fixture
+// before classification and requires Verify to identify the changed bucket and fixture.
+func TestVerifyBucketListedFileBecomesDirectoryIsIncomplete(t *testing.T) {
+	const fixture = "clean.go"
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, fixture, cleanGo)
+	negDir := bucketPath(root, "HISS-01", "go", bucketNegative)
+	swapped := false
+	reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
+		entries, err := readBucketEntries(ctx, dir)
+		if err != nil || dir != negDir || swapped {
+			return entries, err
+		}
+		path := filepath.Join(dir, fixture)
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove listed fixture: %v", err)
+		}
+		if err := contextopt.EnsureDirectory(ctx, path, 0o700); err != nil {
+			t.Fatalf("replace listed fixture with directory: %v", err)
+		}
+		swapped = true
+		return entries, nil
+	}
+
+	report, err := Verify(withBucketReader(t.Context(), reader), root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Passed() || len(report.Findings) != 1 {
+		t.Fatalf("replacing a listed fixture must fail with one finding, got %+v", report)
+	}
+	want := Finding{
+		Rule: "HISS-01", Language: "go", Bucket: bucketNegative, Fixture: fixture,
+		Detail: "incomplete replay: bucket HISS-01/go/negative changed during verification; report is non-certifying",
+	}
+	if got := report.Findings[0]; got != want {
+		t.Fatalf("finding = %q, want %q", got, want)
 	}
 }

@@ -523,14 +523,14 @@ type bucketEntryReader func(ctx context.Context, dir string) ([]os.DirEntry, err
 // bucketReaderKey carries an optional bucketEntryReader on a test context.
 type bucketReaderKey struct{}
 
-// entryClass is the filesystem kind of one directory entry inside a fixture bucket.
+// entryClass describes a bucket entry's observed kind or a change since listing.
 type entryClass uint8
 
 const (
 	entryDirectory entryClass = iota
 	entryRegularFile
 	entryNonRegular
-	entryVanished
+	entryChanged
 )
 
 // bucketReaderFrom returns the test bucket reader attached to ctx, or readBucketEntries.
@@ -578,7 +578,7 @@ func replayBucket(ctx context.Context, base, bucket, ruleID string, report *Repo
 }
 
 // replayEntries replays the regular files of entries up to maxFixturesPerBucket and reports
-// whether all entries were processed without hitting a bound or vanishing mid-replay.
+// whether all entries were processed without hitting a bound or detecting a bucket change.
 func replayEntries(
 	ctx context.Context, dir, bucket string, staged fixtureStage, entries []os.DirEntry, report *Report,
 ) ([]fixtureResult, bool, error) {
@@ -601,7 +601,7 @@ func replayEntries(
 }
 
 // replayOneEntry classifies and processes one bucket entry, returning stop=true when an overflow
-// or concurrent removal makes the bucket replay incomplete.
+// or a changed entry makes the bucket replay incomplete.
 func replayOneEntry(
 	ctx context.Context, dir, bucket string, staged fixtureStage, entry os.DirEntry,
 	results *[]fixtureResult, report *Report,
@@ -617,7 +617,7 @@ func replayOneEntry(
 	case entryNonRegular:
 		recordNonRegularEntry(report, staged.ruleID, staged.language, bucket, name)
 		return false, nil
-	case entryVanished:
+	case entryChanged:
 		recordChangedBucket(report, staged.ruleID, staged.language, bucket, name)
 		return true, nil
 	}
@@ -651,20 +651,23 @@ func classifyBucketEntry(ctx context.Context, dir string, entry os.DirEntry) (en
 	info, err := os.Lstat(filepath.Join(dir, entry.Name()))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return entryVanished, nil
+			return entryChanged, nil
 		}
 		return 0, fmt.Errorf("stat fixture %s: %w", entry.Name(), err)
 	}
-	return modeClass(info.Mode()), nil
+	return modeClass(typ, info.Mode()), nil
 }
 
-// modeClass maps an os.Lstat FileMode to its bucket entry classification.
-func modeClass(mode os.FileMode) entryClass {
-	if mode.IsDir() {
-		return entryDirectory
-	}
+// modeClass classifies the observed mode, detecting when a listed regular file changed kind.
+func modeClass(listedType, mode os.FileMode) entryClass {
 	if mode.IsRegular() {
 		return entryRegularFile
+	}
+	if listedType.IsRegular() {
+		return entryChanged
+	}
+	if mode.IsDir() {
+		return entryDirectory
 	}
 	return entryNonRegular
 }
@@ -705,7 +708,7 @@ func regularSetDiffers(
 		if err != nil {
 			return "", false, err
 		}
-		if class == entryVanished {
+		if class == entryChanged {
 			return name, true, nil
 		}
 		if class != entryRegularFile {
