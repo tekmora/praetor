@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"golang.org/x/sys/unix"
 )
 
@@ -78,21 +77,6 @@ func directoryOffset(t *testing.T, file *os.File) int64 {
 		t.Fatal(err)
 	}
 	return offset
-}
-
-// listingCursor opens an independent pinned cursor in the test bucket.
-func listingCursor(t *testing.T, path string) *contextopt.SnapshotDirectory {
-	t.Helper()
-	cursor, err := contextopt.OpenSnapshotDirectoryIn(t.Context(), path, ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := cursor.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	return cursor
 }
 
 // vanishingFileReader returns a short first batch on the real cursor, then unlinks the

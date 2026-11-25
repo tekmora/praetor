@@ -398,15 +398,8 @@ func (dst *snapshotDestination) Write(p []byte) (int, error) {
 // exactly the size observed before opening was read and the file kept its identity,
 // size and modification time throughout.
 func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.FileInfo, limit int64) (int64, error) {
-	opened, err := file.Stat()
-	if err != nil {
+	if err := checkOpenedSource(before, file); err != nil {
 		return 0, err
-	}
-	if !opened.Mode().IsRegular() {
-		return 0, ErrSourceNotRegular
-	}
-	if !sameListedSource(before, opened) {
-		return 0, fmt.Errorf("source changed while opening")
 	}
 	count, err := io.Copy(dst, io.LimitReader(contextReader{ctx, file}, limit+1))
 	if err != nil {
@@ -425,10 +418,34 @@ func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.Fil
 	return count, ctx.Err()
 }
 
-// sameListedSource compares a descriptor-relative listing or a standard Go stat to the open file.
-func sameListedSource(listed, opened os.FileInfo) bool {
-	if native, ok := listed.(interface{ sameFile(os.FileInfo) bool }); ok {
-		return native.sameFile(opened)
+// pinnedListing selects descriptor-relative identity checks for a SnapshotDirectory listing.
+type pinnedListing struct{ os.FileInfo }
+
+// ErrSourceIdentityUnavailable identifies a listing or open without the required file identity.
+var ErrSourceIdentityUnavailable = errors.New("source identity unavailable")
+
+// errSourceChangedWhileOpening identifies a mismatch between listing and copy handles.
+var errSourceChangedWhileOpening = errors.New("source changed while opening")
+
+// checkOpenedSource checks the open handle against the observation supplied by its caller.
+func checkOpenedSource(listed os.FileInfo, file *os.File) error {
+	opened, err := file.Stat()
+	if err != nil {
+		return err
 	}
-	return os.SameFile(listed, opened)
+	if !opened.Mode().IsRegular() {
+		return ErrSourceNotRegular
+	}
+	if pinned, ok := listed.(pinnedListing); ok {
+		return pinned.checkIdentity(file, opened)
+	}
+	return checkStatIdentity(listed, opened)
+}
+
+// checkStatIdentity compares the standard Go stat records used by the os.Root snapshot APIs.
+func checkStatIdentity(listed, opened os.FileInfo) error {
+	if !os.SameFile(listed, opened) {
+		return errSourceChangedWhileOpening
+	}
+	return nil
 }

@@ -7,6 +7,7 @@ package contextopt
 
 import (
 	"context"
+	"errors"
 	"math"
 	"os"
 	"syscall"
@@ -19,7 +20,7 @@ import (
 func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
 	names, err := dir.Readdirnames(n)
 	if canceled := ctx.Err(); canceled != nil {
-		return nil, canceled
+		return nil, errors.Join(err, canceled)
 	}
 	listed := make([]listedName, len(names))
 	for i, name := range names {
@@ -74,10 +75,17 @@ func (i *listedUnixInfo) IsDir() bool { return i.Mode().IsDir() }
 // Sys returns the native metadata used for the listing.
 func (i *listedUnixInfo) Sys() any { return &i.stat }
 
-// sameFile compares the listing to the subsequent Go file descriptor stat.
-func (i *listedUnixInfo) sameFile(opened os.FileInfo) bool {
+// checkIdentity compares the fstatat device and inode to the opened descriptor's stat.
+func (listed pinnedListing) checkIdentity(_ *os.File, opened os.FileInfo) error {
+	info, ok := listed.FileInfo.(*listedUnixInfo)
+	if !ok {
+		return checkStatIdentity(listed.FileInfo, opened)
+	}
 	stat, ok := opened.Sys().(*syscall.Stat_t)
-	return ok && i.stat.Dev == stat.Dev && i.stat.Ino == stat.Ino
+	if !ok || info.stat.Dev != stat.Dev || info.stat.Ino != stat.Ino {
+		return errSourceChangedWhileOpening
+	}
+	return nil
 }
 
 // unixFileTypes maps the file kind bits returned by fstatat to Go file kinds.

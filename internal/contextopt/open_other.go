@@ -25,3 +25,8 @@ func (dir *SnapshotDirectory) readNames(_ context.Context, _ int) ([]listedName,
 func (dir *SnapshotDirectory) statListedName(_ string) (os.FileInfo, error) {
 	return nil, os.ErrInvalid
 }
+
+// checkIdentity refuses unsupported descriptor-relative observations.
+func (listed pinnedListing) checkIdentity(_ *os.File, _ os.FileInfo) error {
+	return ErrSourceIdentityUnavailable
+}

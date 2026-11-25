@@ -101,19 +101,38 @@ func TestBucketListingChecksCancellationBetweenReads(t *testing.T) {
 	}
 }
 
-// TestBucketListingChecksCancellationAtEOF refuses a terminal chunk when cancellation
-// occurs inside the last directory read. There is no next iteration to catch it.
+// TestBucketListingChecksCancellationAtEOF preserves cancellation and the terminal
+// read result, including a filesystem error, through the bucket reader used by Verify.
 func TestBucketListingChecksCancellationAtEOF(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	next := func(int) ([]os.DirEntry, error) {
+	dir := listingCursor(t, t.TempDir())
+	for _, readErr := range [...]error{io.EOF, os.ErrPermission} {
+		ctx, cancel := context.WithCancel(t.Context())
+		next := func(string, int) ([]os.DirEntry, error) {
+			cancel()
+			return nil, readErr
+		}
+		ctx = context.WithValue(ctx, bucketReaderKey{}, next)
+		entries, err := readBucketEntries(ctx, dir)
 		cancel()
-		return nil, io.EOF
+		if entries != nil || !errors.Is(err, context.Canceled) || !errors.Is(err, readErr) {
+			t.Fatalf("final directory read: entries=%v err=%v, want cancellation and %v", entries, err, readErr)
+		}
 	}
-	entries, err := collectBucketEntries(ctx, next)
-	if entries != nil || !errors.Is(err, context.Canceled) {
-		t.Fatalf("final directory read completed after cancellation: %v, %v", entries, err)
+}
+
+// listingCursor opens an independent pinned cursor in the test bucket.
+func listingCursor(t *testing.T, path string) *contextopt.SnapshotDirectory {
+	t.Helper()
+	cursor, err := contextopt.OpenSnapshotDirectoryIn(t.Context(), path, ".")
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := cursor.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return cursor
 }
 
 // failedLookup wraps a regular entry with a metadata lookup error other than ENOENT.

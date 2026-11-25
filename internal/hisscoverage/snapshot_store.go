@@ -19,8 +19,16 @@ const maxRetainedFixtureBytes = contextopt.MaxSourceBytes
 // fixtureStore shares one retention budget and one lazy private spill file across all buckets.
 type fixtureStore struct {
 	retained int
-	spill    *os.File
+	spill    fixtureSpill
 	end      int64
+}
+
+// fixtureSpill is the owned random-access file used for ranges outside the resident budget.
+type fixtureSpill interface {
+	io.ReaderAt
+	io.WriterAt
+	io.Closer
+	Name() string
 }
 
 // capturedFixture holds either resident bytes or a range in the snapshot's private spill file.
@@ -45,14 +53,17 @@ func (s *fixtureStore) save(ctx context.Context, name string, data []byte) (capt
 	if s.spill == nil {
 		spill, err := os.CreateTemp("", "hiss-corpus-*")
 		if err != nil {
-			return file, fmt.Errorf("create fixture spill: %w", err)
+			return file, fmt.Errorf("create fixture spill: %w", errors.Join(err, ctx.Err()))
 		}
 		s.spill = spill
 	}
+	if err := ctx.Err(); err != nil {
+		return capturedFixture{}, err
+	}
 	file.offset = s.end
-	n, err := s.spill.WriteAt(data, file.offset)
-	if err != nil {
-		return file, fmt.Errorf("spill fixture: %w", err)
+	n, writeErr := s.spill.WriteAt(data, file.offset)
+	if err := errors.Join(writeErr, ctx.Err()); err != nil {
+		return capturedFixture{}, fmt.Errorf("spill fixture: %w", err)
 	}
 	s.end += int64(n)
 	return file, nil

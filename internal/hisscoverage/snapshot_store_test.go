@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 // TestSnapshotSpillBoundary preserves exactly one MiB in memory and reads the excess
@@ -38,7 +40,7 @@ func checkSpilledByte(t *testing.T, store *fixtureStore, last capturedFixture) {
 	if got, err := store.load(ctx, last); err != nil || string(got) != "x" || cap(last.data) != 0 {
 		t.Fatalf("excess byte: got %q, resident capacity %d, err %v", got, cap(last.data), err)
 	}
-	if err := store.spill.Truncate(0); err != nil {
+	if err := os.Truncate(store.spill.Name(), 0); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := store.load(ctx, last); err == nil || data != nil {
@@ -161,5 +163,43 @@ func TestSpillReadChecksCancellationOnReturn(t *testing.T) {
 	data, err := (capturedFixture{size: 1}).readSpill(ctx, reader)
 	if data != nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("spill read completed after cancellation: data=%q, err=%v", data, err)
+	}
+}
+
+// delayedSpill completes the synchronous write after the fixture's deadline.
+type delayedSpill struct {
+	*os.File
+	writeErr error
+}
+
+// WriteAt advances the test clock before returning the underlying write result.
+func (s delayedSpill) WriteAt(data []byte, offset int64) (int, error) {
+	n, err := s.File.WriteAt(data, offset)
+	time.Sleep(2 * time.Second)
+	return n, errors.Join(err, s.writeErr)
+}
+
+// TestSpillWriteChecksFixtureDeadline requires an expired child to reject the range while
+// its parent is live, including when the write also reports its own error.
+func TestSpillWriteChecksFixtureDeadline(t *testing.T) {
+	for _, writeErr := range [...]error{nil, os.ErrPermission} {
+		synctest.Test(t, func(t *testing.T) {
+			spill, err := os.CreateTemp(t.TempDir(), "spill")
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := fixtureStore{retained: maxRetainedFixtureBytes, spill: delayedSpill{spill, writeErr}}
+			checkSpillRemoved(t, &store)
+			parent := t.Context()
+			child, cancel := context.WithTimeout(parent, time.Second)
+			defer cancel()
+			_, err = store.save(child, "late", []byte("x"))
+			if parent.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || store.end != 0 {
+				t.Fatalf("late write: parent=%v err=%v saved end=%d", parent.Err(), err, store.end)
+			}
+			if writeErr != nil && !errors.Is(err, writeErr) {
+				t.Fatalf("lost write error: %v", err)
+			}
+		})
 	}
 }

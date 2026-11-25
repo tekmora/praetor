@@ -46,22 +46,21 @@ func OpenChildDirectory(ctx context.Context, dir *SnapshotDirectory, name string
 	if err := validateSnapshotLeaf(ctx, dir, name); err != nil {
 		return nil, err
 	}
-	listed, err := observeLeaf(dir.File, name, true)
+	listed, err := observeLeaf(dir.File, name, true, (*os.File).Stat)
 	if err != nil {
 		return nil, err
 	}
 	return dir.openListedDirectory(ctx, name, listed)
 }
 
-// observeLeaf gets descriptor-backed identity, including on Windows volumes that
-// would otherwise defer the file ID lookup until SameFile is called.
-func observeLeaf(parent *os.File, name string, directory bool) (_ os.FileInfo, err error) {
+// observeLeaf collects metadata on a handle acquired relative to the pinned parent.
+func observeLeaf(parent *os.File, name string, directory bool, stat func(*os.File) (os.FileInfo, error)) (_ os.FileInfo, err error) {
 	file, err := openLeafAt(parent, name, directory)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
-	return file.Stat()
+	return stat(file)
 }
 
 // openListedDirectory retains the exact handle it checks, so a rename after Stat cannot
@@ -98,7 +97,7 @@ func validateSnapshotLeaf(ctx context.Context, dir *SnapshotDirectory, name stri
 	return errors.Join(ctx.Err(), validateLeafName(name))
 }
 
-// listedName retains the enumeration record when it includes a stable file identity.
+// listedName retains metadata for entries that need no descriptor-relative lookup.
 type listedName struct {
 	name string
 	info os.FileInfo
@@ -142,7 +141,7 @@ func CollectDirectoryEntries[T any](ctx context.Context, limit int, next func(in
 		remaining := limit - len(entries)
 		chunk, err := next(remaining)
 		if canceled := ctx.Err(); canceled != nil {
-			return nil, canceled
+			return nil, errors.Join(err, canceled)
 		}
 		if err := checkDirectoryChunk(len(chunk), remaining, err); err != nil {
 			return nil, err
@@ -204,7 +203,10 @@ func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name strin
 	if err := validateSnapshotLeaf(ctx, dir, name); err != nil {
 		return nil, err
 	}
-	return readListedText(ctx, listed, func() (*os.File, error) {
+	if listed == nil {
+		return nil, ErrSourceNotRegular
+	}
+	return readListedText(ctx, pinnedListing{listed}, func() (*os.File, error) {
 		return openLeafAt(dir.File, name, false)
 	})
 }

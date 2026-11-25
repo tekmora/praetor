@@ -158,10 +158,7 @@ func (stage fixtureStage) listedFixtures(ctx context.Context, bucket string, ent
 func (stage fixtureStage) regularFixture(ctx context.Context, bucket string, entry os.DirEntry, report *Report) os.FileInfo {
 	class, listed, err := classifyBucketEntry(ctx, entry)
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
-			Rule: stage.ruleID, Language: stage.language, Bucket: bucket, Fixture: entry.Name(),
-			Detail: "incomplete replay: " + err.Error(),
-		})
+		stage.recordFixtureError(report, bucket, entry.Name(), err)
 		return nil
 	}
 	switch class {
@@ -175,6 +172,14 @@ func (stage fixtureStage) regularFixture(ctx context.Context, bucket string, ent
 	return nil
 }
 
+// recordFixtureError names a fixture whose listing or open could not supply its identity.
+func (stage fixtureStage) recordFixtureError(report *Report, bucket, name string, err error) {
+	report.Findings = append(report.Findings, Finding{
+		Rule: stage.ruleID, Language: stage.language, Bucket: bucket, Fixture: name,
+		Detail: "incomplete replay: " + err.Error(),
+	})
+}
+
 // captureFile saves one stable regular file or records a change since listing.
 func (b *bucketSnapshot) captureFile(
 	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket string, listed os.FileInfo, report *Report,
@@ -183,6 +188,10 @@ func (b *bucketSnapshot) captureFile(
 	bounded, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
 	defer cancel()
 	data, err := dir.ReadListedSnapshot(bounded, name, listed)
+	if errors.Is(err, contextopt.ErrSourceIdentityUnavailable) {
+		b.stage.recordFixtureError(report, bucket, name, escapedError{err})
+		return nil
+	}
 	if errors.Is(err, contextopt.ErrSourceNotRegular) || errors.Is(err, os.ErrNotExist) {
 		recordChangedBucket(report, b.stage.ruleID, b.stage.language, bucket, name)
 		return nil
@@ -219,7 +228,7 @@ func readBucketEntries(ctx context.Context, dir *contextopt.SnapshotDirectory) (
 	} else {
 		entries, err = dir.ReadEntries(ctx, maxBucketEntries+1)
 	}
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil && (ctx.Err() != nil || !errors.Is(err, io.EOF)) {
 		return nil, fmt.Errorf("list fixture bucket %s: %w", dir.Name(), err)
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
@@ -258,7 +267,7 @@ func classifyBucketEntry(ctx context.Context, entry os.DirEntry) (entryClass, os
 		return 0, nil, err
 	}
 	info, err := entry.Info()
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && !errors.Is(err, contextopt.ErrSourceIdentityUnavailable) {
 		return entryChanged, nil, nil
 	}
 	if err != nil {
