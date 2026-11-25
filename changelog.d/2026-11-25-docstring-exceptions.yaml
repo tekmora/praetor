@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
+type: added
+title: >-
+  Configure `rule: docstrings` in .standards.yaml with one file path, an
+  8–64 digit SHA-256 hexadecimal fingerprint prefix and an expiry date.
+  The coverage check reports a matching file as excepted through its expiry
+  day. An expired entry or a stale content pin leaves the file's touched
+  declarations counted and reports expired or stale, respectively.

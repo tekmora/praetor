@@ -846,6 +846,12 @@ counted, exported or unexported and test functions included. The mode (`error`, 
 `1` below threshold, `warning` reports uncovered functions and exits `0`, `off` skips the check, and a read or configuration failure exits `2`. Adopter repositories run the same
 check in `lefthook.yml` `pre-push` via `sh .config/lefthook/engine.sh docstrings check --pre-push` with `use_stdin: true`.
 
+To excuse a file's touched declarations, add one `exceptions` entry in `.standards.yaml` with `rule: docstrings`, its exact `path`, a SHA-256 `fingerprint` prefix (8–64 hex digits), a `reason` and an `expires` date. Only one docstrings entry per file is allowed (`TestDocstringExceptionDuplicates` in `internal/config/exceptions_test.go`).
+
+Declare a category for entries with `entered` on or after 2026-10-29. If you omit `entered`, a category is required when `expires` falls after 2026-11-28. Set `category` explicitly or begin `reason` with `category A`, `category B`, `category C` or `category D`. Legacy entries within the grace period retain the 90-day cap. The `expires`, `category` and `entered` rows give the [category intervals and grace-period rules](clang-tidy-coverage.md#exception-fields).
+
+Output names and counts excepted, expired, and stale entries with their category and expiry; an expired entry or a fingerprint mismatch leaves the declarations counted, and the expiry day itself remains valid.
+
 `standardsctl merge-check` (Order: engine-dropped-hunk-gate-20261027) enforces the fleet rule
 requiring per-hunk conflict resolution. It scans merge commits in the pushed range (or
 `origin/<default-branch>..HEAD` in `make verify-all`), reading each merge commit's parents and

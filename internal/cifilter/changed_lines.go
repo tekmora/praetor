@@ -87,11 +87,19 @@ func resolveMergeBase(ctx context.Context, dir, baseRef, headRef string) (string
 	if err == nil && strings.TrimSpace(mb) != "" {
 		return strings.TrimSpace(mb), nil
 	}
-	verified, verifyErr := util.RunGit(ctx, dir, "rev-parse", "--verify", "--end-of-options", baseRef+"^{commit}")
+	return ResolveDiffCommit(ctx, dir, baseRef)
+}
+
+// ResolveDiffCommit pins a revision expression using the same Git environment as the diff.
+func ResolveDiffCommit(ctx context.Context, dir, ref string) (string, error) {
+	verified, verifyErr := util.RunGit(ctx, dir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if verifyErr != nil {
-		return "", fmt.Errorf("resolve base ref %s: %w", baseRef, verifyErr)
+		return "", fmt.Errorf("resolve diff ref %s: %w", ref, verifyErr)
 	}
-	return strings.TrimSpace(verified), nil
+	if !util.ValidGitObjectID(verified) {
+		return "", fmt.Errorf("git returned an invalid commit ID for diff ref %q", ref)
+	}
+	return verified, nil
 }
 
 // parseUnifiedZeroDiff parses git diff -U0 output into per-file added/modified line ranges.

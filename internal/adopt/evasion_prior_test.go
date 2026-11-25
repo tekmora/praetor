@@ -1,7 +1,10 @@
 package adopt
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -9,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // priorEvasionFixtures holds every interceptor rendering a Praetor release wrote, one file per
@@ -17,6 +22,107 @@ const priorEvasionFixtures = "testdata/evasion"
 
 // currentEvasionFixture is the fixture holding the current rendering.
 const currentEvasionFixture = "current-rendering.block_evasion.py"
+
+// updateEvasionRenderingFixtures records the current interceptor and preserves its outgoing
+// bytes under their digest. The emitted-fixture update flag also records the new digest in
+// hooks.go, so refreshing emitted fixtures cannot silently drop an adopter's earlier text.
+func updateEvasionRenderingFixtures(t *testing.T, current string) {
+	t.Helper()
+	err := util.InConfinedDirectory(".", priorEvasionFixtures, func(root *os.Root) error {
+		return updateCurrentEvasionRendering(root, []byte(current))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := fixtureDigest(t, "current rendering", []byte(current))
+	if _, recorded := priorEvasionHookDigests[digest]; recorded {
+		return
+	}
+	const declaration = "var priorEvasionHookDigests = map[string]string{\n"
+	source := mustRead(t, "hooks.go")
+	if strings.Count(source, declaration) != 1 {
+		t.Fatal("hooks.go must contain exactly one priorEvasionHookDigests declaration")
+	}
+	const origin = "recorded Python hook rendering"
+	entry := "\t\"" + digest + "\": \"" + origin + "\",\n"
+	mustWrite(t, "hooks.go", strings.Replace(source, declaration, declaration+entry, 1))
+	priorEvasionHookDigests[digest] = origin
+}
+
+// updateCurrentEvasionRendering archives the outgoing fixture before replacing it through the same root.
+func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
+	previous, err := util.ReadLimitedIn(root, currentEvasionFixture, maxEmittedFileBytes)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", currentEvasionFixture, err)
+	}
+	equal, err := util.CanonicalTextEquivalent(previous, current)
+	if err != nil {
+		return fmt.Errorf("compare %s: %w", currentEvasionFixture, err)
+	}
+	digest, _, err := util.CanonicalTextDigest(previous)
+	if err != nil {
+		return fmt.Errorf("digest %s: %w", currentEvasionFixture, err)
+	}
+	if err := archiveEvasionRenderingIn(root, digest, previous, !equal); err != nil {
+		return err
+	}
+	if bytes.Equal(previous, current) {
+		return nil
+	}
+	if err := util.WriteTrackedFileAtomicIn(root, currentEvasionFixture, current); err != nil {
+		return fmt.Errorf("write %s: %w", currentEvasionFixture, err)
+	}
+	return nil
+}
+
+// archiveEvasionRendering opens a temporary fixture root for the archive regression cases.
+func archiveEvasionRendering(dir, digest, previous string) error {
+	return util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
+		return archiveEvasionRenderingIn(root, digest, []byte(previous), true)
+	})
+}
+
+// archiveEvasionRenderingIn verifies the digest archive, creating it only for a change in content.
+func archiveEvasionRenderingIn(root *os.Root, digest string, previous []byte, create bool) error {
+	archive := digest + ".block_evasion.py"
+	info, err := root.Lstat(archive)
+	if errors.Is(err, os.ErrNotExist) {
+		if !create {
+			return nil
+		}
+		return util.WriteTrackedFileAtomicIn(root, archive, previous)
+	}
+	if err != nil {
+		return fmt.Errorf("stat outgoing rendering archive %s: %w", archive, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("outgoing rendering archive %s: %w", archive, util.ErrNotRegularFile)
+	}
+	current, err := root.Stat(currentEvasionFixture)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", currentEvasionFixture, err)
+	}
+	if os.SameFile(info, current) {
+		return fmt.Errorf("outgoing rendering archive %s aliases %s", archive, currentEvasionFixture)
+	}
+	return compareEvasionArchive(root, archive, previous)
+}
+
+// compareEvasionArchive accepts a different checkout line ending on an independent archive.
+func compareEvasionArchive(root *os.Root, archive string, previous []byte) error {
+	existing, err := util.ReadLimitedIn(root, archive, maxEmittedFileBytes)
+	if err != nil {
+		return fmt.Errorf("read outgoing rendering archive %s: %w", archive, err)
+	}
+	equal, err := util.CanonicalTextEquivalent(existing, previous)
+	if err != nil {
+		return fmt.Errorf("compare outgoing rendering archive %s: %w", archive, err)
+	}
+	if !equal {
+		return fmt.Errorf("outgoing rendering archive %s differs from its recorded bytes", archive)
+	}
+	return nil
+}
 
 // adoptEvasionFixture adopts a fresh repository whose interceptor holds existing.
 func adoptEvasionFixture(t *testing.T, name, existing string, force bool) (string, *AdoptReport) {
@@ -38,8 +144,9 @@ func TestPriorEvasionHookDigests_Positive_ReproducedByFixtures(t *testing.T) {
 }
 
 // Boundary: the current rendering is recorded, so the release that changes it still refreshes
-// it; --force no longer does. After a template or engine rule change, add the new rendering
-// (testdata/emitted holds it) under testdata/evasion and its digest to priorEvasionHookDigests.
+// it; --force no longer does. After a template or engine rule change, regenerate the emitted
+// fixtures with PRAETOR_UPDATE_EMITTED_FIXTURES=1 to preserve the outgoing text and record the
+// new rendering under testdata/evasion and its digest in priorEvasionHookDigests.
 func TestPriorEvasionHookDigests_Boundary_CurrentRenderingRecorded(t *testing.T) {
 	current := []byte(buildBlockEvasionPY())
 	if !isPriorRendering(current, priorEvasionHookDigests) {

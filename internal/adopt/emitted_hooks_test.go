@@ -100,6 +100,9 @@ func emittedHookRenderings(t *testing.T) map[string]string {
 
 // TestEmittedHookFixturesMatchTheRendering pins generated fixtures and refreshes them on request.
 func TestEmittedHookFixturesMatchTheRendering(t *testing.T) {
+	if os.Getenv(updateEmittedFixturesEnv) == "1" {
+		updateEvasionRenderingFixtures(t, buildBlockEvasionPY())
+	}
 	root, err := os.OpenRoot(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("open repository root: %v", err)
@@ -113,9 +116,6 @@ func TestEmittedHookFixturesMatchTheRendering(t *testing.T) {
 		path := filepath.Join(emittedFixtureRoot, filepath.FromSlash(rel))
 		if os.Getenv(updateEmittedFixturesEnv) == "1" {
 			mustWrite(t, path, want)
-			if rel == evasionHookFile {
-				mustWrite(t, filepath.Join(priorEvasionFixtures, currentEvasionFixture), want)
-			}
 			continue
 		}
 		got, err := root.ReadFile(filepath.Join("internal", "adopt", path))

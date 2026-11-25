@@ -17,11 +17,97 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
+	"github.com/cordanaLLM/praetor/internal/testsupport"
+	"github.com/cordanaLLM/praetor/internal/util"
 	"go.yaml.in/yaml/v3"
 )
 
 // exceptionsToday is the fixed day the validator tests judge expiry against.
 var exceptionsToday = time.Date(2026, time.October, 6, 15, 30, 0, 0, time.UTC)
+
+// TestDocstringExceptionGuide checks the rule row has one content-pinned entry linked to the hook guide.
+func TestDocstringExceptionGuide(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "guides", "clang-tidy-coverage.md")
+	data, err := util.ReadFileLimited(path, DefaultDocumentationMaxFileBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := testsupport.MarkdownTableRowsUnderHeading(string(data), "### Exception fields")
+	for _, row := range rows {
+		if len(row) != 2 || row[0] != "`rule`" {
+			continue
+		}
+		if n := strings.Count(row[1], ExceptionRuleDocstrings); n != 1 {
+			t.Errorf("rule row names %s %d times, want once", ExceptionRuleDocstrings, n)
+		}
+		if !strings.Contains(row[1], "content-pinned") || !strings.Contains(row[1], "(git-hooks.md#commit-checks-ci-re-runs)") {
+			t.Error("rule row lost the content pin or the link to the hook guide")
+		}
+		return
+	}
+	t.Fatal("exception fields table missing its rule row")
+}
+
+// TestDocstringExceptionValidation verifies file-only targets and mandatory SHA-256 prefixes.
+func TestDocstringExceptionValidation(t *testing.T) {
+	cases := []struct {
+		name, fingerprint, glob, lines string
+		valid                          bool
+	}{
+		{"minimum prefix", "abcdef12", "", "", true},
+		{"full hash", strings.Repeat("a", 64), "", "", true},
+		{"uppercase prefix", "ABCDEF12", "", "", true},
+		{"missing fingerprint", "", "", "", false},
+		{"short prefix", "abcdef1", "", "", false},
+		{"long prefix", strings.Repeat("a", 65), "", "", false},
+		{"nonhex prefix", "abcdef1z", "", "", false},
+		{"glob forbidden", "abcdef12", "**/*.py", "", false},
+		{"line scope forbidden", "abcdef12", "", "1-2", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := Exception{Rule: "docstrings", Path: "snapshot.py", Fingerprint: tc.fingerprint,
+				Glob: tc.glob, Lines: tc.lines, Category: "D", Reason: "prior rendering fixture", Expires: "2026-10-06"}
+			if tc.glob != "" {
+				entry.Path = ""
+			}
+			err := ValidateExceptions([]Exception{entry}, exceptionsToday)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v, error=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+// TestDocstringExceptionDuplicates keeps docstrings unique per file while preserving group scopes.
+func TestDocstringExceptionDuplicates(t *testing.T) {
+	cases := []struct {
+		name, rule, secondPath string
+		want                   string
+	}{
+		{"same docstrings path", ExceptionRuleDocstrings, "snapshot.py", "exceptions[1] repeats exceptions[0] (rule docstrings, snapshot.py)"},
+		{"different docstrings paths", ExceptionRuleDocstrings, "other.py", ""},
+		{"different HISS-19 fingerprints", ExceptionRuleDedupe, "snapshot.py", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first := Exception{Rule: tc.rule, Path: "snapshot.py", Fingerprint: "abcdef12",
+				Category: "D", Reason: "prior rendering fixture", Expires: "2026-10-06"}
+			second := first
+			second.Path, second.Fingerprint = tc.secondPath, "12345678"
+			err := ValidateExceptions([]Exception{first, second}, exceptionsToday)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("distinct exceptions refused: %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("ValidateExceptions = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
 
 func validException() Exception {
 	return Exception{

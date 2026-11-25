@@ -7,6 +7,7 @@ package adopt
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // updateHarnessGolden rewrites the harness goldens from the current rendering:
@@ -119,7 +121,7 @@ func TestAdoptedHarnessGolden(t *testing.T) {
 					t.Errorf("harness carries %q", word)
 				}
 			}
-			compareHarnessGolden(t, filepath.Join("testdata", "harness-"+p.name+".golden"), harness)
+			compareHarnessGolden(t, "harness-"+p.name+".golden", harness)
 		})
 	}
 }
@@ -139,21 +141,38 @@ func directiveCells(t *testing.T, harness string) string {
 	return strings.Join(cells, "\n")
 }
 
-// compareHarnessGolden compares got with the golden at path, or rewrites it under
+// compareHarnessGolden compares got with the named golden beneath testdata, or rewrites it under
 // -update-harness-golden.
-func compareHarnessGolden(t *testing.T, path, got string) {
+func compareHarnessGolden(t *testing.T, name, got string) {
 	t.Helper()
+	root, err := os.OpenRoot("testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("close golden root: %v", err)
+		}
+	}()
 	if *updateHarnessGolden {
-		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+		if err := root.WriteFile(name, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	want, err := os.ReadFile(path)
+	if err := checkHarnessGolden(root, name, got); err != nil {
+		t.Error(err)
+	}
+}
+
+// checkHarnessGolden compares the rendering with a bounded, regular golden file in root.
+func checkHarnessGolden(root *os.Root, name, got string) error {
+	want, err := util.ReadLimitedIn(root, name, maxEmittedFileBytes)
 	if err != nil {
-		t.Fatalf("read golden (regenerate with -update-harness-golden): %v", err)
+		return fmt.Errorf("read golden (regenerate with -update-harness-golden): %w", err)
 	}
 	if got != strings.ReplaceAll(string(want), "\r\n", "\n") {
-		t.Errorf("harness differs from %s (regenerate with -update-harness-golden after review):\n%s", path, got)
+		return fmt.Errorf("harness differs from testdata/%s (regenerate with -update-harness-golden after review):\n%s", name, got)
 	}
+	return nil
 }

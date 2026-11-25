@@ -72,17 +72,26 @@ type UncoveredFunction struct {
 
 // Report summarizes diff-scoped docstring coverage over a repository range.
 type Report struct {
-	Counted   int                 `json:"counted"`
-	Covered   int                 `json:"covered"`
-	Coverage  float64             `json:"coverage"`
-	Threshold int                 `json:"threshold"`
-	Mode      string              `json:"mode"`
-	Passed    bool                `json:"passed"`
-	Uncovered []UncoveredFunction `json:"uncovered,omitempty"`
+	Counted    int                 `json:"counted"`
+	Covered    int                 `json:"covered"`
+	Coverage   float64             `json:"coverage"`
+	Threshold  int                 `json:"threshold"`
+	Mode       string              `json:"mode"`
+	Passed     bool                `json:"passed"`
+	Uncovered  []UncoveredFunction `json:"uncovered,omitempty"`
+	Exceptions []ExceptionEntry    `json:"exceptions,omitempty"`
 }
 
 // Check evaluates diff-scoped docstring coverage against the merge base.
 func Check(ctx context.Context, opts Options) (*Report, error) {
+	return checkWithRanges(ctx, opts, cifilter.GetChangedLineRanges)
+}
+
+// rangeCollector returns the changed source lines between the base and the selected head.
+type rangeCollector func(context.Context, string, string, string) (map[string][]cifilter.LineRange, error)
+
+// checkWithRanges pins the head before collecting ranges and evaluating their declarations.
+func checkWithRanges(ctx context.Context, opts Options, collect rangeCollector) (*Report, error) {
 	if ctx == nil {
 		return nil, errors.New("docstrings check requires a context")
 	}
@@ -110,15 +119,25 @@ func Check(ctx context.Context, opts Options) (*Report, error) {
 		}
 		baseRef = resolved
 	}
-	diffHead := opts.HeadRef
-	if diffHead == "" {
-		diffHead = "WORKTREE"
-	}
-	ranges, err := cifilter.GetChangedLineRanges(ctx, repoDir, baseRef, diffHead)
+	head, err := resolveCheckHead(ctx, repoDir, opts.HeadRef)
 	if err != nil {
 		return nil, err
 	}
-	return evaluateChangedFiles(ctx, repoDir, opts.HeadRef, cfg, ranges)
+	ranges, err := collect(ctx, repoDir, baseRef, head)
+	if err != nil {
+		return nil, err
+	}
+	return evaluateChangedFiles(ctx, repoDir, head, cfg, ranges)
+}
+
+// resolveCheckHead pins the diff, manifest and source reads to the same commit for a revision check.
+func resolveCheckHead(ctx context.Context, repoDir, ref string) (string, error) {
+	if isWorktreeHead(ref) {
+		return "WORKTREE", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, gitReadTimeout)
+	defer cancel()
+	return cifilter.ResolveDiffCommit(ctx, repoDir, ref)
 }
 
 // resolveEffectiveConfig loads .coderabbit.yaml and applies any CLI threshold override.
@@ -149,6 +168,10 @@ func evaluateChangedFiles(ctx context.Context, repoDir, headRef string, cfg Conf
 		finalizeReport(rep)
 		return rep, nil
 	}
+	exceptions, err := loadExceptionRun(ctx, repoDir, headRef)
+	if err != nil {
+		return nil, err
+	}
 	paths := make([]string, 0, len(ranges))
 	for rel := range ranges {
 		paths = append(paths, rel)
@@ -161,7 +184,7 @@ func evaluateChangedFiles(ctx context.Context, repoDir, headRef string, cfg Conf
 		if len(fileRanges) == 0 {
 			continue
 		}
-		if err := evaluateSingleFile(ctx, repoDir, headRef, rel, fileRanges, rep); err != nil {
+		if err := evaluateSingleFile(ctx, repoDir, headRef, rel, fileRanges, rep, exceptions); err != nil {
 			return nil, err
 		}
 	}
@@ -170,7 +193,7 @@ func evaluateChangedFiles(ctx context.Context, repoDir, headRef string, cfg Conf
 }
 
 // evaluateSingleFile extracts functions for rel and records coverage for those overlapping fileRanges.
-func evaluateSingleFile(ctx context.Context, repoDir, headRef, rel string, fileRanges []cifilter.LineRange, rep *Report) error {
+func evaluateSingleFile(ctx context.Context, repoDir, headRef, rel string, fileRanges []cifilter.LineRange, rep *Report, exceptions *exceptionRun) error {
 	if !isSupportedPath(rel) {
 		return nil
 	}
@@ -188,7 +211,14 @@ func evaluateSingleFile(ctx context.Context, repoDir, headRef, rel string, fileR
 	if len(functions) == 0 {
 		return nil
 	}
-	recordFunctionCoverage(rel, data, splitSourceLines(data), functions, fileRanges, rep)
+	fileReport := &Report{}
+	recordFunctionCoverage(rel, data, splitSourceLines(data), functions, fileRanges, fileReport)
+	if fileReport.Counted == 0 || exceptions.excuses(rel, data, rep) {
+		return nil
+	}
+	rep.Counted += fileReport.Counted
+	rep.Covered += fileReport.Covered
+	rep.Uncovered = append(rep.Uncovered, fileReport.Uncovered...)
 	return nil
 }
 
@@ -236,10 +266,15 @@ func overlapsRanges(fn hiss.FunctionSpan, ranges []cifilter.LineRange) bool {
 // targetFileReader reads rel from worktree or headRef; replaced by tests to count or verify file reads.
 var targetFileReader = readTargetFile
 
-// readTargetFile reads rel from the working tree when headRef is empty or from git show headRef:rel.
+// isWorktreeHead reports whether the source and exception manifest come from the checkout.
+func isWorktreeHead(headRef string) bool {
+	return headRef == "" || headRef == "WORKTREE"
+}
+
+// readTargetFile reads rel from the selected worktree or revision.
 // It returns ok=false when rel is a non-regular worktree entry or a gitlink/symlink tree entry.
 func readTargetFile(ctx context.Context, repoDir, headRef, rel string) ([]byte, bool, error) {
-	if headRef != "" && headRef != "WORKTREE" {
+	if !isWorktreeHead(headRef) {
 		return readGitRevisionFile(ctx, repoDir, headRef, rel)
 	}
 	fullPath := filepath.Join(repoDir, filepath.FromSlash(rel))
@@ -260,7 +295,7 @@ func readTargetFile(ctx context.Context, repoDir, headRef, rel string) ([]byte, 
 	return data, true, nil
 }
 
-// readGitRevisionFile reads rel at headRef via git ls-tree and git show, skipping gitlinks and symlinks.
+// readGitRevisionFile reads raw blob bytes at headRef, skipping gitlinks and symlinks.
 func readGitRevisionFile(ctx context.Context, repoDir, headRef, rel string) ([]byte, bool, error) {
 	gitCtx, cancel := context.WithTimeout(ctx, gitReadTimeout)
 	defer cancel()
@@ -272,11 +307,11 @@ func readGitRevisionFile(ctx context.Context, repoDir, headRef, rel string) ([]b
 	if len(fields) == 0 || fields[0] == "160000" || fields[0] == "120000" {
 		return nil, false, nil
 	}
-	out, err := util.RunGit(gitCtx, repoDir, "show", fmt.Sprintf("%s:%s", headRef, rel))
+	out, err := util.RunGitBytes(gitCtx, repoDir, maxSourceBytes, "cat-file", "blob", headRef+":"+rel)
 	if err != nil {
-		return nil, false, fmt.Errorf("read %s at %s: %w", rel, headRef, err)
+		return nil, false, fmt.Errorf("read %s at %s: %w", rel, headRef, util.CommandDiagnostic(err, out.Stderr))
 	}
-	return []byte(out), true, nil
+	return out.Stdout, true, nil
 }
 
 // splitSourceLines splits data into LF-normalized lines.
