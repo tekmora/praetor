@@ -546,6 +546,19 @@ func (tc toolchain) unanswered(what string, err error) (bool, string, error) {
 	return false, "", fmt.Errorf("%s%s: %w", what, tc.where, err)
 }
 
+// hostToolchain returns a toolchain that runs commands and resolves binaries on the host.
+func (c *stageConfig) hostToolchain() toolchain {
+	return toolchain{
+		run: c.run,
+		have: func(_ context.Context, _, name string) error {
+			if _, err := c.lookPath(name); err != nil {
+				return fmt.Errorf("%w: %w", errNotOnPath, err)
+			}
+			return nil
+		},
+	}
+}
+
 // goToolchain returns where the run's Go toolchain stages run: the devcontainer the run entered, or
 // the host.
 func (c *stageConfig) goToolchain() toolchain {
@@ -554,13 +567,7 @@ func (c *stageConfig) goToolchain() toolchain {
 		tc.run = retryGoCacheMiss(tc.run, c.admissionLogWriter())
 		return tc
 	}
-	return toolchain{
-		run: retryGoCacheMiss(c.run, c.admissionLogWriter()),
-		have: func(_ context.Context, _, name string) error {
-			if _, err := c.lookPath(name); err != nil {
-				return fmt.Errorf("%w: %w", errNotOnPath, err)
-			}
-			return nil
-		},
-	}
+	tc := c.hostToolchain()
+	tc.run = retryGoCacheMiss(tc.run, c.admissionLogWriter())
+	return tc
 }

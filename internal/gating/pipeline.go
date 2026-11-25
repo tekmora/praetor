@@ -273,8 +273,10 @@ type stageConfig struct {
 	admissionLog      io.Writer
 	admissionPoll     time.Duration
 	// netnsEntries are the manifest's go-test-netns entries, read once (goTestNetnsEntries).
-	netnsEntries []config.Exception
-	netnsLoaded  bool
+	netnsEntries     []config.Exception
+	netnsLoaded      bool
+	testPolicy       testStagePolicy
+	testPolicyLoaded bool
 }
 
 func (c *stageConfig) scopesAvailableFunc() func(context.Context) (bool, string) {
@@ -821,7 +823,14 @@ func invalidSettingsClause(rep *flavor.FlavorAuditReport) string {
 
 // runTestStage runs each language's test suite against HEAD in an isolated worktree: the Go
 // race detector, and Cargo and Node suites where their lockfiles are present (withOtherLanguages).
+// Any declared gate.test_prepare and gate.test_wrapper settings are loaded once into cfg.
 func runTestStage(ctx context.Context, cfg *stageConfig) (string, error) {
+	if _, err := cfg.loadTestStagePolicy(ctx); err != nil {
+		if cutErr := cutError(ctx, "creating the isolated test worktree", TestStageTimeout, "", cfg.repoDir, err.Error()); cutErr != nil {
+			return "", cutErr
+		}
+		return "", err
+	}
 	msg, err := scopedGoTests(ctx, cfg)
 	return withOtherLanguages(ctx, cfg, languagePart{language: languageGo, msg: msg, err: err},
 		nonGoPart{language: languageCargo, present: hasCargo, run: runCargoTests},
@@ -857,18 +866,25 @@ func runGoTests(ctx context.Context, cfg *stageConfig) (string, error) {
 	return moduleResultsMessage(results), nil
 }
 
+// runGoTestModule executes any declared test_prepare commands and the race-detector suite for one Go module in an isolated worktree.
 func runGoTestModule(ctx context.Context, cfg *stageConfig, module goModule, scopeCfg raceScopeConfig) (string, error) {
 	if cfg.racePackages != nil && module.file != "go.mod" {
 		return "outside root-module pre-push race scope", nil
+	}
+	policy, err := cfg.loadTestStagePolicy(ctx)
+	if err != nil {
+		return "", err
 	}
 	budget, err := stageBudget(ctx, cfg.repoDir)
 	if err != nil {
 		return "", err
 	}
 	bound := budget.StageBound
-	note := budget.Note
 	var scopeMsg string
 	err = inStageWorktree(ctx, cfg, bound, "", func(tCtx context.Context, dir string) error {
+		if prepErr := runWorktreeTestPrepare(tCtx, cfg.goToolchain(), policy, bound, dir); prepErr != nil {
+			return prepErr
+		}
 		moduleDir := filepath.Join(dir, filepath.Dir(filepath.FromSlash(module.file)))
 		var testErr error
 		scopeMsg, testErr = runGoRaceCommand(tCtx, cfg, module, moduleDir, bound, scopeCfg)
@@ -877,13 +893,7 @@ func runGoTestModule(ctx context.Context, cfg *stageConfig, module goModule, sco
 	if err != nil {
 		return "", err
 	}
-	if note != "" && scopeMsg != "" {
-		return note + "; " + scopeMsg, nil
-	}
-	if scopeMsg != "" {
-		return scopeMsg, nil
-	}
-	return note, nil
+	return joinTestNotes(budget.Note, policy.note(), scopeMsg), nil
 }
 
 // inStageWorktree runs suite in an isolated worktree of HEAD, under the stage bound, and removes

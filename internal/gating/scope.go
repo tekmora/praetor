@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -128,16 +129,17 @@ func waitRaceAdmission(ctx context.Context, cfg *stageConfig) error {
 	return nil
 }
 
-// raceTestCommand builds the test execution command line and descriptive message, wrapping in systemd-run if scoped.
-func raceTestCommand(module goModule, bound time.Duration, scopeCfg raceScopeConfig, packages []string, execFlag string) (string, []string, string) {
+// raceTestCommand builds the test execution command line and descriptive message, prefixing wrapper when set and wrapping in systemd-run if scoped.
+func raceTestCommand(module goModule, bound time.Duration, scopeCfg raceScopeConfig, packages, wrapper []string, execFlag string) (string, []string, string) {
 	if packages == nil {
 		packages = []string{"./..."}
 	}
-	argv := []string{"go", "test", "-race", "-timeout", bound.String()}
+	goArgv := []string{"go", "test", "-race", "-timeout", bound.String()}
 	if execFlag != "" {
-		argv = append(argv, "-exec", execFlag)
+		goArgv = append(goArgv, "-exec", execFlag)
 	}
-	argv = append(argv, packages...)
+	goArgv = append(goArgv, packages...)
+	argv := slices.Concat(wrapper, goArgv)
 	if !scopeCfg.useScope {
 		return argv[0], argv[1:], fmt.Sprintf("race tests ran unscoped: %s", scopeCfg.reason)
 	}
