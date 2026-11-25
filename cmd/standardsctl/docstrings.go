@@ -86,6 +86,18 @@ func runDocstringsCheck(args []string) error {
 
 // runDocstringsRange executes a single diff-scoped docstring coverage check.
 func runDocstringsRange(ctx context.Context, repoPath, baseRef, headRef string, override *int) error {
+	passed, err := reportDocstringsRange(ctx, repoPath, baseRef, headRef, override)
+	if err != nil {
+		return err
+	}
+	if !passed {
+		return exitStatusError{code: 1}
+	}
+	return nil
+}
+
+// reportDocstringsRange returns the coverage verdict after delivering the complete report.
+func reportDocstringsRange(ctx context.Context, repoPath, baseRef, headRef string, override *int) (bool, error) {
 	rep, err := docstrings.Check(ctx, docstrings.Options{
 		RepoDir:           repoPath,
 		BaseRef:           baseRef,
@@ -93,14 +105,15 @@ func runDocstringsRange(ctx context.Context, repoPath, baseRef, headRef string, 
 		ThresholdOverride: override,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
-		return exitStatusError{code: 2}
+		if _, writeErr := fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err); writeErr != nil {
+			return false, fmt.Errorf("report docstrings check error (%w): %w", err, writeErr)
+		}
+		return false, exitStatusError{code: 2}
 	}
-	printDocstringsReport(rep)
-	if !rep.Passed {
-		return exitStatusError{code: 1}
+	if err := printDocstringsReport(os.Stdout, rep); err != nil {
+		return false, fmt.Errorf("write docstrings report: %w", err)
 	}
-	return nil
+	return rep.Passed, nil
 }
 
 // runDocstringsPrePush reads git pre-push updates from r and checks each pushed range.
@@ -129,18 +142,11 @@ func runDocstringsPrePush(ctx context.Context, repoPath string, override *int, r
 			continue
 		}
 		seen[key] = true
-		rep, err := docstrings.Check(ctx, docstrings.Options{
-			RepoDir:           repoPath,
-			BaseRef:           base,
-			HeadRef:           u.LocalOID,
-			ThresholdOverride: override,
-		})
+		passed, err := reportDocstringsRange(ctx, repoPath, base, u.LocalOID, override)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
-			return exitStatusError{code: 2}
+			return err
 		}
-		printDocstringsReport(rep)
-		if !rep.Passed {
+		if !passed {
 			failed = true
 		}
 	}
@@ -150,31 +156,38 @@ func runDocstringsPrePush(ctx context.Context, repoPath string, override *int, r
 	return nil
 }
 
-// printDocstringsReport writes the coverage summary and each uncovered function to stdout.
-func printDocstringsReport(rep *docstrings.Report) {
+// printDocstringsReport writes the summary, uncovered functions and exception dispositions.
+func printDocstringsReport(w io.Writer, rep *docstrings.Report) error {
 	suffix := ""
 	if rep.Mode != "" && rep.Mode != "error" {
 		suffix = fmt.Sprintf(" (mode: %s)", rep.Mode)
 	}
-	fmt.Printf("Docstring coverage: %.2f%% (%d/%d covered, counted: %d, covered: %d, threshold: %d%%)%s\n",
-		rep.Coverage, rep.Covered, rep.Counted, rep.Counted, rep.Covered, rep.Threshold, suffix)
+	if _, err := fmt.Fprintf(w, "Docstring coverage: %.2f%% (%d/%d covered, counted: %d, covered: %d, threshold: %d%%)%s\n",
+		rep.Coverage, rep.Covered, rep.Counted, rep.Counted, rep.Covered, rep.Threshold, suffix); err != nil {
+		return err
+	}
 	for i := 0; i < len(rep.Uncovered); i++ {
 		u := rep.Uncovered[i]
-		fmt.Printf("%s:%d %s\n", u.Path, u.Line, u.Name)
+		if _, err := fmt.Fprintf(w, "%s:%d %s\n", u.Path, u.Line, u.Name); err != nil {
+			return err
+		}
 	}
-	printDocstringExceptions(rep.Exceptions)
+	return printDocstringExceptions(w, rep.Exceptions)
 }
 
 // printDocstringExceptions names and counts each visible exception disposition.
-func printDocstringExceptions(entries []docstrings.ExceptionEntry) {
+func printDocstringExceptions(w io.Writer, entries []docstrings.ExceptionEntry) error {
 	if len(entries) == 0 {
-		return
+		return nil
 	}
 	counts := make(map[string]int)
 	for i := 0; i < len(entries); i++ {
 		entry := entries[i]
 		counts[entry.Status]++
-		fmt.Printf("Docstring exception %s: %s (category %s, expires %s)\n", entry.Status, entry.Path, entry.Category, entry.Expires)
+		if _, err := fmt.Fprintf(w, "Docstring exception %s: %s (category %s, expires %s)\n", entry.Status, entry.Path, entry.Category, entry.Expires); err != nil {
+			return err
+		}
 	}
-	fmt.Printf("Docstring exceptions: %d excepted, %d expired, %d stale\n", counts["excepted"], counts["expired"], counts["stale"])
+	_, err := fmt.Fprintf(w, "Docstring exceptions: %d excepted, %d expired, %d stale\n", counts["excepted"], counts["expired"], counts["stale"])
+	return err
 }

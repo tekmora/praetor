@@ -51,7 +51,7 @@ func updateEvasionRenderingFixtures(t *testing.T, current string) {
 
 // updateCurrentEvasionRendering archives the outgoing fixture before replacing it through the same root.
 func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
-	previous, err := root.ReadFile(currentEvasionFixture)
+	previous, err := util.ReadLimitedIn(root, currentEvasionFixture, maxEmittedFileBytes)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", currentEvasionFixture, err)
 	}
@@ -62,14 +62,12 @@ func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
 	if err != nil {
 		return fmt.Errorf("compare %s: %w", currentEvasionFixture, err)
 	}
-	if !equal {
-		digest, _, err := util.CanonicalTextDigest(previous)
-		if err != nil {
-			return fmt.Errorf("digest %s: %w", currentEvasionFixture, err)
-		}
-		if err := archiveEvasionRenderingIn(root, digest, previous); err != nil {
-			return err
-		}
+	digest, _, err := util.CanonicalTextDigest(previous)
+	if err != nil {
+		return fmt.Errorf("digest %s: %w", currentEvasionFixture, err)
+	}
+	if err := archiveEvasionRenderingIn(root, digest, previous, !equal); err != nil {
+		return err
 	}
 	if err := root.WriteFile(currentEvasionFixture, current, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", currentEvasionFixture, err)
@@ -80,20 +78,39 @@ func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
 // archiveEvasionRendering opens a temporary fixture root for the archive regression cases.
 func archiveEvasionRendering(dir, digest, previous string) error {
 	return util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
-		return archiveEvasionRenderingIn(root, digest, []byte(previous))
+		return archiveEvasionRenderingIn(root, digest, []byte(previous), true)
 	})
 }
 
-// archiveEvasionRenderingIn preserves outgoing bytes under their digest in the fixture root.
-func archiveEvasionRenderingIn(root *os.Root, digest string, previous []byte) error {
+// archiveEvasionRenderingIn verifies the digest archive, creating it only for a change in content.
+func archiveEvasionRenderingIn(root *os.Root, digest string, previous []byte, create bool) error {
 	archive := digest + ".block_evasion.py"
-	existing, err := root.ReadFile(archive)
+	info, err := root.Lstat(archive)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := root.WriteFile(archive, previous, 0o644); err != nil {
-			return fmt.Errorf("write outgoing rendering archive %s: %w", archive, err)
+		if !create {
+			return nil
 		}
-		return nil
+		return createEvasionArchive(root, archive, previous)
 	}
+	if err != nil {
+		return fmt.Errorf("stat outgoing rendering archive %s: %w", archive, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("outgoing rendering archive %s: %w", archive, util.ErrNotRegularFile)
+	}
+	current, err := root.Stat(currentEvasionFixture)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", currentEvasionFixture, err)
+	}
+	if os.SameFile(info, current) {
+		return fmt.Errorf("outgoing rendering archive %s aliases %s", archive, currentEvasionFixture)
+	}
+	return compareEvasionArchive(root, archive, previous)
+}
+
+// compareEvasionArchive accepts a different checkout line ending on an independent archive.
+func compareEvasionArchive(root *os.Root, archive string, previous []byte) error {
+	existing, err := util.ReadLimitedIn(root, archive, maxEmittedFileBytes)
 	if err != nil {
 		return fmt.Errorf("read outgoing rendering archive %s: %w", archive, err)
 	}
@@ -103,6 +120,19 @@ func archiveEvasionRenderingIn(root *os.Root, digest string, previous []byte) er
 	}
 	if !equal {
 		return fmt.Errorf("outgoing rendering archive %s differs from its recorded bytes", archive)
+	}
+	return nil
+}
+
+// createEvasionArchive claims an absent digest name without overwriting a concurrent creation.
+func createEvasionArchive(root *os.Root, archive string, previous []byte) error {
+	file, err := root.OpenFile(archive, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("create outgoing rendering archive %s: %w", archive, err)
+	}
+	_, writeErr := file.Write(previous)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return fmt.Errorf("write outgoing rendering archive %s: %w", archive, errors.Join(err, root.Remove(archive)))
 	}
 	return nil
 }

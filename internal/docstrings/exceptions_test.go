@@ -5,6 +5,7 @@
 package docstrings
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -96,6 +97,56 @@ func TestDocstringExceptions_CommittedHead(t *testing.T) {
 			assertDocstringException(t, rep.Exceptions, tc.status, expires)
 		})
 	}
+}
+
+// TestDocstringExceptions_MovingHead advances topic between the manifest and source reads.
+func TestDocstringExceptions_MovingHead(t *testing.T) {
+	for _, head := range []string{"topic", "topic@{0}"} {
+		t.Run(head, func(t *testing.T) { checkMovingExceptionHead(t, head) })
+	}
+}
+
+// checkMovingExceptionHead checks that a branch or reflog expression keeps its initial source bytes.
+func checkMovingExceptionHead(t *testing.T, head string) {
+	t.Helper()
+	later := []byte("def later():\n    return 2\n")
+	expires := time.Now().UTC().AddDate(0, 0, 1).Format(time.DateOnly)
+	root := writeDocstringExceptionFixture(t, []byte("def initial():\n    return 1\n"), fmt.Sprintf("%x", sha256.Sum256(later)), "", expires)
+	testsupport.InitGitRepoWithOrigin(t, root, "")
+	testsupport.RunFixtureGit(t, root,
+		[]string{"commit", "--allow-empty", "-m", "base"},
+		[]string{"add", "snapshot.py", config.ManifestFileName},
+		[]string{"commit", "-m", "stale exception for different bytes"},
+		[]string{"branch", "topic"})
+	if err := os.WriteFile(filepath.Join(root, "snapshot.py"), later, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testsupport.RunFixtureGit(t, root,
+		[]string{"rm", config.ManifestFileName},
+		[]string{"commit", "-am", "new source without an exception"})
+	moved := false
+	t.Cleanup(SetTargetFileReaderForTest(func(ctx context.Context, dir, ref, rel string) ([]byte, bool, error) {
+		if out, err := util.RunGit(ctx, dir, "update-ref", "refs/heads/topic", "HEAD"); err != nil {
+			return nil, false, fmt.Errorf("move topic: %w: %s", err, out)
+		}
+		moved = true
+		return readTargetFile(ctx, dir, ref, rel)
+	}))
+	ctx, err := util.WithCommandEnvironment(t.Context(), testsupport.HermeticGitEnv(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Check(ctx, Options{RepoDir: root, BaseRef: "HEAD~2", HeadRef: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !moved {
+		t.Fatal("source read did not advance topic")
+	}
+	if rep.Passed || rep.Counted != 1 || len(rep.Uncovered) != 1 || rep.Uncovered[0].Name != "initial" {
+		t.Fatalf("want the initial uncovered function, got %+v", rep)
+	}
+	assertDocstringException(t, rep.Exceptions, "stale", expires)
 }
 
 // checkCommittedExceptionFixture checks HEAD after independently setting the two manifest states.

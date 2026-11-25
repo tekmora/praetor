@@ -7,7 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cordanaLLM/praetor/internal/testsupport"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
@@ -69,6 +71,59 @@ func TestEvasionArchiveRejectsEscapingSymlinks(t *testing.T) {
 		t.Error("escaping archive symlink accepted")
 	}
 	assertFixtureSymlinkUnchanged(t, archive, outside, previous)
+}
+
+// TestEvasionUpdateRejectsArchiveAliases checks both names stay intact when the archive aliases current.
+func TestEvasionUpdateRejectsArchiveAliases(t *testing.T) {
+	links := []struct {
+		name string
+		link func(string, string) error
+	}{
+		{"relative symlink", os.Symlink},
+		{"hard link", os.Link},
+	}
+	for _, kind := range links {
+		for _, next := range []string{"new rendering\n", "outgoing rendering\n"} {
+			t.Run(kind.name+"/"+strings.TrimSpace(next), func(t *testing.T) {
+				if kind.name == "relative symlink" && runtime.GOOS == "windows" {
+					t.Skip("symlink creation needs developer mode on Windows")
+				}
+				assertEvasionArchiveAliasRefused(t, kind.link, next)
+			})
+		}
+	}
+}
+
+// assertEvasionArchiveAliasRefused checks the archive entry's identity and both sets of bytes.
+func assertEvasionArchiveAliasRefused(t *testing.T, link func(string, string) error, next string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	const previous = "outgoing rendering\r\n"
+	mustWrite(t, currentEvasionFixture, previous)
+	archive := fixtureDigest(t, "outgoing", []byte(previous)) + ".block_evasion.py"
+	if err := link(currentEvasionFixture, archive); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
+		return updateCurrentEvasionRendering(root, []byte(next))
+	})
+	if err == nil {
+		t.Error("update accepted an archive alias")
+	}
+	after, err := os.Lstat(archive)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("archive entry changed: %v", err)
+	}
+	for _, path := range []string{currentEvasionFixture, archive} {
+		if got := mustRead(t, path); got != previous {
+			t.Errorf("%s contains %q, want %q", path, got, previous)
+		}
+	}
 }
 
 // assertFixtureSymlinkUnchanged checks the link destination and the bytes at that destination.
@@ -156,6 +211,63 @@ func TestPriorFixtureReadConfinesComputedNames(t *testing.T) {
 	}
 	if got := mustRead(t, outside); got != "outside\n" {
 		t.Errorf("outside bytes changed: %q", got)
+	}
+}
+
+// TestFixtureReadLimits exercises each fixture reader with a FIFO and both sides of the byte limit.
+func TestFixtureReadLimits(t *testing.T) {
+	digest := strings.Repeat("b", 64)
+	readers := []struct {
+		name, file string
+		read       func(dir, data string) error
+	}{
+		{"shared", "fixture", func(dir, _ string) error {
+			_, err := readFixtureFile(dir, "fixture")
+			return err
+		}},
+		{"current", currentEvasionFixture, func(dir, data string) error {
+			return util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
+				return updateCurrentEvasionRendering(root, []byte(data))
+			})
+		}},
+		{"archive", digest + ".block_evasion.py", func(dir, data string) error {
+			return archiveEvasionRendering(dir, digest, data)
+		}},
+	}
+	for _, reader := range readers {
+		t.Run(reader.name, func(t *testing.T) {
+			checkFixtureReadLimits(t, reader.file, reader.read)
+		})
+	}
+}
+
+// checkFixtureReadLimits bounds the call so a reader opening the planted FIFO fails promptly.
+func checkFixtureReadLimits(t *testing.T, name string, read func(dir, data string) error) {
+	t.Helper()
+	cases := []struct {
+		label string
+		size  int
+		want  error
+	}{
+		{"FIFO", 0, util.ErrNotRegularFile},
+		{"at limit", maxEmittedFileBytes, nil},
+		{"over limit", maxEmittedFileBytes + 1, util.ErrFileTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, name)
+			data := strings.Repeat("a", tc.size)
+			if errors.Is(tc.want, util.ErrNotRegularFile) {
+				testsupport.MakeFIFO(t, path)
+			} else {
+				mustWrite(t, path, data)
+			}
+			err := testsupport.RunWithin(t, 5*time.Second, func() error { return read(dir, data) })
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("read %s: got %v, want %v", name, err, tc.want)
+			}
+		})
 	}
 }
 

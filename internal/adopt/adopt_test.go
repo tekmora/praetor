@@ -146,7 +146,7 @@ func mustRead(t *testing.T, path string) string {
 	return string(data)
 }
 
-// readFixtureFile reads a computed name beneath dir and refuses traversal and escaping links.
+// readFixtureFile reads a size-limited regular fixture beneath dir through a confined handle.
 func readFixtureFile(dir, name string) (data []byte, err error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -157,7 +157,7 @@ func readFixtureFile(dir, name string) (data []byte, err error) {
 			err = errors.Join(err, fmt.Errorf("close fixture root %s: %w", dir, closeErr))
 		}
 	}()
-	data, err = root.ReadFile(name)
+	data, err = util.ReadLimitedIn(root, name, maxEmittedFileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read fixture %s in %s: %w", name, dir, err)
 	}

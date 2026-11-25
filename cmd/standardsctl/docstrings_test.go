@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,27 +22,13 @@ import (
 
 // TestDocstringExceptionsOutput verifies that dispositions are counted and named in CLI output.
 func TestDocstringExceptionsOutput(t *testing.T) {
-	original := os.Stdout
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Stdout = original })
-	os.Stdout = writer
-	printDocstringsReport(&docstrings.Report{Exceptions: []docstrings.ExceptionEntry{
+	rep := &docstrings.Report{Exceptions: []docstrings.ExceptionEntry{
 		{Path: "live.py", Category: "D", Expires: "2027-03-04", Status: "excepted"},
 		{Path: "expired.py", Category: "C", Expires: "2026-11-03", Status: "expired"},
 		{Path: "stale.py", Category: "B", Expires: "2026-11-05", Status: "stale"},
-	}})
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = original
-	out, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := reader.Close(); err != nil {
+	}}
+	var out bytes.Buffer
+	if err := printDocstringsReport(&out, rep); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
@@ -50,8 +37,32 @@ func TestDocstringExceptionsOutput(t *testing.T) {
 		"Docstring exception stale: stale.py (category B, expires 2026-11-05)",
 		"Docstring exceptions: 1 excepted, 1 expired, 1 stale",
 	} {
-		if !strings.Contains(string(out), want) {
-			t.Fatalf("output missing %q:\n%s", want, out)
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// rejectDocstringsLine fails only the selected report line so a later successful write cannot mask it.
+type rejectDocstringsLine string
+
+// Write returns a closed-pipe error for the matching prefix and accepts every other line.
+func (prefix rejectDocstringsLine) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte(prefix)) {
+		return 0, io.ErrClosedPipe
+	}
+	return len(p), nil
+}
+
+// TestDocstringsReportWriteErrors checks failures in the summary, function, disposition and totals.
+func TestDocstringsReportWriteErrors(t *testing.T) {
+	rep := &docstrings.Report{
+		Uncovered:  []docstrings.UncoveredFunction{{Path: "file.py"}},
+		Exceptions: []docstrings.ExceptionEntry{{Status: "stale", Path: "file.py"}},
+	}
+	for _, prefix := range []rejectDocstringsLine{"Docstring coverage:", "file.py:", "Docstring exception stale:", "Docstring exceptions:"} {
+		if err := printDocstringsReport(prefix, rep); !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("write failure on %q: got %v, want ErrClosedPipe", prefix, err)
 		}
 	}
 }

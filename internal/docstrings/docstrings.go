@@ -111,15 +111,25 @@ func Check(ctx context.Context, opts Options) (*Report, error) {
 		}
 		baseRef = resolved
 	}
-	diffHead := opts.HeadRef
-	if diffHead == "" {
-		diffHead = "WORKTREE"
-	}
-	ranges, err := cifilter.GetChangedLineRanges(ctx, repoDir, baseRef, diffHead)
+	head, err := resolveCheckHead(ctx, repoDir, opts.HeadRef)
 	if err != nil {
 		return nil, err
 	}
-	return evaluateChangedFiles(ctx, repoDir, opts.HeadRef, cfg, ranges)
+	ranges, err := cifilter.GetChangedLineRanges(ctx, repoDir, baseRef, head)
+	if err != nil {
+		return nil, err
+	}
+	return evaluateChangedFiles(ctx, repoDir, head, cfg, ranges)
+}
+
+// resolveCheckHead pins the diff, manifest and source reads to the same commit for a revision check.
+func resolveCheckHead(ctx context.Context, repoDir, ref string) (string, error) {
+	if isWorktreeHead(ref) {
+		return "WORKTREE", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, gitReadTimeout)
+	defer cancel()
+	return cifilter.ResolveDiffCommit(ctx, repoDir, ref)
 }
 
 // resolveEffectiveConfig loads .coderabbit.yaml and applies any CLI threshold override.
