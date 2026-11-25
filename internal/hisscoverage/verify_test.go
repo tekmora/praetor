@@ -1,9 +1,11 @@
 package hisscoverage
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -576,4 +578,57 @@ func TestVerifyIntentionalGapMarkerContract(t *testing.T) {
 	writeCorpusFixture(t, noReason, "HISS-01", "go", bucketGap, "no-reason.go", markedReasonlessGo)
 	requireFinding(t, "marker without reason", noReason, catalogFor("HISS-01", "go", StatePartial),
 		"no-reason.go", "reason")
+}
+
+// TestFindingStringEscapesControlCharacters verifies that terminal control sequences and
+// newlines in fixture names and details are escaped in Finding.String while raw fields stay
+// intact for JSON serialization.
+func TestFindingStringEscapesControlCharacters(t *testing.T) {
+	const rawName = "bad\x1b[31m\nnext.go"
+	var overflow Report
+	recordIncompleteBucket(&overflow, "HISS-01", "go", bucketPositive, rawName, maxFixturesPerBucket, "regular files")
+	assertEscapedFinding(t, overflow.Findings[0], rawName)
+
+	detailFinding := Finding{
+		Rule: "HISS-01", Language: "go", Bucket: bucketPositive, Fixture: rawName,
+		Detail: "entry " + rawName + " is not a regular fixture file; skipped without replay",
+	}
+	assertEscapedFinding(t, detailFinding, rawName)
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	// The snapshot reader refuses a fixture path with control characters, so Verify fails with an
+	// error; that error names the fixture escaped, never with the raw terminal controls.
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, rawName, cleanGo)
+	_, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateEnforced))
+	if err == nil {
+		t.Fatal("verify accepted a fixture path with control characters")
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\n") || !strings.Contains(err.Error(), escapeControl(rawName)) {
+		t.Fatalf("verify error %q must name the fixture escaped", err.Error())
+	}
+}
+
+// assertEscapedFinding checks that f.String escapes ESC and LF while JSON keeps f.Fixture raw.
+func assertEscapedFinding(t *testing.T, f Finding, wantRawFixture string) {
+	t.Helper()
+	rendered := f.String()
+	if strings.ContainsAny(rendered, "\x1b\n\r") {
+		t.Fatalf("Finding.String leaked raw control bytes: %q", rendered)
+	}
+	if !strings.Contains(rendered, `bad\x1b[31m\nnext.go`) {
+		t.Fatalf("Finding.String = %q, want escaped fixture name", rendered)
+	}
+	encoded, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("marshal finding: %v", err)
+	}
+	var roundTrip Finding
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatalf("unmarshal finding: %v", err)
+	}
+	if roundTrip.Fixture != wantRawFixture {
+		t.Fatalf("JSON round-trip Fixture = %q, want raw %q", roundTrip.Fixture, wantRawFixture)
+	}
 }

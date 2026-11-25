@@ -1,9 +1,12 @@
 package hisscoverage
 
 import (
+	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -125,5 +128,189 @@ func TestVerifyBucketDirectoriesDoNotConsumeFixtureBound(t *testing.T) {
 	if report.Fixtures != 2 || len(report.Findings) != 1 || report.Findings[0].Fixture != "z-overmatch.go" {
 		t.Fatalf("Fixtures=%d Findings=%+v, want 2 regular fixtures and over-match on z-overmatch.go",
 			report.Fixtures, report.Findings)
+	}
+}
+
+// unknownTypeEntry wraps a DirEntry so Type reports mode and IsDir reports false, simulating
+// filesystems that yield DT_UNKNOWN (fs.ModeIrregular) or zero type bits on directory reads.
+type unknownTypeEntry struct {
+	inner os.DirEntry
+	mode  fs.FileMode
+}
+
+func (e unknownTypeEntry) Name() string { return e.inner.Name() }
+
+func (e unknownTypeEntry) IsDir() bool { return false }
+
+func (e unknownTypeEntry) Type() fs.FileMode { return e.mode }
+
+func (e unknownTypeEntry) Info() (fs.FileInfo, error) { return e.inner.Info() }
+
+// withBucketReader attaches a stub bucketEntryReader to ctx for deterministic replay tests.
+func withBucketReader(ctx context.Context, reader bucketEntryReader) context.Context {
+	return context.WithValue(ctx, bucketReaderKey{}, reader)
+}
+
+// wrapEntriesWithMode returns a bucketEntryReader that masks every entry of targetDir with mode.
+func wrapEntriesWithMode(targetDir string, mode fs.FileMode) bucketEntryReader {
+	return func(ctx context.Context, dir string) ([]os.DirEntry, error) {
+		entries, err := readBucketEntries(ctx, dir)
+		if err != nil || dir != targetDir {
+			return entries, err
+		}
+		wrapped := make([]os.DirEntry, len(entries))
+		for i := 0; i < len(entries) && i < maxBucketEntries+1; i++ {
+			wrapped[i] = unknownTypeEntry{inner: entries[i], mode: mode}
+		}
+		return wrapped, nil
+	}
+}
+
+// TestVerifyBucketUnknownTypeSubdirectoryIsSkipped verifies that a bucket subdirectory whose
+// directory entry carries unknown type bits (fs.ModeIrregular or 0) is classified via os.Lstat
+// and skipped without failing or consuming the fixture bound.
+func TestVerifyBucketUnknownTypeSubdirectoryIsSkipped(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
+	subDir := filepath.Join(posDir, "nested-subdir")
+	if err := contextopt.EnsureDirectory(t.Context(), subDir, 0o700); err != nil {
+		t.Fatalf("create subdirectory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "ignored.go"), []byte(cleanGo), 0o600); err != nil {
+		t.Fatalf("write nested file: %v", err)
+	}
+
+	modes := [...]fs.FileMode{fs.ModeIrregular, 0}
+	for i := 0; i < len(modes); i++ {
+		ctx := withBucketReader(t.Context(), wrapEntriesWithMode(posDir, modes[i]))
+		report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
+		if err != nil {
+			t.Fatalf("mode %v: verify: %v", modes[i], err)
+		}
+		if !report.Passed() || report.Fixtures != 1 {
+			t.Fatalf("mode %v: subdirectory must be skipped and claim must pass: fixtures=%d findings=%+v",
+				modes[i], report.Fixtures, report.Findings)
+		}
+	}
+}
+
+// TestVerifyBucketNonRegularEntryIsSkippedAndNamed verifies that a non-regular entry such as a
+// symlink is skipped without replay and reported as not a regular fixture file, including when
+// its directory entry reports unknown type bits.
+func TestVerifyBucketNonRegularEntryIsSkippedAndNamed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation requires elevated privileges")
+	}
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
+	if err := os.Symlink(filepath.Join(posDir, "recursion.go"), filepath.Join(posDir, "alias.go")); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	ctx := withBucketReader(t.Context(), wrapEntriesWithMode(posDir, fs.ModeIrregular))
+	report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Passed() || report.Fixtures != 1 || len(report.Findings) != 1 {
+		t.Fatalf("want 1 replayed fixture and 1 non-regular finding, got fixtures=%d findings=%+v",
+			report.Fixtures, report.Findings)
+	}
+	got := report.Findings[0]
+	if got.Fixture != "alias.go" || !strings.Contains(got.Detail, "not a regular fixture file") {
+		t.Fatalf("finding = %q, want alias.go named as not a regular fixture file", got)
+	}
+}
+
+// TestVerifyBucketUnknownTypeRegularFilesRespectBound verifies that regular files whose
+// directory entries report fs.ModeIrregular still count toward maxFixturesPerBucket.
+func TestVerifyBucketUnknownTypeRegularFilesRespectBound(t *testing.T) {
+	root := t.TempDir()
+	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
+	stageNumberedFixtures(t, posDir, "rec", recursiveGo, maxFixturesPerBucket+1)
+
+	ctx := withBucketReader(t.Context(), wrapEntriesWithMode(posDir, fs.ModeIrregular))
+	report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Passed() || len(report.Findings) != 1 || !strings.Contains(report.Findings[0].Detail, "incomplete replay") {
+		t.Fatalf("257 unknown-type regular files must fail as incomplete, got %+v", report.Findings)
+	}
+}
+
+// TestVerifyBucketFileAddedDuringReplayIsIncomplete verifies that a regular file added to a
+// bucket after its initial listing and before the post-replay re-read fails Verify with an
+// incomplete-replay finding naming the bucket.
+func TestVerifyBucketFileAddedDuringReplayIsIncomplete(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
+
+	reads := 0
+	reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
+		entries, err := readBucketEntries(ctx, dir)
+		if err != nil || dir != posDir {
+			return entries, err
+		}
+		reads++
+		if reads == 1 {
+			if writeErr := os.WriteFile(filepath.Join(posDir, "z-added.go"), []byte(recursiveGo), 0o600); writeErr != nil {
+				t.Fatalf("stage added fixture: %v", writeErr)
+			}
+		}
+		return entries, nil
+	}
+
+	report, err := Verify(withBucketReader(t.Context(), reader), root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if reads != 2 {
+		t.Fatalf("bucket reads = %d, want initial read plus post-replay re-read", reads)
+	}
+	assertAddedFixtureIncomplete(t, report)
+}
+
+// assertAddedFixtureIncomplete checks the one incomplete-replay finding a bucket changed during
+// the replay records for the added fixture.
+func assertAddedFixtureIncomplete(t *testing.T, report *Report) {
+	t.Helper()
+	if report.Passed() || len(report.Findings) != 1 {
+		t.Fatalf("bucket mutation must record 1 incomplete finding, got %+v", report.Findings)
+	}
+	got := report.Findings[0]
+	if got.Fixture != "z-added.go" || !strings.Contains(got.Detail, "incomplete replay") ||
+		!strings.Contains(got.Detail, "HISS-01/go/positive") {
+		t.Fatalf("finding = %q, want incomplete replay naming HISS-01/go/positive and z-added.go", got)
+	}
+}
+
+// TestVerifyBucketFileRemovedDuringReplayIsIncomplete verifies that removing a replayed regular
+// file before the post-replay re-read also records an incomplete-replay finding.
+func TestVerifyBucketFileRemovedDuringReplayIsIncomplete(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "a-first.go", recursiveGo)
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketPositive, "b-second.go", recursiveGo)
+	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
+
+	reads := 0
+	reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
+		if dir == posDir {
+			reads++
+			if reads == 2 {
+				if rmErr := os.Remove(filepath.Join(posDir, "b-second.go")); rmErr != nil {
+					t.Fatalf("remove replayed fixture: %v", rmErr)
+				}
+			}
+		}
+		return readBucketEntries(ctx, dir)
+	}
+
+	report, err := Verify(withBucketReader(t.Context(), reader), root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Passed() || len(report.Findings) != 1 || report.Findings[0].Fixture != "b-second.go" ||
+		!strings.Contains(report.Findings[0].Detail, "incomplete replay") {
+		t.Fatalf("removed fixture must fail as incomplete naming b-second.go, got %+v", report.Findings)
 	}
 }
