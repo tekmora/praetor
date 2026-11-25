@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,7 +83,7 @@ func TestApplyHISSExceptions_RustHISS07TargetAndFunctionScope(t *testing.T) {
 		var applyErr error
 		byPath, applyErr = applyHISSExceptions(rep.Violations, []config.Exception{scannerTestEntry("HISS-07", "src/lib.rs", "", "2026-11-20")}, scannerExceptionsToday)
 		return applyErr
-	}); err != nil || len(byPath) != 1 || byPath[0].FilePath != "src/other.rs" {
+	}); err != nil || len(byPath) != 1 || filepath.ToSlash(byPath[0].FilePath) != "src/other.rs" {
 		t.Fatalf("file-scoped Rust HISS-07: err=%v remaining=%+v", err, byPath)
 	}
 	if _, err := captureStdout(t, func() error {

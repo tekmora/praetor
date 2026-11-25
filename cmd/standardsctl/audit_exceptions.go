@@ -90,7 +90,7 @@ func preferLiveHISSException(selected, candidate *config.Exception, today time.T
 
 // printExcusedHISSFinding prints an audit notice for a scanner finding waived by entry.
 func printExcusedHISSFinding(violation hiss.InvariantViolation, entry config.Exception) {
-	finding := fmt.Sprintf("[EXCUSED] %s %s:%d", violation.RuleID, violation.FilePath, violation.LineNumber)
+	finding := fmt.Sprintf("[EXCUSED] %s %s:%d", violation.RuleID, filepath.ToSlash(violation.FilePath), violation.LineNumber)
 	if fn := excusedFunctionLabel(violation, entry); fn != "" {
 		finding += " function " + fn
 	}
