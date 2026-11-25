@@ -8,12 +8,13 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/compiler"
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/forge"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 )
 
-// Positive: every governance document adoption scaffolds passes markdownlint's default
-// rules without disabling any of them.
-func TestScaffoldedGovernanceDocumentsPassDefaultMarkdownlint(t *testing.T) {
+// TestScaffoldedGovernanceDocumentsPassMarkdownlint checks default rules for prose documents.
+// Forge text uses the shipped Markdown profile's MD013 setting to keep each item on one line.
+func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 	documents := map[string]string{
 		contributingFile: buildContributingGuide("acme-widgets"),
 		prTemplateFile:   buildPullRequestTemplate(),
@@ -22,8 +23,15 @@ func TestScaffoldedGovernanceDocumentsPassDefaultMarkdownlint(t *testing.T) {
 		adrTemplateFile:  buildADRTemplate(),
 	}
 	for name, doc := range documents {
-		if findings := testsupport.MarkdownFindings(doc); len(findings) != 0 {
-			t.Errorf("%s breaks markdownlint defaults: %v\n%s", name, findings, doc)
+		var off []string
+		if name == prTemplateFile {
+			off = []string{"MD013"}
+			if findings := forge.BodyHardWrapFindings(doc); len(findings) != 0 {
+				t.Errorf("%s contains hard-wrapped prose: %v", name, findings)
+			}
+		}
+		if findings := testsupport.MarkdownFindingsWith(doc, off...); len(findings) != 0 {
+			t.Errorf("%s breaks markdownlint rules: %v\n%s", name, findings, doc)
 		}
 		if strings.Contains(doc, "markdownlint-disable") {
 			t.Errorf("%s disables a lint rule it should satisfy", name)

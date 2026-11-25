@@ -385,7 +385,7 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 		perm:      filePerm,
 		content:   []byte(buildPullRequestTemplate()),
 		prior:     priorPRTemplateDigests,
-		refreshed: "Refreshed the unedited pull request template to keep each paragraph on one line",
+		refreshed: "Refreshed the unedited pull request template to the current verification checklist",
 		created:   "Scaffolded pull request template with HISS verification checklist",
 		verified:  "Existing pull request template verified present",
 	})
@@ -529,10 +529,8 @@ func (s *adoptSession) readmeStateError(err error) error {
 
 // markdownDocument joins lines into a Markdown file ending in one newline.
 //
-// The scaffolded governance documents below are an adopter's own files, which the
-// adopter's Markdown lint reads, so each line is written within markdownlint's default
-// 80-column limit instead of opening the file with a markdownlint-disable MD013 line
-// that would also silence the rule for everything the adopter adds (BUG-806).
+// Prose documents stay within markdownlint's default 80 columns (BUG-806). Pull request
+// bodies keep each paragraph and checkbox on one physical line for forge text validation.
 func markdownDocument(lines ...string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -594,22 +592,88 @@ func buildContributingGuide(repoName string) string {
 	)
 }
 
+const (
+	prDescriptionHeading = "## Description"
+	prChecklistHeading   = "## Pre-Merge Verification Checklist"
+)
+
+// prTemplateLines is the shared layout for the engine and its adopters.
+var prTemplateLines = []string{
+	"# Pull Request",
+	"",
+	prDescriptionHeading,
+	"",
+	"<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->",
+	"",
+	prChecklistHeading,
+	"",
+	"- [ ] Local verification passed: `make verify-all`",
+	"- [ ] No new HISS / NASA Power-of-10 infractions (functions $\\le 60$ LOC)",
+	"- [ ] 3D Tests included (Positive, Negative, Boundary) for public APIs",
+	"- [ ] Agent contexts in sync: `standardsctl compile-context --verify`",
+	"- [ ] Commit messages adhere to Conventional Commits format",
+	"",
+	"### 1. High-Integrity Systems Standard (HISS) Checklist",
+	"",
+	"All PRs must strictly adhere to the declared HISS invariants before merging:",
+	"",
+	"#### Static & Runtime Determinism",
+	"",
+	"- [ ] **HISS-01 (Control Flow)**: Call graph is strictly a Directed Acyclic Graph (DAG); zero recursion.",
+	"- [ ] **HISS-02 (Bounded Loops & I/O)**: All loops declare a static compile-time scalar upper bound; all network/disk I/O operations enforce explicit `context.Context` timeouts.",
+	"- [ ] **HISS-03 (Zero Frame Malloc)**: Hot-path loops maintain zero dynamic heap allocations ($\\Delta \\text{HeapAlloc}_{\\text{tick}} = 0$).",
+	"- [ ] **HISS-04 (Complexity Bounds)**: McCabe Cyclomatic $\\le 10$, Cognitive $\\le 15$, Func LOC $\\le 60$, Statements $\\le 50$.",
+	"",
+	"#### Memory & Error Integrity",
+	"",
+	"- [ ] **HISS-07 (Checked Errors)**: Zero `.unwrap()` / `.expect()`; zero unchecked error returns (`_ = err`); all errors handled or wrapped with domain context.",
+	"- [ ] **HISS-08 (Static Determinism)**: Zero `eval()`, zero dynamic evaluation, zero banned unsafe C functions (`gets`, `strcpy`, `sprintf`).",
+	"- [ ] **HISS-09 (Safety Proofs)**: Any `unsafe` block or operation is preceded by an explanatory `// SAFETY:` rationale proving invariant maintenance.",
+	"- [ ] **HISS-10 (Zero-Warning Cascade)**: Zero warnings across compiler, `go vet`, and all configured linters.",
+	"",
+	"#### Supply Chain & API Governance",
+	"",
+	"- [ ] **HISS-11 (Hermetic Supply Chain)**: All dependencies and lockfiles (`go.sum`) pinned; zero unpinned floating container tags.",
+	"- [ ] **HISS-14 (Append-Only ABI)**: Public APIs are append-only. Any breaking change includes `!` in the conventional commit title and a mandatory `Migration:` footer.",
+	"",
+	"---",
+	"",
+	"### 2. Three-Dimensional (3D) Testing Verification (HISS-15)",
+	"",
+	"Every public method and modified component must include three dimensions of automated testing:",
+	"",
+	"- [ ] **HISS-15 Dimension 1: Positive Tests**: Validated expected outputs against normal and golden operational inputs.",
+	"- [ ] **HISS-15 Dimension 2: Negative Tests**: Validated deterministic error propagation on corrupted, unauthorized, or invalid inputs.",
+	"- [ ] **HISS-15 Dimension 3: Boundary Tests**: Validated limits ($0$, $1$, $N_{\\max}$, empty buffers, max field limits).",
+	"- [ ] **HISS-13 Whole-Tree Debt Ratchet**: The full supported source tree was scanned; no finding is exempt because of file origin, language, or ownership, and debt may only decrease.",
+	"",
+	"---",
+	"",
+	"### 3. Context Integrity & Agent Governance (HISS-16)",
+	"",
+	"- [ ] **Canonical Single Source of Truth**: All agent rule updates were made directly in `AGENTS.md`.",
+	"- [ ] **Context Transpilation Verification**: Ran `standardsctl compile-context --verify` with 0 diffs.",
+	"- [ ] **Zero Manual Evasion**: No manual edits to `CLAUDE.md`, `.cursor/rules/*.mdc`, `.windsurfrules`, or `.github/copilot-instructions.md`.",
+	"- [ ] **No Bypass Flags**: Did NOT use `--no-verify`, `LEFTHOOK=0`, or mutate `.git/hooks`.",
+	"",
+	"---",
+	"",
+	"### 4. Ed25519 Exit-0 Verification Receipt",
+	"",
+	"Paste the **signed receipt JSON** below, inside the fence labelled `receipt`. The label is what the validator looks for: an unlabelled or `text` fence is treated as a code snippet in a description and never read.",
+	"",
+	"`praetorctl gate run` writes it to `.standards-receipt.json`, and the pre-push hook keeps a copy at `.git/praetor-receipts/<sha>.json`. It must certify the pull request's head commit; a rebase invalidates it, so re-mint after one.",
+	"",
+	"```receipt",
+	"<!-- Paste the contents of .standards-receipt.json here, replacing this line. -->",
+	"```",
+	"",
+	"- **Local Race Detector Status**: `go test -v -race ./...` (PASS)",
+}
+
+// buildPullRequestTemplate renders the pull request template for both adoption and the engine.
 func buildPullRequestTemplate() string {
-	return markdownDocument(
-		"# Pull Request",
-		"",
-		"## Description",
-		"",
-		"<!-- Summarize the changes and their architectural rationale. -->",
-		"",
-		"## Pre-Merge Verification Checklist",
-		"",
-		"- [ ] Local verification passed: `make verify-all`",
-		"- [ ] No new HISS / NASA Power-of-10 infractions (functions $\\le 60$ LOC)",
-		"- [ ] 3D Tests included (Positive, Negative, Boundary) for public APIs",
-		"- [ ] Agent contexts in sync: `standardsctl compile-context --verify`",
-		"- [ ] Commit messages adhere to Conventional Commits format",
-	)
+	return markdownDocument(prTemplateLines...)
 }
 
 func buildSecurityPolicy() string {
@@ -672,7 +736,11 @@ Describe the decision taken and the architectural rationale.
 `
 }
 
-// Order: engine-fr-rule-checks-20261027. Only unedited prior renderings refresh.
+// priorPRTemplateDigests records each scaffold, including the current text for the next readoption.
 var priorPRTemplateDigests = map[string]string{
-	"68ab0cf67859f207428dea6901db7121ad32f943838b65f1fe36bf965a7770a2": "template before forge text enforcement",
+	"68ab0cf67859f207428dea6901db7121ad32f943838b65f1fe36bf965a7770a2": "wrapped scaffold checklist (#477)",
+	"8430a36f64a0164981b3e95d22182fe8201af21d3d8f061935fe1d46a3a4c566": "initial HISS-16 checklist (#14)",
+	"34d4678528bac660ecaea4d9d0a2254a543a8c99ec89950e2398f8c687219292": "HISS checklist after the standard rename (#283)",
+	"523db04e188480eb0d5d08d21d400a80afe3c1919de26a776696a6d6a70c8902": "single-line scaffold checklist (#1643)",
+	"146faf6f2df563898a4de3e51473a6d8641dd3f92171c4987ea304dc39ca45bd": "shared preset headings and nested HISS checklist (2026-11-25)",
 }
