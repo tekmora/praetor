@@ -4,6 +4,7 @@
 package contextopt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -43,16 +44,12 @@ func openNativeLeaf(parent uintptr, parentName, name string, _ bool) (*os.File, 
 	return os.NewFile(uintptr(handle), filepath.Join(parentName, name)), nil
 }
 
-// readNames keeps enumeration metadata for nonregular entries. Regular entries need a
-// descriptor-relative FileIdInfo lookup after all names have been counted.
-func (dir *SnapshotDirectory) readNames(n int) ([]listedName, error) {
+// readNames keeps each Windows directory record's kind for the later relative lookup.
+func (dir *SnapshotDirectory) readNames(_ context.Context, n int) ([]listedName, error) {
 	infos, readErr := dir.Readdir(n)
 	names := make([]listedName, len(infos))
 	for i, info := range infos {
-		names[i].name = info.Name()
-		if !info.Mode().IsRegular() {
-			names[i].info = info
-		}
+		names[i] = listedName{name: info.Name(), kind: info.Mode().Type()}
 	}
 	return names, readErr
 }
@@ -63,9 +60,9 @@ type windowsListedInfo struct {
 	id winfileid.Info
 }
 
-// statListedName captures the regular file's full identity relative to the enumerating parent.
+// statListedName checks the current kind and captures regular file identity relative to the parent.
 func (dir *SnapshotDirectory) statListedName(name string) (_ os.FileInfo, err error) {
-	if err := validateLeafName(name); err != nil {
+	if err := ValidateLeafName(name); err != nil {
 		return nil, err
 	}
 	file, err := openLeafAt(dir.File, name, false)
@@ -76,14 +73,14 @@ func (dir *SnapshotDirectory) statListedName(name string) (_ os.FileInfo, err er
 	return statWindowsFixture(file)
 }
 
-// statWindowsFixture freezes size, modification time and FILE_ID_INFO from one handle.
+// statWindowsFixture obtains the current kind and, for regular files, FILE_ID_INFO on the same handle.
 func statWindowsFixture(file *os.File) (os.FileInfo, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("listed regular file %q changed type", file.Name())
+		return info, nil
 	}
 	id, err := readFileID(file)
 	if err != nil {

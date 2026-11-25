@@ -6,6 +6,7 @@
 package contextopt
 
 import (
+	"context"
 	"math"
 	"os"
 	"syscall"
@@ -14,14 +15,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// readNames consumes directory records without the per-name stat that can drop an entry.
-func (dir *SnapshotDirectory) readNames(n int) ([]listedName, error) {
-	names, err := dir.Readdirnames(n)
-	listed := make([]listedName, len(names))
-	for i, name := range names {
-		listed[i].name = name
+// observeUntypedName takes the first relative lstat when a record supplies no kind.
+// A failed observation keeps the name in its directory slot.
+func (dir *SnapshotDirectory) observeUntypedName(ctx context.Context, name string) listedName {
+	if err := ctx.Err(); err != nil {
+		return listedName{name: name, err: err}
 	}
-	return listed, err
+	info, err := dir.statListedName(name)
+	listed := listedName{name: name, err: err}
+	if err == nil {
+		listed.kind = info.Mode().Type()
+	}
+	return listed
 }
 
 // statListedName inspects one kernel-listed component relative to the retained descriptor.

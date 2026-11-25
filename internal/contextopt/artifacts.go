@@ -44,11 +44,11 @@ func validateRootLeaf(ctx context.Context, root *os.Root, name string) error {
 	if ctx == nil || root == nil {
 		return fmt.Errorf("context, directory and flat filename required")
 	}
-	return validateLeafName(name)
+	return ValidateLeafName(name)
 }
 
-// validateLeafName permits one ordinary component below a pinned directory.
-func validateLeafName(name string) error {
+// ValidateLeafName permits one ordinary component below a pinned directory.
+func ValidateLeafName(name string) error {
 	if !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
 		return fmt.Errorf("flat filename required: %w", os.ErrInvalid)
 	}

@@ -44,6 +44,30 @@ func TestVerifyCountsVanishingBufferedName(t *testing.T) {
 	}
 }
 
+// TestVerifyReportsBufferedKindChange replaces a file whose record the kernel already
+// returned, before ReadEntries resolves that name. A stable directory shares the bucket.
+func TestVerifyReportsBufferedKindChange(t *testing.T) {
+	root := t.TempDir()
+	bucket := bucketPath(root, "HISS-01", "go", bucketNegative)
+	stageNumberedFixtures(t, bucket, "a", cleanGo, 4)
+	stageNumberedSubdirs(t, bucket, "dir", 1)
+	prefix, victim := bufferedRegularName(t, bucket)
+	next := vanishingFileReader(t, bucket, prefix, victim)
+	ctx, cancel := context.WithTimeout(t.Context(), contextopt.MaxDuration)
+	defer cancel()
+	replaced := false
+	reader := func(path string, n int) ([]os.DirEntry, error) {
+		entries, err := next(path, n)
+		if !replaced && err == nil {
+			replaced = true
+			err = contextopt.EnsureDirectory(ctx, filepath.Join(bucket, victim), 0o700)
+		}
+		return entries, err
+	}
+	report := verifySnapshot(t, context.WithValue(ctx, bucketReaderKey{}, reader), root)
+	requireSnapshotFinding(t, report, 3, victim, "incomplete replay")
+}
+
 // bufferedRegularName finds a regular record following another record in the same kernel
 // read. The directory offset advances only on refill. This measures the buffer boundary
 // independently of directory order, entry size and Go's chosen read size.

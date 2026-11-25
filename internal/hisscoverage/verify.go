@@ -242,9 +242,10 @@ func Verify(ctx context.Context, rootDir string, catalog *Catalog) (_ *Report, e
 	for i := 0; i < len(catalog.Rules); i++ {
 		rule := &catalog.Rules[i]
 		for j := 0; j < len(rule.Coverage); j++ {
-			cov := &rule.Coverage[j]
+			cov := rule.Coverage[j]
+			cov.Language = cov.fixtureLanguage()
 			claim := corpus[fixtureStage{ruleID: rule.ID, language: cov.Language}]
-			if err := verifyClaim(ctx, claim, rule.ID, cov, report); err != nil {
+			if err := verifyClaim(ctx, claim, rule.ID, &cov, report); err != nil {
 				return nil, err
 			}
 		}

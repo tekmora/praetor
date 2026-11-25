@@ -64,7 +64,7 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.S
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		stage := fixtureStage{ruleID: rule.ID, language: rule.Coverage[i].Language}
+		stage := fixtureStage{ruleID: rule.ID, language: rule.Coverage[i].fixtureLanguage()}
 		claim, err := stage.captureClaim(ctx, dir, store)
 		if err != nil {
 			return err

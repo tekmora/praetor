@@ -35,6 +35,36 @@ func catalogFor(rule, lang string, state State) *Catalog {
 	}}}
 }
 
+// TestVerifyLanguageComponent replays equivalent spellings from the same positive bucket.
+func TestVerifyLanguageComponent(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	for _, language := range [...]string{"go", "./go", "go/", "other/../go"} {
+		catalog := catalogFor("HISS-01", language, StateEnforced)
+		report, err := Verify(t.Context(), root, catalog)
+		if err != nil || !report.Passed() || report.Claims != 1 || report.Fixtures != 1 {
+			t.Errorf("language %q: report=%+v err=%v", language, report, err)
+		}
+	}
+}
+
+// TestCatalogRefusesInvalidLanguageComponents checks confinement and canonical duplicates.
+func TestCatalogRefusesInvalidLanguageComponents(t *testing.T) {
+	for _, language := range [...]string{"", ".", "..", "../go", "/go", "a/go", "go\x00", `C:\go`, "C:/go", `..\go`} {
+		catalog := catalogFor("HISS-01", language, StateEnforced)
+		if err := catalog.Validate(); !errors.Is(err, ErrInvalidCatalog) {
+			t.Errorf("language %q: want invalid catalog, got %v", language, err)
+		}
+	}
+	catalog := catalogFor("HISS-01", "./go", StateEnforced)
+	rule := &catalog.Rules[0]
+	duplicate := rule.Coverage[0]
+	duplicate.Language = "go/"
+	rule.Coverage = append(rule.Coverage, duplicate)
+	if err := catalog.Validate(); !errors.Is(err, ErrInvalidCatalog) {
+		t.Errorf("duplicate language directory: want invalid catalog, got %v", err)
+	}
+}
+
 // TestVerifyAcceptsABackedClaim is the positive dimension: a claim of detection whose
 // positive fixture the rule actually reports must pass.
 func TestVerifyAcceptsABackedClaim(t *testing.T) {
@@ -79,15 +109,14 @@ const workflowOrTrue = "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    s
 // YAML file, so a claim backed by it fails (negative): the staging, not the bytes, decides.
 func TestVerifyStagesWorkflowFixtures(t *testing.T) {
 	root := corpusRoot(t, "HISS-07", "github-actions", bucketPositive, "or-true.yml", workflowOrTrue)
-	report, err := Verify(t.Context(), root, catalogFor("HISS-07", "github-actions", StatePartial))
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if !report.Passed() || report.Fixtures != 1 {
-		t.Fatalf("a workflow fixture must be staged where its run: block is read: %+v", report.Findings)
+	for _, language := range [...]string{"github-actions", "./github-actions/"} {
+		report, err := Verify(t.Context(), root, catalogFor("HISS-07", language, StatePartial))
+		if err != nil || !report.Passed() || report.Fixtures != 1 {
+			t.Fatalf("workflow language %q must stage one scannable workflow: %+v, %v", language, report, err)
+		}
 	}
 	root = corpusRoot(t, "HISS-07", "shell", bucketPositive, "or-true.yml", workflowOrTrue)
-	report, err = Verify(t.Context(), root, catalogFor("HISS-07", "shell", StatePartial))
+	report, err := Verify(t.Context(), root, catalogFor("HISS-07", "shell", StatePartial))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}

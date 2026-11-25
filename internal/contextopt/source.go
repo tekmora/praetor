@@ -300,7 +300,7 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 
 // openSource opens a regular-file candidate relative to the pinned root.
 func openSource(root *os.Root, name string) (*os.File, error) {
-	if err := validateLeafName(name); err != nil {
+	if err := ValidateLeafName(name); err != nil {
 		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
 	}
 	parent, err := root.Open(".")
