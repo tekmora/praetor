@@ -13,8 +13,8 @@ import (
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 )
 
-// maxTestBucketEntries bounds fixture and subdirectory staging loops in bucket tests (HISS-02).
-const maxTestBucketEntries = 512
+// maxTestBucketEntries is the documented largest certifiable listing and bounds test staging loops.
+const maxTestBucketEntries = 4096
 
 // stageNumberedFixtures writes count regular Go fixtures named <prefix>-NNN.go inside bucketDir.
 func stageNumberedFixtures(t *testing.T, bucketDir, prefix, body string, count int) {
@@ -128,6 +128,65 @@ func TestVerifyBucketDirectoriesDoNotConsumeFixtureBound(t *testing.T) {
 	if report.Fixtures != 2 || len(report.Findings) != 1 || report.Findings[0].Fixture != "z-overmatch.go" {
 		t.Fatalf("Fixtures=%d Findings=%+v, want 2 regular fixtures and over-match on z-overmatch.go",
 			report.Fixtures, report.Findings)
+	}
+}
+
+// TestVerifyBucketDirectoryEntryBoundary exercises the real listing limit with directory-only
+// negative buckets and checks overflow reported on either read.
+func TestVerifyBucketDirectoryEntryBoundary(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "backed.go", recursiveGo)
+	negDir := bucketPath(root, "HISS-01", "go", bucketNegative)
+	stageNumberedSubdirs(t, negDir, "dir", maxTestBucketEntries)
+	t.Run("4096 directories", func(t *testing.T) {
+		report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateEnforced))
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if !report.Passed() || report.Fixtures != 1 {
+			t.Fatalf("4096 directories must pass with only the positive fixture replayed: %+v", report)
+		}
+	})
+
+	const sentinel = "z-overflow"
+	if err := contextopt.EnsureDirectory(t.Context(), filepath.Join(negDir, sentinel), 0o700); err != nil {
+		t.Fatalf("create overflow directory: %v", err)
+	}
+	t.Run("4097 directories", func(t *testing.T) {
+		requireDirectoryOverflow(t, t.Context(), root, sentinel)
+	})
+	t.Run("overflow only on second read", func(t *testing.T) {
+		reads := 0
+		reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
+			entries, err := readBucketEntries(ctx, dir)
+			if err != nil || dir != negDir {
+				return entries, err
+			}
+			reads++
+			if reads == 1 {
+				return entries[:min(len(entries), maxTestBucketEntries)], nil
+			}
+			return entries, nil
+		}
+		requireDirectoryOverflow(t, withBucketReader(t.Context(), reader), root, sentinel)
+		if reads != 2 {
+			t.Fatalf("negative bucket reads = %d, want 2", reads)
+		}
+	})
+}
+
+// requireDirectoryOverflow checks that Verify identifies the first excess directory in the negative bucket.
+func requireDirectoryOverflow(t *testing.T, ctx context.Context, root, sentinel string) {
+	t.Helper()
+	report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	want := Finding{
+		Rule: "HISS-01", Language: "go", Bucket: bucketNegative, Fixture: sentinel,
+		Detail: "incomplete replay: bucket HISS-01/go/negative exceeds 4096 directory entries; report is non-certifying",
+	}
+	if report.Passed() || len(report.Findings) != 1 || report.Findings[0] != want {
+		t.Fatalf("findings = %+v, want one incomplete replay finding: %q", report.Findings, want)
 	}
 }
 

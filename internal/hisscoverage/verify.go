@@ -37,9 +37,8 @@ const (
 	maxFixtureMarkerLines = 32
 	// fixtureMarkerPrefix introduces an intentional gap marker inside a leading fixture comment.
 	fixtureMarkerPrefix = "hiss-fixture:"
-	// maxBucketEntries bounds how many directory entries one bucket read enumerates into memory
-	// (HISS-02), so subdirectories cannot grow the listing without limit while regular files are
-	// counted separately against maxFixturesPerBucket.
+	// maxBucketEntries is the largest bucket listing replay can certify (HISS-02).
+	// The reader requests one extra entry to detect overflow.
 	maxBucketEntries = 4096
 )
 
@@ -653,10 +652,19 @@ func classifyBucketEntry(ctx context.Context, dir string, entry os.DirEntry) (en
 		if errors.Is(err, os.ErrNotExist) {
 			return entryChanged, nil
 		}
-		return 0, fmt.Errorf("stat fixture %s: %w", entry.Name(), err)
+		return 0, escapedError{fmt.Errorf("stat fixture %s: %w", entry.Name(), err)}
 	}
 	return modeClass(typ, info.Mode()), nil
 }
+
+// escapedError renders the full diagnostic safely while retaining its error chain.
+type escapedError struct{ cause error }
+
+// Error escapes control characters in both the fixture context and the underlying error.
+func (e escapedError) Error() string { return escapeControl(e.cause.Error()) }
+
+// Unwrap exposes the original diagnostic for errors.Is and errors.As.
+func (e escapedError) Unwrap() error { return e.cause }
 
 // modeClass classifies the observed mode, detecting when a listed regular file changed kind.
 func modeClass(listedType, mode os.FileMode) entryClass {

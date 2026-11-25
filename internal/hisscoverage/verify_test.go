@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
 )
@@ -607,6 +608,29 @@ func TestFindingStringEscapesControlCharacters(t *testing.T) {
 	}
 	if strings.ContainsAny(err.Error(), "\x1b\n") || !strings.Contains(err.Error(), escapeControl(rawName)) {
 		t.Fatalf("verify error %q must name the fixture escaped", err.Error())
+	}
+}
+
+// TestClassifyBucketEntryEscapesStatError checks both copies of a listed name and the filesystem cause.
+func TestClassifyBucketEntryEscapesStatError(t *testing.T) {
+	const name = "bad\nname.go"
+	listing := fstest.MapFS{name: {}}
+	entries, err := listing.ReadDir(".")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("list fixture: entries=%v err=%v", entries, err)
+	}
+	// A NUL in the parent forces Lstat to fail even when running with elevated privileges.
+	dir := filepath.Join(t.TempDir(), "parent\x00")
+	_, err = classifyBucketEntry(t.Context(), dir, entries[0])
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != filepath.Join(dir, name) {
+		t.Fatalf("stat error must retain the original path error: %v", err)
+	}
+	if !errors.Is(err, pathErr.Err) {
+		t.Fatalf("stat error must retain the filesystem cause: %v", err)
+	}
+	if want := escapeControl("stat fixture " + name + ": " + pathErr.Error()); err.Error() != want {
+		t.Fatalf("stat error = %q, want %q", err.Error(), want)
 	}
 }
 
