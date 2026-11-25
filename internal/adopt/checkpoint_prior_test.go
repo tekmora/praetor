@@ -24,10 +24,14 @@ func checkpointFixtureDir(rel string) string {
 // never the current one.
 func firstPriorCheckpointText(t *testing.T, rel string) string {
 	t.Helper()
-	if rel == checkpointSessionModule {
-		return shippedCheckpointText(t, rel) // Newly introduced module has no prior release.
+	name := "promote-14." + path.Base(rel)
+	switch rel {
+	case checkpointLauncher:
+		name = "proven-339.python.sh"
+	case checkpointSessionModule:
+		name = "hook-findings.checkpoint_session.py"
 	}
-	return string(readFixtureDir(t, checkpointFixtureDir(rel))["promote-14."+path.Base(rel)])
+	return mustRead(t, filepath.Join(checkpointFixtureDir(rel), name))
 }
 
 // Each bundle file's digest set is replayable in both directions against its fixtures.

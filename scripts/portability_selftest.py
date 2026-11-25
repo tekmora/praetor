@@ -41,6 +41,8 @@ SUITES = (
     Path(".config/lefthook/scripts/test_security_scope.py"),
     Path(".config/lefthook/scripts/test_hooks.py"),
     Path(".config/lefthook/scripts/test_checkpoint.py"),
+    Path(".config/lefthook/scripts/test_checkpoint_session.py"),
+    Path(".config/agent/hooks/test_block_evasion.py"),
     Path("scripts/test_checkpoint_hooks.py"),
     Path("scripts/test_praetor_hook.py"),
     Path("scripts/test_cloud_bootstrap.py"),

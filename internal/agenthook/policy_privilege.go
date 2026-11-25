@@ -204,7 +204,7 @@ func privilegeScriptPrefix() string {
 func protectedPrivilegeInvocation() string {
 	engine := `(?:` + quotedPrivilegeProgram("praetorctl") + `|` + quotedPrivilegeProgram("standardsctl") + `)`
 	action := `(?:adopt|conform|bootstrap|needs` + shellBlank + `(?:scan|report|migrate|epic))`
-	target := engine + shellBlank + action + privilegeEnd + `[^;\n|]*\bdev[/\\]?(?:[ \t\r\n;&|(){}\x22\x27]|$)`
+	target := engine + shellBlank + action + shellBlank + devRootOperand + `(?:[ \t\r\n;&|(){}\x22\x27]|$)`
 	script := `(?:` + privilegeScriptPrefix() + `)*` + `(?:\\?[\x22\x27])?` + target
 	parts := make([]string, 0, len(privilegeNames))
 	for _, name := range privilegeNames[:4] {

@@ -1,0 +1,5 @@
+type: fixed
+title: >-
+  Limit privilege refusals to adoption and related operations targeting the
+  development root. Ordinary elevated commands such as sudo apt update are
+  allowed, and elevated builds follow heavy-step admission.

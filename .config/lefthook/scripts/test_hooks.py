@@ -809,13 +809,13 @@ class GitHooks(unittest.TestCase):
         command(self.repo, "git", "config", "user.email", "hook@example.test")
         for path in (".config/lefthook", ".config/agent/hooks"):
             shutil.copytree(ROOT / path, self.repo / path)
-        shutil.copy(ROOT / "lefthook.yml", self.repo / "lefthook.yml")
-        # Fixture policy self-tests are data, not another recursive full suite.
+        for path in ("lefthook.yml", "internal/agenthook/testdata/pre-tool/cases.json",
+                     "internal/agenthook/testdata/privilege-wrappers.json"):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / path, self.repo / path)
         for self_test in ("test_hooks.py", "test_checkpoint.py", "test_security_scope.py", "test_race_packages.py"):
-            (self.repo / f".config/lefthook/scripts/{self_test}").write_text(
-                'print("fixture hook self-tests passed")\n', newline="\n")
-        (self.repo / "README.md").write_text("# Fixture\n", newline="\n")
-        for name, content in initial_files:
+            self.write(f".config/lefthook/scripts/{self_test}", 'print("fixture hook self-tests passed")\n', stage=False)
+        for name, content in (("README.md", "# Fixture\n"), *initial_files):
             self.write(name, content, stage=False)
         command(self.repo, "git", "add", ".")
         command(self.repo, "git", "commit", "-q", "-s", "-m", "chore: initialize fixture")
@@ -5859,6 +5859,16 @@ class HookInterpreter(unittest.TestCase):
             broken = subprocess.run([shell, str(bare)], input=b"", capture_output=True,
                                     timeout=60, check=False)
             self.assertNotEqual(broken.returncode, 0, broken.stdout + broken.stderr)
+
+    def test_hook_suites_include_session_ownership_and_command_policy(self):
+        """The policy snapshot and the Make target both schedule the PR's regression suites."""
+        commands = self_test_commands(ROOT)
+        makefile = (ROOT / "Makefile").read_text()
+        target = makefile.split("\nhooks-test:\n", 1)[1].split("\n\n", 1)[0]
+        for suite in (".config/lefthook/scripts/test_checkpoint_session.py",
+                      ".config/agent/hooks/test_block_evasion.py"):
+            self.assertIn([sys.executable, "-B", suite], commands)
+            self.assertIn(f"\tpython3 -B {suite}", target.splitlines())
 
     def test_self_tests_run_under_the_interpreter_running_the_hook(self):
         with tempfile.TemporaryDirectory() as directory:

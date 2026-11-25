@@ -1417,6 +1417,7 @@ func warnPreservedCheckpoint(s *adoptSession, ready, written bool) {
 // TestPriorEvasionHookDigests_Boundary_CurrentRenderingRecorded fails until a changed rendering
 // is recorded here, so the next release still refreshes it (evasion_prior_test.go).
 var priorEvasionHookDigests = map[string]string{
+	"82c30355c7227be33b09661da4d3bdd63557ad9fdcce74cf1eaa4a603fe2cdfc": "whole development-root operands and optional xargs line limit",
 	"384d00d977ddad10a38de7e4ab61357d0a4604eb965020077a835854e0cf53ea": "hook findings with bounded Git command segments",
 	"6c6f93592ceb1781566f9862c45fc645c59bf8d232074797c1f27ffd3d67691c": "refuse commit/am argument lists with runtime splitting",
 	"07b82432098bf77cfbaa590d926183831786af235b577a2a8ca9f9d1e68056aa": "splitting Git option values retain uncertainty before the subcommand",
@@ -1538,7 +1539,7 @@ func (s *adoptSession) lefthookConfigIsPraetor(ctx context.Context) bool {
 		return false
 	}
 	match := matchCurrentLefthook(data, shape)
-	return match.exact && (!match.checkpoint || checkpointFilesPresent(s.repoPath))
+	return match.exact && (!match.checkpoint || checkpointFilesPresent(ctx, s.repoPath))
 }
 
 // resolveHooksDirForInstall asks git for the hooks directory. Without git on PATH it

@@ -1196,6 +1196,11 @@ class NativeLefthook(unittest.TestCase):
         record = self.root / ".git/praetor-checkpoint/sessions" / (ADAPTER.session_hash_for("owned-session") + ".json")
         self.assertEqual(json.loads(record.read_text()), [str(own.resolve())])
         self.assertNotIn("owned-session", record.read_text())
+        aged = time.time() - PLANNER.WORKTREE_ACTIVITY_WINDOW - 1
+        os.utime(record, (aged, aged))
+        for session, command in (("owned-session", str(own)), ("other-session", "pwd")):
+            activity = self.engine_checkpoint("post-tool", session, {"command": command})
+            self.assertEqual(activity.returncode, 0, activity.stdout + activity.stderr)
         result = self.engine_checkpoint("stop", "owned-session")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn(str(own.resolve()), result.stderr)  # resolved: Windows temp paths come back in 8.3 short form
@@ -1247,13 +1252,16 @@ class NativeLefthook(unittest.TestCase):
                     break
                 time.sleep(0.01)
             pid = int((scratch / "pid").read_text())
+            created = time.time_ns()
             other = self.linked_worktree(self.root / ".claude/worktrees/other", "checkpoint/other")
             for index, parent in enumerate((self.root, other)):
-                gate = self.linked_worktree(parent / f".standards/worktrees/gate-{pid}-1", f"checkpoint/live-{index}")
+                gate = self.linked_worktree(parent / f".standards/worktrees/gate-{pid}-{created}", f"checkpoint/live-{index}")
+                with mock.patch.object(PLANNER, "_trusted_gate_executable", return_value=True):
+                    self.assertTrue(PLANNER._is_gate_scratch(gate, {parent.resolve()}))
                 (gate / "README.md").write_text("live gate dirty\n")
             result = self.engine_checkpoint("stop", "live-session")
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-            self.assertIn(f"gate owner pid {pid}", result.stderr)
+            self.assertIn(f"gate owner pid {pid} is not a live praetorctl gate run", result.stderr)
         finally:
             (scratch / "done").write_text("done\n")
             runner.join(timeout=5)

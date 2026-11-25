@@ -81,7 +81,7 @@ type wrapperSpec struct {
 // make` and `systemd-run --user --scope -p MemoryMax=8G -- go test ./...` are judged as make
 // and go test. Required data arguments follow installed coreutils/findutils
 // --help, util-linux --help, time(1), and Bash help. Optional xargs arguments
-// (-e/-i/-l, --eof/--replace) attach to their option; no following word consumed.
+// (-e/-i/-l, --eof/--replace/--max-lines) attach to their option; no following word consumed.
 // chrt's priority is optional and numeric; taskset's mask remains positional.
 var admissionWrappers = map[string]wrapperSpec{
 	"chrt":    {values: []string{"-T", "--sched-runtime", "-P", "--sched-period", "-D", "--sched-deadline"}, positional: 1, optionalPriority: true},
@@ -100,7 +100,7 @@ var admissionWrappers = map[string]wrapperSpec{
 	"taskset": {positional: 1},
 	"time":    {values: []string{"-f", "--format", "-o", "--output"}},
 	"timeout": {values: []string{"-k", "--kill-after", "-s", "--signal"}, positional: 1},
-	"xargs": {values: []string{"-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L", "--max-lines", "-n", "--max-args",
+	"xargs": {values: []string{"-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L", "-n", "--max-args",
 		"-P", "--max-procs", "-s", "--max-chars", "--process-slot-var"}},
 }
 
@@ -315,7 +315,7 @@ func (c *admissionCheck) segment(ctx context.Context, workDir string, words []st
 			step.name, step.shape, step.args = name, shape, words[i+1:]
 			return c.judgeStep(ctx, &step), step.notice
 		}
-		spec, wrapper := admissionWrappers[name]
+		spec, wrapper := admissionWrapper(name)
 		if !wrapper {
 			return "", ""
 		}
@@ -327,6 +327,15 @@ func (c *admissionCheck) segment(ctx context.Context, workDir string, words []st
 		i = next
 	}
 	return "", ""
+}
+
+// admissionWrapper shares launcher option arities with the protected adoption rule.
+func admissionWrapper(name string) (wrapperSpec, bool) {
+	if values, ok := privilegeLauncherValues[name]; ok {
+		return wrapperSpec{values: values}, true
+	}
+	spec, ok := admissionWrappers[name]
+	return spec, ok
 }
 
 // admitStep reports whether the command at i is `praetorctl admit` and, when it is, the index of

@@ -56,7 +56,7 @@ class OwnedSessionLock(unittest.TestCase):
     def test_transaction_release_failure_still_raises(self):
         """Keep transaction lock errors fatal even when replacement has committed."""
         with mock.patch.object(
-            sessions, "_release_session_lock", side_effect=HookError("transaction lock lost"),
+            sessions, "_release_owner_token", side_effect=HookError("transaction lock lost"),
         ), self.assertRaisesRegex(HookError, "transaction lock lost"):
             sessions._update_session_record(
                 self.directory, self.record, {str(self.directory)}, HookBudget(2)
@@ -68,19 +68,50 @@ class OwnedSessionLock(unittest.TestCase):
             self.assertEqual(len(list(self.lock.iterdir())), 1)
         self.assertFalse(self.lock.exists())
 
+    def run_lock_child(self, action):
+        """Run one lock operation in an independent interpreter against the fixture."""
+        setup = ("import os, sys; from pathlib import Path; import checkpoint_session as s; "
+                 "lock = Path(sys.argv[1]); ")
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", setup + action, str(self.lock)],
+            cwd=Path(__file__).parent, timeout=2, check=False, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_second_process_cannot_remove_live_holder(self):
         """Refuse contention in a separate interpreter without changing the holder."""
         with sessions._session_update_lock(self.directory, self.record, HookBudget(2)):
+            self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
             before = list(self.lock.iterdir())
-            code = ("import sys; from pathlib import Path; import checkpoint_session as s; "
-                    "assert not s._acquire_session_lock(Path(sys.argv[1]))")
-            result = subprocess.run(
-                [sys.executable, "-B", "-c", code, str(self.lock)],
-                cwd=Path(__file__).parent, timeout=2, check=False, capture_output=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIsNone(sessions._acquire_session_lock(self.lock))
+            self.run_lock_child("sys.exit(s._acquire_session_lock(lock) is not None)")
             self.assertEqual(list(self.lock.iterdir()), before)
             self.assertEqual(len(before), 1)
+
+    def test_crashed_owner_can_be_reclaimed_after_expiry(self):
+        """Recover the abandoned directory token after its kernel guard is released."""
+        self.run_lock_child("held = s._acquire_session_lock(lock); os._exit(0 if held else 1)")
+        self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
+        with sessions._session_update_lock(self.directory, self.record, HookBudget(2)):
+            self.assertTrue(self.lock.is_dir())
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    @unittest.skipIf(os.name == "nt", "Windows holds an exclusive delete-on-close handle")
+    def test_delayed_posix_opener_cannot_claim_an_unlinked_inode(self):
+        """Leave a replacement guard untouched when locking an obsolete descriptor."""
+        lockf = os.lockf
+
+        def lock_after_replacement(fd, command, length):
+            """Resume the paused opener after the named guard was replaced."""
+            (guard,) = self.directory.iterdir()
+            guard.unlink()
+            guard.write_bytes(b"replacement")
+            return lockf(fd, command, length)
+
+        with mock.patch.object(sessions.os, "lockf", side_effect=lock_after_replacement):
+            self.assertIsNone(sessions._acquire_session_lock(self.lock))
+        (replacement,) = self.directory.iterdir()
+        self.assertEqual(replacement.read_bytes(), b"replacement")
 
     def test_old_holder_cannot_remove_reclaimer_lock(self):
         """Fail the old holder while preserving the replacement owner's token."""
@@ -89,7 +120,7 @@ class OwnedSessionLock(unittest.TestCase):
             sessions._session_update_lock(self.directory, self.record, HookBudget(2)),
         ):
             self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
-            self.assertTrue(sessions._acquire_session_lock(self.lock))
+            self.assertTrue(sessions._acquire_owner_token(self.lock))
             replacement = list(self.lock.iterdir())
         self.assertEqual(list(self.lock.iterdir()), replacement)
         self.assertEqual(len(replacement), 1)
@@ -103,7 +134,7 @@ class OwnedSessionLock(unittest.TestCase):
             for owner in list(self.lock.iterdir())[:2]:
                 owner.unlink()
             self.lock.rmdir()
-            self.assertTrue(sessions._acquire_session_lock(self.lock))
+            self.assertTrue(sessions._acquire_owner_token(self.lock))
             return set()
 
         with mock.patch.object(sessions, "_read_session_record", side_effect=lose_lock), \
@@ -125,16 +156,16 @@ class OwnedSessionLock(unittest.TestCase):
         """Recover an expired lock beside an abandoned reclaim token."""
         tombstone = self.directory / "session.lock.abandoned.reclaimed"
         tombstone.write_text("old owner")
-        token = sessions._acquire_session_lock(self.lock)
+        token = sessions._acquire_owner_token(self.lock)
         self.assertTrue(token)
         self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
-        self.assertTrue(sessions._acquire_session_lock(self.lock))
+        self.assertTrue(sessions._acquire_owner_token(self.lock))
         self.assertEqual(len(list(self.lock.iterdir())), 1)
         self.assertEqual(tombstone.read_text(), "old owner")
 
     def test_two_reclaimers_cannot_both_claim_observed_owner(self):
         """Interleave stale observations so only the first reclaimer acquires."""
-        self.assertTrue(sessions._acquire_session_lock(self.lock))
+        self.assertTrue(sessions._acquire_owner_token(self.lock))
         self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
         lstat = Path.lstat
         replacement = []
@@ -144,13 +175,50 @@ class OwnedSessionLock(unittest.TestCase):
             info = lstat(path, *args, **kwargs)
             if path == self.lock and not replacement:
                 with mock.patch.object(Path, "lstat", lstat):
-                    replacement.append(sessions._acquire_session_lock(self.lock))
+                    replacement.append(sessions._acquire_owner_token(self.lock))
             return info
 
         with mock.patch.object(Path, "lstat", competing_reclaimer):
-            self.assertFalse(sessions._acquire_session_lock(self.lock))
+            self.assertFalse(sessions._acquire_owner_token(self.lock))
         self.assertTrue(replacement[0])
         self.assertEqual(len(list(self.lock.iterdir())), 1)
+
+    def test_suspended_replace_keeps_kernel_lock_against_writers_and_pruning(self):
+        """Try both competing operations after the writer's final token check."""
+        self.record.write_text("[]")
+        os.utime(self.record, (0, 0))
+        replace = os.replace
+
+        def suspended(source, target):
+            """Run the contender while the original writer is inside replace."""
+            self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
+            sessions._prune_session_record(self.record, time.time(), HookBudget(2))
+            self.assertTrue(self.record.is_file())
+            self.assertIsNone(sessions._acquire_session_lock(self.lock))
+            replace(source, target)
+
+        with mock.patch.object(sessions.os, "replace", side_effect=suspended):
+            sessions._update_session_record(
+                self.directory, self.record, {str(self.directory)}, HookBudget(2)
+            )
+        self.assertEqual(json.loads(self.record.read_text()), [str(self.directory)])
+
+    def test_suspended_prune_holds_kernel_lock_through_unlink(self):
+        """Attempt to acquire the expired token inside the record removal call."""
+        self.record.write_text("[]")
+        os.utime(self.record, (0, 0))
+        unlink = Path.unlink
+
+        def suspended(path, *args, **kwargs):
+            """Expose the interval between the pruner's last check and unlink."""
+            if path == self.record:
+                self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
+                self.assertIsNone(sessions._acquire_session_lock(self.lock))
+            return unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", suspended):
+            sessions._prune_session_record(self.record, time.time(), HookBudget(2))
+        self.assertFalse(self.record.exists())
 
     def test_loss_during_temporary_write_refuses_replace(self):
         """Recheck the owner after temporary output and before atomic replacement."""
@@ -161,7 +229,7 @@ class OwnedSessionLock(unittest.TestCase):
             """Steal an expired lock while the writer prepares its temporary file."""
             handle = temporary(*args, **kwargs)
             self.age_lock(sessions.SESSION_LOCK_STALE_SECONDS + 1)
-            self.assertTrue(sessions._acquire_session_lock(self.lock))
+            self.assertTrue(sessions._acquire_owner_token(self.lock))
             return handle
 
         with mock.patch.object(sessions.tempfile, "NamedTemporaryFile", side_effect=lose_lock), \

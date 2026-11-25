@@ -460,6 +460,9 @@
   {"name": "privilege-ordinary-279", "allow": true, "payload": {"tool_input": {"command": "run0 true"}}},
   {"name": "privilege-ordinary-280", "allow": true, "payload": {"tool_input": {"command": "su -lc 'id'"}}},
   {"name": "privilege-ordinary-281", "allow": true, "payload": {"tool_input": {"command": "sudo praetorctl adopt /home/adopter/dev/organization/repo"}}},
+  {"name": "privilege-allow-widget-dev-leaf", "allow": true, "payload": {"tool_input": {"command": "sudo praetorctl adopt /srv/dev/widget-dev"}}},
+  {"name": "privilege-allow-quoted-space-leaf", "allow": true, "payload": {"tool_input": {"command": "sudo praetorctl adopt '/srv/dev/widget dev'"}}},
+  {"name": "privilege-protected-bare-dev", "allow": false, "payload": {"tool_input": {"command": "sudo praetorctl adopt dev"}}},
   {"name": "privilege-ordinary-282", "allow": true, "payload": {"tool_input": {"command": "echo '\"sudo\" \"praetorctl\" adopt /home/adopter/dev'"}}},
   {"name": "deny-chained-long-option-runtime", "allow": false, "payload": {"tool_input": {"command": "env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 env --ch env A=1 praetorctl adopt /home/u/dev"}}}
 ]

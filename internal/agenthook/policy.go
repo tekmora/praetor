@@ -876,10 +876,19 @@ func (r denyRule) matchesCommand(text string, segments []shellSpan) bool {
 	return false
 }
 
+// devRootLeaf names the protected component with either optional trailing separator.
+const devRootLeaf = `dev[/\\]?`
+
+// devRootOperand consumes complete preceding words and matches one literal path operand.
+const devRootOperand = `(?:` + privilegeWord + shellBlank + `)*(?:` +
+	`(?:[^ \t\n;&|()\x60\x22\x27]*[/\\])?` + devRootLeaf + `|` +
+	`\x22(?:[^\x22\n]*[/\\])?` + devRootLeaf + `\x22|` +
+	`\x27(?:[^\x27\n]*[/\\])?` + devRootLeaf + `\x27)`
+
 // builtinDevRoot is the generic half of the topology rule: it names no organisation. The dev
 // root ends in either path separator, so a Windows path is refused like a POSIX one (#200).
 // Organisation containers are operator data and arrive through the operator deny list.
-const builtinDevRoot = `(?i)(standardsctl|praetorctl)\s+(adopt|conform|bootstrap|needs\s+(scan|report|migrate|epic))\b.*\bdev[/\\]?(\s|$)`
+const builtinDevRoot = `(?i)(standardsctl|praetorctl)\s+(adopt|conform|bootstrap|needs\s+(scan|report|migrate|epic))\s+` + devRootOperand + `(\s|$)`
 
 // BuiltinRule is one built-in command rule as source text: the Python-compatible pattern
 // the policy compiles and the invariant a match reports. A ReadOnlyExempt rule judges the

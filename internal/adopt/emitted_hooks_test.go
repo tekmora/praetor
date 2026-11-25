@@ -523,8 +523,9 @@ func assertEmittedPairItemLines(t *testing.T, indent string, item pyToken, fits 
 
 // TestEmittedPairGroupingPreservesPolicy checks all exported policy values and detects a planted rule change.
 func TestEmittedPairGroupingPreservesPolicy(t *testing.T) {
-	python, script := emittedInterceptor(t)
-	current := loadInterceptorModule(t, python, script)
+	// Compare the two renderings of the same policy on either side of the layout change.
+	python := testsupport.PythonInterpreter(t)
+	current := renderedModule(t, python, mustRead(t, filepath.Join(priorEvasionFixtures, "hook-findings-round2.block_evasion.py.txt")))
 	before := renderedModule(t, python, mustRead(t, filepath.Join(priorEvasionFixtures, "before-codacy-grouping.block_evasion.py.txt")))
 	if !reflect.DeepEqual(before, current) {
 		t.Fatal("parenthesizing collection items changed the emitted policy values")
@@ -544,30 +545,39 @@ func refreshNativeEvasionPatterns(t *testing.T) {
 	t.Helper()
 	guard := filepath.Join("..", "..", filepath.FromSlash(evasionHookFile))
 	text := mustRead(t, guard)
-	before, rest, found := strings.Cut(text, "BLOCKED_PATTERNS = [\n")
-	_, after, closed := strings.Cut(rest, "\n]\n")
-	if !found || !closed {
-		t.Fatal("native guard has no delimited BLOCKED_PATTERNS declaration")
-	}
-	var patterns strings.Builder
+	var patterns, topology strings.Builder
 	rules := agenthook.BuiltinRules()
 	for index, rule := range rules {
-		if rule.Invariant != "HISS" {
+		token := pyToken{rule.Source, pyRaw}
+		if rule.Invariant == "DEV-01" {
+			topology.WriteString("    " + token.whole() + ",\n")
 			continue
 		}
-		token := pyToken{rule.Source, pyRaw}
 		if index == len(rules)-2 {
 			patterns.WriteString("    (\n        " + strings.Join(token.literals(80), "\n        ") + "\n    ),\n")
 		} else {
 			patterns.WriteString("    " + token.whole() + ",\n")
 		}
 	}
-	text = before + "BLOCKED_PATTERNS = [\n" + patterns.String() + "]\n" + after
-	before, rest, found = strings.Cut(text, "RULE_PREFILTERS = ")
-	_, after, closed = strings.Cut(rest, "\n")
+	text = replaceNativePatternList(t, text, "BLOCKED_PATTERNS", patterns.String())
+	text = replaceNativePatternList(t, text, "TOPOLOGY_PATTERNS", topology.String())
+	before, rest, found := strings.Cut(text, "RULE_PREFILTERS = ")
+	_, after, closed := strings.Cut(rest, "\n")
 	if !found || !closed {
 		t.Fatal("native guard has no complete RULE_PREFILTERS declaration")
 	}
 	text = before + "RULE_PREFILTERS = {}\n" + after
 	mustWrite(t, guard, text)
+}
+
+// replaceNativePatternList replaces one generated declaration, preserving the surrounding adapter.
+func replaceNativePatternList(t *testing.T, text, name, patterns string) string {
+	t.Helper()
+	start := name + " = [\n"
+	before, rest, found := strings.Cut(text, start)
+	_, after, closed := strings.Cut(rest, "\n]\n")
+	if !found || !closed {
+		t.Fatalf("native guard has no delimited %s declaration", name)
+	}
+	return before + start + patterns + "]\n" + after
 }

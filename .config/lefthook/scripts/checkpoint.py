@@ -97,7 +97,7 @@ def _command_timeout(cap):
 
 @contextlib.contextmanager
 def _active_command_budget(deadline):
-    """Install a thread-local HookBudget until deadline for nested Git calls."""
+    """Share the deadline across nested Git and process identity lookups."""
     previous = getattr(COMMAND_BUDGET, "active", None)
     COMMAND_BUDGET.active = HookBudget(max(0, deadline - time.monotonic()))
     try:
@@ -745,7 +745,7 @@ def _gate_process_identity(pid):
     env = dict(os.environ, LC_ALL="C")
     raw = run_bounded(
         ["ps", "-p", str(pid), "-o", "uid=", "-o", "lstart=", "-o", "comm="],
-        timeout=1,
+        timeout=_command_timeout(WORKTREE_COMMAND_TIMEOUT),
         max_output=MAX_GATE_CMDLINE,
         grace=0.1,
         env=env,
@@ -776,7 +776,7 @@ def _gate_process_argv(pid, env):
     except OSError:
         command = run_bounded(
             ["ps", "-p", str(pid), "-o", "args="],
-            timeout=1,
+            timeout=_command_timeout(WORKTREE_COMMAND_TIMEOUT),
             max_output=MAX_GATE_CMDLINE,
             grace=0.1,
             env=env,
@@ -928,7 +928,7 @@ def _public_change_reason(path):
         return [str(error)]
 
 
-def _content_in_base(path, cfg, base=None, *, head="HEAD"):
+def _content_in_base(path, cfg, base=None, *, head):
     """Whether the worktree's net change since its merge base is already in the remote base.
 
     A branch that landed through a squash or a train has neither a remote copy of its commits
@@ -961,10 +961,14 @@ def _reverse_applies(path, base_ref, patch):
     return True
 
 
-def _landed(path, cfg):
+def _landed(path, cfg, head):
     """_content_in_base, failing closed: a check that cannot run leaves the worktree judged."""
     try:
-        return _content_in_base(path, cfg)
+        return (
+            bool(OID.fullmatch(head))
+            and _content_in_base(path, cfg, head=head)
+            and _head_matches(path, head)
+        )
     except (CheckpointError, ValueError, OSError):
         return False
 
@@ -1031,15 +1035,15 @@ def _worktree_pr_needed(path, cfg, reasons):
 def _judge_worktree(root, cfg, entry, path, deadline):
     """Return one worktree's unfinished reasons and the kind of PR check it needs."""
     if time.monotonic() >= deadline:
-        return (
-            entry,
-            ["pull request state not verified (worktree check budget exhausted)"],
-            "",
+        reasons = [entry["gate_reason"]] if entry.get("gate_reason") else []
+        reasons.append(
+            "pull request state not verified (worktree check budget exhausted)"
         )
+        return entry, reasons, ""
     reasons = _public_change_reason(path)
     if entry.get("gate_reason"):
         reasons.append(entry["gate_reason"])
-    if not reasons and _landed(path, cfg):
+    if not reasons and _landed(path, cfg, entry.get("HEAD", "")):
         return entry, [], ""
     needs_pr = _worktree_pr_needed(path, cfg, reasons)
     return entry, reasons, needs_pr
@@ -1103,8 +1107,11 @@ def _worktree_landed_by_pull_request(entry, cfg, marks):
     if not isinstance(head, str) or not OID.fullmatch(head):
         return False
     path = Path(entry["path"])
-    if not _landed_by_pull_request(path, cfg, marks, head):
-        return False
+    return _landed_by_pull_request(path, cfg, marks, head) and _head_matches(path, head)
+
+
+def _head_matches(path, head):
+    """Verify the worktree still points at the commit whose content was judged."""
     try:
         current = _git(path, "rev-parse", "HEAD", timeout=WORKTREE_COMMAND_TIMEOUT)
         return current.decode().strip() == head
@@ -1155,11 +1162,12 @@ def _git_common_dir(root):
 def _unfinished_worktree_records(root, cfg):
     """Observe recent worktrees; return records, skip note, unverified count."""
     deadline = time.monotonic() + WORKTREE_CHECK_BUDGET
-    common_dir = _git_common_dir(root)
-    owned = _session_owned_worktrees(common_dir)
-    candidates = _recent_unnamed_worktrees(
-        root, common_dir, _open_worktree_text(root), time.time(), owned=owned
-    )
+    with _active_command_budget(deadline):
+        common_dir = _git_common_dir(root)
+        owned = _session_owned_worktrees(common_dir)
+        candidates = _recent_unnamed_worktrees(
+            root, common_dir, _open_worktree_text(root), time.time(), owned=owned
+        )
     records, pr_candidates = _judge_worktree_candidates(root, cfg, candidates, deadline)
     states, skipped = _pull_request_states(
         root, cfg, [item[0]["branch"] for item in pr_candidates], deadline

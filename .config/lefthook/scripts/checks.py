@@ -248,8 +248,10 @@ def golangci_lint_command(directory, packages):
 SELF_TESTS = (".config/lefthook/scripts/test_hooks.py",
               ".config/lefthook/scripts/test_security_scope.py",
               ".config/lefthook/scripts/test_checkpoint.py",
+              ".config/lefthook/scripts/test_checkpoint_session.py",
               ".config/lefthook/scripts/test_race_packages.py")
-OPTIONAL_SELF_TESTS = ("scripts/test_checkpoint_hooks.py", "scripts/test_praetor_hook.py")
+OPTIONAL_SELF_TESTS = (".config/agent/hooks/test_block_evasion.py",
+                       "scripts/test_checkpoint_hooks.py", "scripts/test_praetor_hook.py")
 SPELLING_SELF_TEST = ".config/lefthook/scripts/test_spelling.py"
 
 

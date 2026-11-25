@@ -149,6 +149,19 @@ func TestAdmissionPrivilegePrograms(t *testing.T) {
 	}
 }
 
+// TestAdmissionInsidePrivilegeLauncher judges the executable after the launcher's options.
+func TestAdmissionInsidePrivilegeLauncher(t *testing.T) {
+	check := admissionPolicy(t).admission
+	for _, launcher := range []string{"sudo -u root", "doas -u root", "pkexec --user root", "run0 --user root"} {
+		if got := check.judge(launcher + " go build ./..."); got.Outcome != Deny || !strings.Contains(got.Reason, "praetorctl admit") {
+			t.Errorf("%s build: want admission refusal, got %+v", launcher, got)
+		}
+		if got := check.judge(launcher + " printf ok"); got.Outcome != Allow {
+			t.Errorf("%s printf: want allow, got %+v", launcher, got)
+		}
+	}
+}
+
 func TestRegistrationPrivilegeOpenCodeGap(t *testing.T) {
 	if _, err := ParseArguments("opencode", "pre-tool"); err == nil {
 		t.Fatal("OpenCode now serves pre-tool: extend privilege replay and update the documented gap")

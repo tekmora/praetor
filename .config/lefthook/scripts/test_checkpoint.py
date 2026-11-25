@@ -107,7 +107,7 @@ class SessionModuleTests(unittest.TestCase):
             "rows=[]\n"
             "for size in (1 << 18, 1 << 19, 1 << 20):\n"
             " text = '\\\"' + 'a' * (size - 1)\n"
-            " with mock.patch.object(s.Path, 'resolve', side_effect=OSError('planted')):\n"
+            " with mock.patch.object(s.Path, 'resolve', lambda path: path):\n"
             "  start=time.process_time(); result=s._path_matches('/worktree', text); "
             "rows.append((size, time.process_time()-start, result))\n"
             "print(rows); assert not any(row[2] for row in rows)\n"
@@ -211,10 +211,24 @@ class SessionOwnershipRegressions(unittest.TestCase):
         """Verify stop session initialization does not overwrite concurrent tool updates."""
         self.race_writers(True)
 
+    def test_repeated_activity_survives_another_sessions_sweep(self):
+        """A second session cannot prune ownership refreshed across the age boundary."""
+        self.record_path(self.paths[0])
+        old = time.time() - sessions.WORKTREE_ACTIVITY_WINDOW - 1
+        os.utime(self.record, (old, old))
+        self.record_path(self.paths[0])
+        sessions.ensure_session_record(self.root, sessions.session_hash_for("other"), common.HookBudget(2))
+        sessions.ensure_session_record(self.root, self.identity, common.HookBudget(2))
+        with mock.patch.dict(os.environ, {checkpoint.SESSION_ENV: self.identity}):
+            self.assertEqual(checkpoint._session_owned_worktrees(self.common), {str(self.paths[0])})
+
     def test_relative_shell_and_file_paths_are_owned(self):
         """Verify relative shell and file paths resolve against cwd into owned worktrees."""
         for tool_input in ({"command": "git worktree add ../one"},
                            {"file_path": "../one/file.txt"},
+                           {"command": f"sort --output={self.paths[0]}/result input"},
+                           {"command": "sort --output=../one/result input"},
+                           {"command": f"OUTPUT={self.paths[0]}/result sort input"},
                            {"command": "git -C ../one status"}):
             with self.subTest(tool_input=tool_input):
                 self.record.write_text("[]")
@@ -284,7 +298,7 @@ class SessionOwnershipRegressions(unittest.TestCase):
         with mock.patch.object(sessions.os, "replace", side_effect=OSError("replace failed")):
             with self.assertRaisesRegex(OSError, "replace failed"):
                 sessions._write_session_record(self.directory, self.record, set())
-            self.assertEqual(list(self.directory.iterdir()), [])
+            self.assertFalse([p for p in self.directory.iterdir() if not p.name.startswith(".session-guard-")])
             with mock.patch.object(Path, "unlink", side_effect=PermissionError("cleanup failed")), \
                     self.assertRaisesRegex(PermissionError, "cleanup failed"):
                 sessions._write_session_record(self.directory, self.record, set())
@@ -329,7 +343,8 @@ class SessionOwnershipRegressions(unittest.TestCase):
             sessions, "_acquire_session_lock", wraps=acquire
         ) as locked:
             sessions._write_session_record(self.directory, self.record, set())
-        self.assertEqual(locked.call_args_list, [mock.call(records["old"].with_suffix(".lock"))])
+        self.assertEqual(locked.call_args_list, [mock.call(self.record.with_suffix(".lock")),
+                                                 mock.call(records["old"].with_suffix(".lock"))])
         self.assertFalse(records["old"].exists())
         self.assertTrue(records["fresh"].exists())
         self.assertTrue(records["boundary"].exists())
@@ -510,6 +525,21 @@ class WorktreeHeadRegressions(unittest.TestCase):
                 {"topic": {("MERGED", "c" * 40, "main")}}, time.monotonic() + 1)
         self.assertEqual(reasons, ["1 commit(s) not on any remote"])
 
+    def test_direct_content_verdict_requires_the_listed_head(self):
+        """Only clear direct landed content when the worktree remains at that commit."""
+        head = "a" * 40
+        entry = {"path": "/tree", "branch": "topic", "HEAD": head}
+        path = Path(entry["path"])
+        for current, reasons in ((head, []), ("b" * 40, ["1 commit(s) not on any remote"])):
+            with self.subTest(current=current), mock.patch.object(
+                checkpoint, "_public_change_reason", return_value=[]
+            ), mock.patch.object(checkpoint, "_content_in_base", return_value=True) as content, \
+                    mock.patch.object(checkpoint, "_git", return_value=current.encode()), \
+                    mock.patch.object(checkpoint, "_worktree_unpublished_count", return_value=1):
+                _, result, _ = checkpoint._judge_worktree(path, CONFIG, entry, path, time.monotonic() + 2)
+                self.assertEqual(result, reasons)
+                content.assert_called_once_with(path, CONFIG, head=head)
+
     def test_content_diff_uses_the_observed_head_in_every_git_call(self):
         """Verify _content_in_base passes the explicit observed head to every Git command."""
         head = "a" * 40
@@ -583,6 +613,39 @@ class GateIdentityRegressions(unittest.TestCase):
         expected = (1000, Path("/usr/bin/standardsctl"), ["/usr/bin/standardsctl", "gate"])
         self.assertEqual(identity[1:], expected)
         self.assertTrue(all(call.kwargs["timeout"] <= 1 for call in run.call_args_list))
+
+    def test_discovery_shares_remaining_time_between_both_ps_calls_and_worktrees(self):
+        """Exhaust discovery during argv fallback and retain every unverified gate."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            paths = [root / ".standards/worktrees" / f"gate-{pid}-1" for pid in (123, 124)]
+            for path in paths:
+                path.mkdir(parents=True)
+            entries = [{"path": str(path)} for path in (root, *paths)]
+            elapsed = [0.0]
+
+            def slow_ps(argv, *, timeout, **kwargs):
+                """Advance by the granted timeout, failing the second lookup."""
+                elapsed[0] += timeout
+                if argv[-1] == "args=":
+                    raise common.HookError("ps timed out")
+                return os.fsencode(f"1000 Mon Nov  2 03:00:00 2026 {root / 'standardsctl'}")
+
+            with (
+                mock.patch.object(checkpoint, "WORKTREE_CHECK_BUDGET", 1.5),
+                mock.patch.object(checkpoint.time, "monotonic", side_effect=lambda: elapsed[0]),
+                mock.patch.object(checkpoint, "_git", return_value=os.fsencode(root)),
+                mock.patch.object(checkpoint, "_session_owned_worktrees", return_value=set()),
+                mock.patch.object(checkpoint, "_open_worktree_text", return_value=""),
+                mock.patch.object(checkpoint, "_listed_worktrees", return_value=entries),
+                mock.patch.object(Path, "readlink", side_effect=PermissionError),
+                mock.patch.object(Path, "open", side_effect=PermissionError),
+                mock.patch.object(checkpoint, "run_bounded", side_effect=slow_ps) as ps,
+            ):
+                unfinished, _, _ = checkpoint._unfinished_worktree_records(root, CONFIG)
+            self.assertEqual([call.kwargs["timeout"] for call in ps.call_args_list], [1, 0.5])
+            for (_, reasons), pid in zip(unfinished, (123, 124), strict=True):
+                self.assertIn(f"gate owner pid {pid} identity not verified", reasons)
 
 
 class AbandonedGateAdviceRegressions(unittest.TestCase):
