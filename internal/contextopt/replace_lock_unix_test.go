@@ -26,40 +26,25 @@ func TestReplacementRefusesBusyDirectoryWithoutStaging(t *testing.T) {
 	}
 }
 
+// TestFailedPublicationRetainsPrivateStagedText removes the observed destination
+// after staging and checks the recovery entry left by the locked publisher.
 func TestFailedPublicationRetainsPrivateStagedText(t *testing.T) {
-	dir := t.TempDir()
-	root, err := OpenDirectory(t.Context(), dir)
-	if err != nil {
+	root, dir := pinnedDirectory(t)
+	path := filepath.Join(dir, "target")
+	if err := os.WriteFile(path, []byte("previous"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := root.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	file, err := stageSnapshot(t.Context(), root, "private.pending", []byte("recover this content"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	// The caller observed a file which disappears before publication.
-	err = publishSnapshot(t.Context(), root, "missing", "private.pending", file, 0o644,
-		ReplaceOptions{Exists: true, Expected: []byte("previous"), Mode: 0o644})
-	if !errors.Is(err, os.ErrNotExist) {
+	var stage string
+	ctx := &stagedSnapshotContext{Context: t.Context(), root: root, hook: func(name string) error {
+		stage = name
+		return root.Remove("target")
+	}}
+	options := ReplaceOptions{Exists: true, Expected: []byte("previous"), Mode: 0o644}
+	err := replaceInRoot(ctx, root, "target", []byte("recover this content"), options, strictSnapshot)
+	if !errors.Is(err, os.ErrNotExist) || stage == "" {
 		t.Fatalf("missing source should fail before publishing: %v", err)
 	}
-	content, err := ReadRootSnapshot(t.Context(), root, "private.pending")
-	if err != nil || string(content) != "recover this content" {
-		t.Fatalf("failed publication lost staged content: %q, %v", content, err)
-	}
-	info, err := root.Stat("private.pending")
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("failed stage is not private: %v, %v", info, err)
-	}
+	assertScaffoldSnapshot(t, filepath.Join(dir, stage), "recover this content", 0o600)
 }
 
 // The snapshot directory's platform lock goes through util.LockExclusive, whose tests cover

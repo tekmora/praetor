@@ -3,9 +3,12 @@ package adopt
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/managedasset"
+	"github.com/cordanaLLM/praetor/internal/testsupport"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
@@ -62,6 +65,71 @@ func fixtureDigest(t *testing.T, name string, data []byte) string {
 func priorDigestSet(t *testing.T, text string) map[string]string {
 	t.Helper()
 	return map[string]string{fixtureDigest(t, "recorded text", []byte(text)): "fixture"}
+}
+
+// TestCompetingTextScaffoldCreations replays the same absence with matching and
+// conflicting renderings of an ordinary text scaffold.
+func TestCompetingTextScaffoldCreations(t *testing.T) {
+	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}}
+	sc := scaffold{rel: "ruleset.json", perm: filePerm, content: []byte("first rendering\n")}
+	path := filepath.Join(s.repoPath, sc.rel)
+	for range 2 {
+		if err := s.writeScaffold(t.Context(), path, sc); err != nil {
+			t.Fatalf("matching creation: %v", err)
+		}
+	}
+	sc.content = []byte("different rendering\n")
+	err := s.writeScaffold(t.Context(), path, sc)
+	if err == nil || !strings.Contains(err.Error(), "snapshot changed") {
+		t.Fatalf("competing creation returned %v, want snapshot conflict", err)
+	}
+	if got := mustRead(t, path); got != "first rendering\n" {
+		t.Fatalf("competing creation changed the winner to %q", got)
+	}
+	testsupport.RequireCreatedMode(t, path, sc.perm)
+}
+
+// TestTextCreationUnderRestrictiveUmask replays the creation case in an isolated
+// POSIX process so its mask cannot change the permissions of another test's files.
+func TestTextCreationUnderRestrictiveUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX umask")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const child = `umask 077 && exec "$1" -test.run='^TestCompetingTextScaffoldCreations$' -test.count=1`
+	if output, err := util.RunCommand(t.Context(), t.TempDir(), "sh", "-c", child, "umask-test", executable); err != nil {
+		t.Fatalf("creation under umask 077: %v: %s", err, output)
+	}
+}
+
+// TestMatchingCreationKeepsPrivateWinner checks that a matching creation under a
+// broader ceiling leaves the first creator's file and its access restrictions intact.
+func TestMatchingCreationKeepsPrivateWinner(t *testing.T) {
+	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}}
+	sc := scaffold{rel: "template", perm: 0o600, content: []byte("same\n")}
+	path := filepath.Join(s.repoPath, sc.rel)
+	if err := s.writeScaffold(t.Context(), path, sc); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.perm = filePerm
+	if err := s.writeScaffold(t.Context(), path, sc); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("matching creator replaced the winner: %v", err)
+	}
+	private, detail, err := util.OwnerOnlyAccess(path)
+	if err != nil || !private {
+		t.Fatalf("winner lost owner-only access: %s, %v", detail, err)
+	}
 }
 
 // TestConcurrentPriorScaffoldRefresh replays the same observed CRLF template in two

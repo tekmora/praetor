@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // ReplaceOptions binds a write to observed contents or explicit absence. Mode is
@@ -29,6 +31,7 @@ const (
 	observedSnapshot
 	scaffoldCeiling
 	scaffoldExact
+	scaffoldWritable
 )
 
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
@@ -77,6 +80,13 @@ func ReplaceRootSnapshot(ctx context.Context, root *os.Root, name string, data [
 	return replaceInRoot(ctx, root, name, data, options, strictSnapshot)
 }
 
+// ReplaceWritableScaffoldTextIn publishes ordinary text with the access rules of an
+// in-place writer. A creation observes the umask and a replacement requires write
+// access to the observed file. Matching publications need no write to that file.
+func ReplaceWritableScaffoldTextIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions) error {
+	return replaceSnapshotIn(ctx, root, rel, data, options, scaffoldWritable)
+}
+
 // validateSnapshotName requires a single file in the pinned directory.
 func validateSnapshotName(root *os.Root, name string) error {
 	if root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
@@ -94,22 +104,51 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 		return err
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
-	request := replacementRequest{ReplaceOptions: options, data: data, policy: policy}
+	request := replacementRequest{
+		ReplaceOptions: options, data: data, policy: policy,
+		requireWrite: policy == scaffoldWritable && options.Exists,
+	}
+	if policy == scaffoldWritable && !options.Exists {
+		request.Mode, err = creationMode(root, options.Mode)
+		if err != nil {
+			return err
+		}
+	}
 	mode, satisfied, err := request.verify(ctx, root, name)
 	if err != nil || satisfied {
 		return err
 	}
 	stage := ".praetor-" + rand.Text() + ".pending"
-	file, err := stageSnapshot(ctx, root, stage, data)
+	file, err := request.stageSnapshot(ctx, root, stage)
 	if err != nil {
 		return fmt.Errorf("stage snapshot (inspect %s): %w", stagedPath(root, stage), err)
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
-	if err := publishSnapshot(ctx, root, name, stage, file, mode, options); err != nil {
+	if err := request.publishSnapshot(ctx, root, name, stage, file, mode); err != nil {
 		err = errors.Join(err, file.Chmod(0o600))
 		return fmt.Errorf("publish snapshot (inspect %s): %w", stagedPath(root, stage), err)
 	}
 	return SyncDirectory(ctx, root)
+}
+
+// creationMode reads the kernel's creation permissions, including the parent directory's
+// default ACL, from an empty sibling. The payload stays in its private staging file.
+func creationMode(root *os.Root, ceiling os.FileMode) (mode os.FileMode, err error) {
+	if runtime.GOOS == "windows" {
+		// Windows represents only the read-only attribute and has no POSIX umask.
+		return ceiling, nil
+	}
+	name := ".praetor-" + rand.Text() + ".mode"
+	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, ceiling)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, file.Close(), root.Remove(name)) }()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return ceiling & info.Mode().Perm(), nil
 }
 
 // stagedPath names the staging entry the way the operator has to look for it. Every
@@ -137,7 +176,8 @@ func CreateRootSnapshot(ctx context.Context, root *os.Root, name string, data []
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
 	stage := ".praetor-" + rand.Text() + ".pending"
-	file, err := stageSnapshot(ctx, root, stage, data)
+	request := replacementRequest{data: data}
+	file, err := request.stageSnapshot(ctx, root, stage)
 	if err != nil {
 		return false, fmt.Errorf("stage snapshot %s (inspect %s): %w", name, stagedPath(root, stage), err)
 	}
@@ -210,13 +250,14 @@ func replacementReadLimit(options ReplaceOptions) int64 {
 // caller's snapshot. A strict verification needs only ReplaceOptions.
 type replacementRequest struct {
 	ReplaceOptions
-	data   []byte
-	policy snapshotPolicy
+	data         []byte
+	policy       snapshotPolicy
+	requireWrite bool
 }
 
 // isScaffold reports whether a concurrent publication can satisfy this request.
 func (r replacementRequest) isScaffold() bool {
-	return r.policy == scaffoldExact || r.policy == scaffoldCeiling
+	return r.policy == scaffoldExact || r.policy == scaffoldCeiling || r.policy == scaffoldWritable
 }
 
 // verify determines the publication mode from one pinned snapshot. It returns satisfied
@@ -240,10 +281,51 @@ func (r replacementRequest) verify(ctx context.Context, root *os.Root, name stri
 	var current bytes.Buffer
 	_, err = inspectSnapshot(ctx, root, name, &current, limit, func(file *os.File, info os.FileInfo) error {
 		var checkErr error
-		mode, satisfied, checkErr = r.checkFile(ctx, file, info, current.Bytes())
+		mode, satisfied, checkErr = r.checkAccess(ctx, root, name, file, info, current.Bytes())
 		return checkErr
 	})
 	return mode, satisfied, err
+}
+
+// openSource opens the snapshot for bounded reading through its pinned parent.
+func openSource(root *os.Root, name string) (*os.File, error) {
+	return openSourceAccess(root, name, os.O_RDONLY)
+}
+
+// checkAccess applies the ordinary creator's ceiling to a competing publication.
+// A forced content change also needs write access to the verified destination.
+func (r replacementRequest) checkAccess(ctx context.Context, root *os.Root, name string, file *os.File, info os.FileInfo, current []byte) (os.FileMode, bool, error) {
+	if r.policy == scaffoldWritable && !r.Exists {
+		r.Mode &= info.Mode().Perm()
+	}
+	mode, satisfied, err := r.checkFile(ctx, file, info, current)
+	if err != nil || satisfied || !r.requireWrite {
+		return mode, satisfied, err
+	}
+	writable, err := writableSnapshotMode(root, name, info)
+	return mode & writable, false, err
+}
+
+// writableSnapshotMode opens the observed file without truncating it. The open checks
+// the caller's filesystem permissions and the two observations bound the publish mode.
+func writableSnapshotMode(root *os.Root, name string, info os.FileInfo) (mode os.FileMode, err error) {
+	writer, err := openSourceAccess(root, name, os.O_WRONLY)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, writer.Close()) }()
+	opened, err := writer.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if !os.SameFile(info, opened) {
+		return 0, fmt.Errorf("%s changed while checking write access", name)
+	}
+	mode = info.Mode().Perm() & opened.Mode().Perm()
+	if mode&0o222 == 0 {
+		return 0, fmt.Errorf("%s is write-protected: %w", name, os.ErrPermission)
+	}
+	return mode, nil
 }
 
 // checkFile accepts the expected snapshot or, for an idempotent scaffold, its desired result.
@@ -267,13 +349,54 @@ func (r replacementRequest) checkFile(ctx context.Context, file *os.File, info o
 	return mode, false, nil
 }
 
+// InspectScaffoldModeIn reports whether the observed bundle file needs a mode repair.
+// It pins the existing parent and verifies the bytes, identity and link count without
+// creating directories, taking a write lock or changing the file.
+func InspectScaffoldModeIn(ctx context.Context, root, rel string, expected []byte, mode os.FileMode) (repair bool, err error) {
+	options := ReplaceOptions{Expected: expected, Exists: true, Mode: mode}
+	if err := validateReplacement(ctx, nil, options, scaffoldExact); err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
+	dir, err := OpenDirectoryIn(ctx, root, filepath.Dir(rel))
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	name := filepath.Base(rel)
+	if err := validateSnapshotName(dir, name); err != nil {
+		return false, err
+	}
+	var current bytes.Buffer
+	_, err = inspectSnapshot(ctx, dir, name, &current, MaxSourceBytes, func(_ *os.File, info os.FileInfo) error {
+		if !bytes.Equal(current.Bytes(), expected) {
+			return fmt.Errorf("snapshot changed before mode inspection: %s", name)
+		}
+		repair = !scaffoldModeMatches(info.Mode(), mode)
+		if repair {
+			return checkScaffoldLink(info)
+		}
+		return nil
+	})
+	return repair && err == nil, err
+}
+
 // repairScaffoldMode changes only the verified descriptor and refuses to change another
 // name's permissions when the inode has multiple links.
 func repairScaffoldMode(ctx context.Context, file *os.File, info os.FileInfo, mode os.FileMode) error {
+	if err := checkScaffoldLink(info); err != nil {
+		return err
+	}
+	return syncFileMode(ctx, file, mode)
+}
+
+// checkScaffoldLink refuses an inode whose other names would share the mode change.
+func checkScaffoldLink(info os.FileInfo) error {
 	if !singleLink(info) {
 		return fmt.Errorf("refusing to change mode of shared or unverified inode: %s", info.Name())
 	}
-	return syncFileMode(ctx, file, mode)
+	return nil
 }
 
 // scaffoldModeMatches compares the whole regular-file mode on POSIX. Windows exposes
@@ -285,7 +408,9 @@ func scaffoldModeMatches(actual, want os.FileMode) bool {
 	return actual == want
 }
 
-func stageSnapshot(ctx context.Context, root *os.Root, name string, data []byte) (*os.File, error) {
+// stageSnapshot writes and syncs the pending bytes. Ordinary Windows scaffold writes
+// keep the in-place writer's DACL restriction on private data from the first byte.
+func (r replacementRequest) stageSnapshot(ctx context.Context, root *os.Root, name string) (*os.File, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -293,22 +418,33 @@ func stageSnapshot(ctx context.Context, root *os.Root, name string, data []byte)
 	if err != nil {
 		return nil, err
 	}
-	_, writeErr := file.Write(data)
+	if r.policy == scaffoldWritable && runtime.GOOS == "windows" {
+		if err := util.TightenFilePermissions(file, r.Mode); err != nil {
+			return nil, errors.Join(err, file.Close())
+		}
+	}
+	_, writeErr := file.Write(r.data)
 	if err := errors.Join(writeErr, file.Sync()); err != nil {
 		return nil, errors.Join(err, file.Close())
 	}
 	return file, nil
 }
 
-func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, file *os.File, mode os.FileMode, options ReplaceOptions) error {
-	request := replacementRequest{ReplaceOptions: options}
-	if _, _, err := request.verify(ctx, root, name); err != nil {
+// publishSnapshot rechecks the expected bytes and permissions after staging. Both
+// observations limit a ceiling-based write. Bundle modes are fixed by their source.
+func (r replacementRequest) publishSnapshot(ctx context.Context, root *os.Root, name, stage string, file *os.File, mode os.FileMode) error {
+	request := replacementRequest{ReplaceOptions: r.ReplaceOptions, requireWrite: r.requireWrite}
+	finalMode, _, err := request.verify(ctx, root, name)
+	if err != nil {
 		return err
+	}
+	if r.policy != scaffoldExact {
+		mode &= finalMode
 	}
 	if err := syncFileMode(ctx, file, mode); err != nil {
 		return err
 	}
-	if options.Exists {
+	if r.Exists {
 		return root.Rename(stage, name)
 	}
 	created, err := linkStagedSnapshot(root, name, stage)

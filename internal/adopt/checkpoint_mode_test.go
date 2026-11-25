@@ -5,6 +5,7 @@
 package adopt
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -176,5 +177,54 @@ func TestCheckpointSourceModeFollowsContent(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertCheckpointFile(t, s.repoPath, tc.rel, tc.text, tc.mode)
+	}
+}
+
+// TestForceRefusesWriteProtectedWorkflow keeps an edited managed workflow even when
+// its writable parent would allow a rename over the read-only file.
+func TestForceRefusesWriteProtectedWorkflow(t *testing.T) {
+	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}, opts: AdoptOptions{Force: true}}
+	sc := scaffold{rel: ".github/workflows/review.yml", perm: filePerm, content: []byte("managed\n"), auditLocked: true}
+	path := filepath.Join(s.repoPath, filepath.FromSlash(sc.rel))
+	mustWrite(t, path, "edited\n")
+	t.Cleanup(func() { restoreMode(t, path) })
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.scaffoldFile(t.Context(), sc)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("forced replacement returned %v, want permission error", err)
+	}
+	assertCheckpointFile(t, s.repoPath, sc.rel, "edited\n", 0o444)
+	if len(s.report.Replaced()) != 0 {
+		t.Fatal("reported a replacement of a write-protected workflow")
+	}
+}
+
+// TestCheckpointSharedModeRepairRefused checks that preview and publication both
+// refuse a mode change on a checkpoint inode with a second name.
+func TestCheckpointSharedModeRepairRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX execute bit")
+	}
+	root := t.TempDir()
+	source := checkpointSource{checkpointScript, []byte(checkpointFixtureTexts[checkpointScript])}
+	path := filepath.Join(root, filepath.FromSlash(source.path))
+	mustWrite(t, path, string(source.data))
+	plantCheckpointMode(t, path, filePerm)
+	if err := os.Link(path, filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	for _, dryRun := range [...]bool{true, false} {
+		s := &adoptSession{repoPath: root, report: &AdoptReport{}, opts: AdoptOptions{DryRun: dryRun}}
+		err := installCheckpointSource(t.Context(), s, source, false)
+		if err == nil || !strings.Contains(err.Error(), "shared or unverified inode") {
+			t.Fatalf("dry run %t returned %v, want shared inode refusal", dryRun, err)
+		}
+		if len(s.report.ActionDetails) != 0 {
+			t.Fatalf("dry run %t reported a repair: %v", dryRun, s.report.ActionDetails)
+		}
+		assertCheckpointFile(t, root, source.path, string(source.data), filePerm)
+		assertCheckpointFile(t, root, "alias", string(source.data), filePerm)
 	}
 }
