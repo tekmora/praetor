@@ -491,13 +491,130 @@ func makefileTargetLine(lines []string, variables makefileVariables, target stri
 		if kind != makefileSyntaxLine {
 			continue
 		}
-		names, resolved := variables.targets(makefileTargetNames(lines[index]), index)
-		if resolved && slices.Contains(names, target) &&
-			!makefileLineIsAmbiguous(strings.TrimSpace(lines[index]), index, variables) {
+		if _, ok := makefileDeclaresTarget(lines[index], index, variables, target); ok {
 			return index
 		}
 	}
 	return -1
+}
+
+// makefileDeclaresTarget reports whether line, a syntax line at index, unambiguously declares a
+// rule for target and returns the text after its rule colon.
+func makefileDeclaresTarget(line string, index int, variables makefileVariables, target string) (string, bool) {
+	if makefileConditionalLine(line, strings.Fields(line)) {
+		return "", false
+	}
+	targets, prerequisites := makefileRule(line)
+	if targets == nil {
+		return "", false
+	}
+	names, resolved := variables.targets(targets, index)
+	if !resolved || !slices.Contains(names, target) {
+		return "", false
+	}
+	if makefileLineIsAmbiguous(strings.TrimSpace(line), index, variables) {
+		return "", false
+	}
+	return prerequisites, true
+}
+
+// MakefileTargetHasBody reports whether data, the text of a Makefile, declares a rule for target
+// that has at least one prerequisite or non-empty recipe line, inline after ";" or tab-indented
+// below the rule, across continuations and conditional directives, on lines this reader resolves
+// without Make (MakefileHasTarget). Lines may end in "\n" or "\r\n".
+func MakefileTargetHasBody(data, target string) bool {
+	lines, _ := makefileLogicalLines(data)
+	if slices.ContainsFunc(lines, makefileNamesRecipePrefix) {
+		return false
+	}
+	variables := makefileReadVariables(lines)
+	var scanner makefileScanner
+	for index := 0; index < len(lines) && index < MaxMakefileLines; index++ {
+		hasBody := makefileStepTargetBody(&scanner, lines[index], index, variables, target)
+		if scanner.lost || hasBody {
+			return hasBody && !scanner.lost
+		}
+	}
+	return false
+}
+
+// makefileStepTargetBody advances scanner over one logical line at index and reports whether
+// target gained a prerequisite, an inline recipe, or a non-blank tab recipe line.
+func makefileStepTargetBody(
+	scanner *makefileScanner,
+	line string,
+	index int,
+	variables makefileVariables,
+	target string,
+) bool {
+	kind := scanner.next(line)
+	if scanner.lost {
+		return false
+	}
+	if kind == makefileRecipeLine {
+		return scanner.targetOpen && makefileHasRecipeText(line)
+	}
+	if kind != makefileSyntaxLine {
+		return false
+	}
+	tail, ok := makefileDeclaresTarget(line, index, variables, target)
+	if !ok {
+		return false
+	}
+	scanner.targetOpen = true
+	return makefileRuleTailHasBody(tail)
+}
+
+// makefileHasRecipeText reports whether a logical recipe line holds non-blank command text.
+func makefileHasRecipeText(line string) bool {
+	parts := strings.Split(line, "\n")
+	for i := 0; i < len(parts) && i <= MaxMakefileContinuations; i++ {
+		part := strings.TrimSuffix(parts[i], "\r")
+		if i+1 < len(parts) && makefileContinues(part) {
+			part = part[:len(part)-1]
+		}
+		if strings.TrimSpace(part) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// makefileRuleTailHasBody reports whether tail, the text of a rule line after its colon, holds at
+// least one prerequisite before "#" or ";" or a non-blank inline recipe after ";".
+func makefileRuleTailHasBody(tail string) bool {
+	for i := 0; i < len(tail) && i < MaxMakefileLineBytes; {
+		kind, width := makefileOperatorAt(tail, i)
+		if kind == makefileEndToken {
+			if tail[i] == ';' && makefileInlineRecipeHasText(tail[i+1:]) {
+				return true
+			}
+			return strings.Trim(tail[:i], " \t|") != ""
+		}
+		i += width
+	}
+	return strings.Trim(tail, " \t|") != ""
+}
+
+// makefileInlineRecipeHasText reports whether text after ";" on a rule line holds non-blank recipe
+// text before any unescaped Make comment "#".
+func makefileInlineRecipeHasText(text string) bool {
+	for i := 0; i < len(text) && i < MaxMakefileLineBytes; {
+		if text[i] == '#' {
+			return strings.TrimSpace(text[:i]) != ""
+		}
+		if text[i] == '$' {
+			_, width := makefileReference(text[i:])
+			i += width
+			continue
+		}
+		if text[i] == '\\' {
+			i += makefileEscapeWidth(text, i)
+			continue
+		}
+		i++
+	}
+	return strings.TrimSpace(text) != ""
 }
 
 // MakefileTargetRecipe returns the tab-prefixed recipe lines, each ending in "\n", that follow

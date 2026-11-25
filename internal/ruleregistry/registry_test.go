@@ -118,6 +118,38 @@ func assertMakeShapeResult(t *testing.T, report *Report, err error, wantError bo
 	}
 }
 
+// TestAudit_MakeSharedParserRegressions verifies define blocks, continued recipes, computed target names,
+// and rule heads starting with directive prefixes follow the shared Makefile parser.
+func TestAudit_MakeSharedParserRegressions(t *testing.T) {
+	tests := []struct {
+		name, target, makefile string
+		wantError              bool
+	}{
+		{"define endef decoy", "empty", "empty:\n\ndefine M\nempty: ; @true\nendef\n", true},
+		{"continued recipe decoy", "empty", "empty:\n\nother:\n\t@echo \\\nempty: ; @true\n", true},
+		{"variable expanded target", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", false},
+		{"ifeq quoted rule target", "verify-all", "verify-all:\nifeq\"other\":\n\t@true\n", true},
+	}
+	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {
+		tc := tests[i]
+		t.Run(tc.name, func(t *testing.T) {
+			registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:" + tc.target + "]\n"
+			root := fixtureRoot(t, registry)
+			writeTestFile(t, root, "Makefile", tc.makefile)
+			report, err := Audit(t.Context(), root)
+			assertMakeShapeResult(t, report, err, tc.wantError)
+			row := findRow(t, report, "HISS-01")
+			wantEvidence := "resolved"
+			if tc.wantError {
+				wantEvidence = "unresolved: make:" + tc.target
+			}
+			if row.Evidence != wantEvidence {
+				t.Fatalf("row.Evidence = %q, want %q", row.Evidence, wantEvidence)
+			}
+		})
+	}
+}
+
 // TestAudit_DisabledWorkflowJobFails verifies workflow jobs with literal false conditions fail resolution.
 func TestAudit_DisabledWorkflowJobFails(t *testing.T) {
 	repo := filepath.Join("testdata", "repos", "disabled-workflow")

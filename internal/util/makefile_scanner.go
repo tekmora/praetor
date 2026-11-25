@@ -55,6 +55,8 @@ type makefileScanner struct {
 	// recipe state differed from it anywhere inside that conditional since.
 	scope int
 	mixed bool
+	// targetOpen reports whether a caller-marked rule may still own the open recipe in a branch.
+	targetOpen bool
 	// lost reports that the reader met a line it cannot resolve: nothing at or after it counts.
 	lost bool
 }
@@ -65,6 +67,8 @@ type makefileScanner struct {
 type makefileBranch struct {
 	entry, ended int
 	plainElse    bool
+	// targetEntry and targetAny follow makefileScanner.targetOpen across the conditional's branches.
+	targetEntry, targetAny bool
 }
 
 // next reports what line is to Make and advances the define nesting, the recipe state and the
@@ -178,7 +182,7 @@ func (s *makefileScanner) openBranch() {
 	if len(s.branches) == 0 {
 		s.scope, s.mixed = s.recipe, s.recipe == makefileRecipeUnsure
 	}
-	s.branches = append(s.branches, makefileBranch{entry: s.recipe, ended: makefileRecipeNone})
+	s.branches = append(s.branches, makefileBranch{entry: s.recipe, ended: makefileRecipeNone, targetEntry: s.targetOpen})
 }
 
 // switchBranch ends the current branch at an else: the next branch starts in the state before the
@@ -190,8 +194,10 @@ func (s *makefileScanner) switchBranch(plain bool) {
 	}
 	top := &s.branches[len(s.branches)-1]
 	top.ended = makefileMergeRecipe(top.ended, s.recipe)
+	top.targetAny = top.targetAny || s.targetOpen
 	top.plainElse = top.plainElse || plain
 	s.recipe = top.entry
+	s.targetOpen = top.targetEntry
 }
 
 // closeBranch ends a conditional at endif: the state after it is the state at the end of every
@@ -207,10 +213,22 @@ func (s *makefileScanner) closeBranch() {
 	if !top.plainElse {
 		state = makefileMergeRecipe(state, top.entry)
 	}
+	targetOpen := top.mergedTarget(s.targetOpen)
 	s.set(state)
+	if state != makefileRecipeClosed {
+		s.targetOpen = targetOpen
+	}
 	if len(s.branches) == 0 {
 		s.mixed = false
 	}
+}
+
+// mergedTarget reports whether the caller-marked rule may still be open after endif.
+func (b makefileBranch) mergedTarget(current bool) bool {
+	if b.plainElse {
+		return b.targetAny || current
+	}
+	return b.targetAny || current || b.targetEntry
 }
 
 // set records the recipe state after a line, and inside a conditional whether it left the state
@@ -220,6 +238,7 @@ func (s *makefileScanner) set(state int) {
 		s.mixed = true
 	}
 	s.recipe = state
+	s.targetOpen = false
 }
 
 // makefileSkippedDefineDiverges reports whether a define body line, tab-prefixed or not, whose
