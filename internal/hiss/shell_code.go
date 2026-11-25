@@ -46,7 +46,7 @@ type shellCodeReader struct {
 	physical int
 	lex      shellLexer
 	words    *shellCodeWords
-	literals map[int]int
+	comments [][2]int
 }
 
 // newShellCodeReader constructs a shellCodeReader by splitting script lines and resolving backslash splices up to maxLines.
@@ -112,6 +112,10 @@ func (r *shellCodeReader) scanLine() string {
 	for i := line.start; i < limit && !r.lex.misread; {
 		r.advanceSplices(i)
 		if r.lex.startsComment(text[i]) {
+			if r.words != nil {
+				part := r.lines[r.physical]
+				r.comments = append(r.comments, [2]int{part.rawStart + i - part.start, part.rawStart + len(part.raw)})
+			}
 			r.finishLine()
 			return code.String()
 		}
@@ -128,7 +132,7 @@ func (r *shellCodeReader) scanLine() string {
 func (r *shellCodeReader) advanceSplices(at int) {
 	for r.physical+1 < len(r.lines) && r.lines[r.physical].spliced && r.lines[r.physical].end <= at {
 		if frame := r.lex.top(); frame != nil && frame.ctx == shellSingle && r.words != nil {
-			r.words.masked("\\\n")
+			r.words.masked("\\\n", r.lines[r.physical].rawStart+len(r.lines[r.physical].raw)-1)
 		}
 		r.physical++
 	}
@@ -139,8 +143,8 @@ func (r *shellCodeReader) scanToken(text string, i int, code *strings.Builder) i
 	depth, length, before := len(r.lex.stack), code.Len(), r.lex.top()
 	next := min(r.lex.step(text, i, code), len(text))
 	if r.words != nil {
-		r.words.markLiteral(r.literals[i])
-		r.words.token(r.text[i:next], code.String()[length:], before, &r.lex, depth, r.physical)
+		part := r.lines[r.physical]
+		r.words.token(r.text[i:next], code.String()[length:], before, &r.lex, depth, r.physical, part.rawStart+i-part.start)
 	}
 	return next
 }
@@ -151,7 +155,6 @@ func (r *shellCodeReader) maskLiterals(literals map[int]int) bool {
 		return true
 	}
 	masked := []byte(r.text)
-	r.literals = make(map[int]int, len(literals))
 	previousEnd := 0
 	for _, start := range util.SortedKeys(literals) {
 		left, first := r.flatOffset(start)
@@ -162,7 +165,6 @@ func (r *shellCodeReader) maskLiterals(literals map[int]int) bool {
 		for i := left; i < right; i++ {
 			masked[i] = '_'
 		}
-		r.literals[left] = right - left
 		previousEnd = right
 	}
 	r.code = string(masked)
@@ -185,7 +187,8 @@ func (r *shellCodeReader) flatOffset(raw int) (offset, physical int) {
 // finishLine updates words and lexer state upon crossing a physical line boundary.
 func (r *shellCodeReader) finishLine() {
 	if r.words != nil {
-		r.words.newline(r.physical+1, shellReadsCommands(r.lex.top()))
+		part := r.lines[r.physical]
+		r.words.newline(r.physical+1, part.rawStart+len(part.raw), shellReadsCommands(r.lex.top()))
 	}
 	r.lex.word = !shellReadsCommands(r.lex.top())
 }

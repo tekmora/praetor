@@ -581,6 +581,7 @@ jobs:
       # so it runs on each platform too (HISS-21); its network checks skip with a stated reason.
       - name: Test The Client Schema Oracle Module
         if: ${{ !cancelled() && github.event.pull_request.draft != true && steps.review-check.outcome == 'success' && steps.scope.outputs.schemacheck == 'true' }}
+        shell: bash
         run: |
           go -C tools/schemacheck vet ./...
           go -C tools/schemacheck test -timeout 30m ./...
@@ -1047,6 +1048,7 @@ jobs:
 
       - name: Test The Client Schema Oracle Module
         if: ${{ !cancelled() && github.event.pull_request.draft != true && steps.review-check.outcome == 'success' && steps.scope.outputs.schemacheck == 'true' && matrix.shard == 2 }}
+        shell: bash
         run: |
           go -C tools/schemacheck vet ./...
           go -C tools/schemacheck test -timeout 30m ./...

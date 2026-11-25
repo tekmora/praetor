@@ -42,7 +42,7 @@ ifneq ($(TEST_COVERPROFILE),)
 	set -e; dir=$$(mktemp -d); tmp=; \
 		trap 'rm -rf "$$dir"; if [ -n "$$tmp" ]; then rm -f "$$tmp"; fi' 0; \
 		tmp=$$(mktemp "$(TEST_COVERPROFILE).XXXXXX"); \
-		$(GO_TEST) -v -race -timeout 30m -covermode=atomic -coverprofile="$$tmp" $(TEST_PACKAGES); \
+		$(GO_TEST) -v -race -timeout 30m -covermode=atomic -coverprofile="$$tmp" $(TEST_PACKAGES) ; \
 		mv -f "$$tmp" "$(TEST_COVERPROFILE)"
 else
 	$(GO_TEST) -v -race -timeout 30m $(TEST_PACKAGES)

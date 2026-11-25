@@ -100,16 +100,16 @@ func TestShellCodeCommands_SourceWords(t *testing.T) {
 	commands, ok := ShellCodeCommands(script, 3, nil)
 	want := []ShellCodeCommand{
 		{Line: 0, Words: []ShellCodeWord{
-			{Code: "printf", Text: "printf", Value: "printf"},
-			{Code: "x", Text: "x", Value: "x"},
+			{Code: "printf", Text: "printf", Value: "printf", Span: [2]int{7, 13}},
+			{Code: "x", Text: "x", Value: "x", Span: [2]int{14, 15}},
 		}},
 		{Line: 0, Words: []ShellCodeWord{
-			{Code: "go", Text: "go", Value: "go"},
-			{Code: "test", Text: "test", Value: "test"},
-			{Code: "-timeout", Text: "-timeout", Value: "-timeout"},
-			{Code: "\"___\"", Text: "\"45m\"", Value: "45m"},
+			{Code: "go", Text: "go", Value: "go", Span: [2]int{21, 23}},
+			{Code: "test", Text: "test", Value: "test", Span: [2]int{24, 28}},
+			{Code: "-timeout", Text: "-timeout", Value: "-timeout", Span: [2]int{29, strings.Index(script, " \"45m\"")}},
+			{Code: "\"___\"", Text: "\"45m\"", Value: "45m", Span: [2]int{strings.Index(script, "\"45m\""), strings.Index(script, " # -timeout")}},
 		}},
-		{Line: 2, Words: []ShellCodeWord{{Code: "true", Text: "true", Value: "true"}}},
+		{Line: 2, Words: []ShellCodeWord{{Code: "true", Text: "true", Value: "true", Span: [2]int{len(script) - 4, len(script)}}}},
 	}
 	if !ok || !reflect.DeepEqual(commands, want) {
 		t.Fatalf("ShellCodeCommands = %+v, %v; want %+v", commands, ok, want)
@@ -160,7 +160,7 @@ func TestShellCodeCommands_OpaqueSourceSpans(t *testing.T) {
 		t.Fatalf("ShellCodeCommands = %+v, %v; want an opaque command and true", commands, ok)
 	}
 	words := commands[0].Words
-	if !words[0].Opaque || words[0].Value != "$(VAR)" || words[1].Value != "xy" {
+	if words[0].Code != "______" || words[0].Value != "$(VAR)" || words[1].Value != "xy" {
 		t.Fatalf("words = %+v; want opaque $(VAR) and unquoted xy", words)
 	}
 	for _, spans := range []map[int]int{{0: len(script) + 1}, {0: 6, 3: 7}} {

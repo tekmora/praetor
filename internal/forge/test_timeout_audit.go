@@ -5,6 +5,7 @@
 package forge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,7 +20,6 @@ import (
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 	"github.com/cordanaLLM/praetor/internal/hiss"
-	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // testTimeoutGate names the check in its lines.
@@ -46,7 +46,11 @@ type TestTimeoutOptions struct {
 }
 
 // AuditTestTimeouts checks workflow and root Makefile lines against the per-package timeout
-// bound, naming the file, line and value of each timeout without a live exception.
+// bound. It proves commands in bash or sh workflow steps (step, job, workflow, then runner
+// default) and literal Makefile recipes without .ONESHELL, including $(GO_TEST) and ${GO_TEST}.
+// Before test, go or go.exe may take only the two-word -C dir. Each raw candidate must map to
+// a resolved command or shell comment. Unknown shells, enclosing Make functions, attached
+// operators and incomplete reads report an unverifiable test invocation at its source line.
 func AuditTestTimeouts(ctx context.Context, opts TestTimeoutOptions) (string, error) {
 	files, err := readTestTimeoutFiles(ctx, opts.Root)
 	if err != nil {
@@ -55,11 +59,13 @@ func AuditTestTimeouts(ctx context.Context, opts TestTimeoutOptions) (string, er
 	entries := config.ExceptionsFor(opts.Exceptions, config.ExceptionRuleTestTimeout)
 	used := make([]bool, len(entries))
 	var findings, excepted []string
+	unreadable := make(map[string]bool)
 	for _, file := range files {
 		rel := file.Name
 		long, err := fileTimeouts(file)
 		if err != nil {
-			return "", err
+			unreadable[rel] = true
+			findings = append(findings, err.Error())
 		}
 		if len(long) == 0 {
 			continue
@@ -74,22 +80,29 @@ func AuditTestTimeouts(ctx context.Context, opts TestTimeoutOptions) (string, er
 		}
 		findings = append(findings, long...)
 	}
-	for i, entry := range entries {
-		if !used[i] {
-			findings = append(findings, fmt.Sprintf("[FAIL] %s: the exceptions entry for %s excuses nothing, because the file keeps the bound; remove it", testTimeoutGate, entry.Target()))
-		}
-	}
+	findings = append(findings, staleTimeoutEntries(entries, used, unreadable)...)
 	if len(findings) > 0 {
 		return "", errors.New(strings.Join(findings, "\n"))
 	}
 	return strings.Join(append(excepted, "[PASS] test-timeout"), "\n"), nil
 }
 
+// staleTimeoutEntries reports exceptions that no measured timeout needed in a fully read file.
+func staleTimeoutEntries(entries []config.Exception, used []bool, unreadable map[string]bool) []string {
+	var stale []string
+	for i, entry := range entries {
+		if !used[i] && !unreadable[entry.Target()] {
+			stale = append(stale, fmt.Sprintf("[FAIL] %s: the exceptions entry for %s excuses nothing, because the file keeps the bound; remove it", testTimeoutGate, entry.Target()))
+		}
+	}
+	return stale
+}
+
 // fileTimeouts returns the long go test timeouts in Makefile recipes or decoded workflow scripts.
 func fileTimeouts(file workflowFile) ([]string, error) {
 	if lines := physicalLines(string(file.Data)); lines > maxTimeoutWorkflowLines {
-		return nil, fmt.Errorf("[FAIL] %s: %s has %d lines, above the %d-line scan bound; lines past it would not be audited",
-			testTimeoutGate, file.Name, lines, maxTimeoutWorkflowLines)
+		return nil, unverifiableTestInvocation(file.Name, maxTimeoutWorkflowLines+1,
+			fmt.Sprintf("%s has %d lines, above the %d-line scan bound", file.Name, lines, maxTimeoutWorkflowLines))
 	}
 	if file.Name == "Makefile" {
 		return makefileTimeouts(string(file.Data))
@@ -110,58 +123,18 @@ func physicalLines(text string) int {
 	return lines
 }
 
-// makefileTimeouts asks Make's reader for recipe invocations and the shared shell reader
-// for each command and its source-aligned arguments.
-func makefileTimeouts(text string) ([]string, error) {
-	recipes, err := util.MakefileRecipes(text, maxTimeoutWorkflowLines)
-	if err != nil {
-		return nil, fmt.Errorf("[FAIL] %s: %w", testTimeoutGate, err)
-	}
-	var out []string
-	for _, recipe := range recipes {
-		commands, ok := hiss.ShellCodeCommands(recipe.Text, maxTimeoutWorkflowLines, recipe.LiteralSpans)
-		if !ok {
-			return nil, fmt.Errorf("[FAIL] %s: Makefile:%d has unreadable shell recipe", testTimeoutGate, recipe.Line+1)
-		}
-		for _, command := range commands {
-			where := fmt.Sprintf("Makefile:%d", recipe.Line+command.Line+1)
-			out = append(out, commandTimeouts(where, command.Words, nil)...)
-		}
-	}
-	return out, nil
-}
-
-// commandTimeouts checks the timeout flags of a Go test invocation.
-func commandTimeouts(where string, words []hiss.ShellCodeWord, defaults map[string]exprValue) []string {
-	args := goTestArgs(words)
-	var findings []string
-	matches := 0
-	for i := 0; i < len(args) && matches < maxTimeoutFlagsPerCommand; i++ {
-		value, next, ok := timeoutValue(args, i)
-		i = next
-		if !ok {
-			continue
-		}
-		matches++
-		if finding := judgeTimeout(where, value, defaults); finding != "" {
-			findings = append(findings, finding)
-		}
-	}
-	return findings
-}
-
-// goTestArgs returns the arguments to go test or the Makefile's GO_TEST wrapper.
+// goTestArgs returns the arguments following a supported Go test command head.
 func goTestArgs(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
 	program := words[0]
-	if program.Opaque && (program.Text == "$(GO_TEST)" || program.Text == "${GO_TEST}") {
-		return words[1:]
+	if !literalGoDirectory.MatchString(program.Value) {
+		return nil
 	}
 	name := path.Base(program.Value)
 	if name != "go" && name != "go.exe" {
 		return nil
 	}
 	i := 1
-	for i+1 < len(words) && words[i].Value == "-C" {
+	if i+1 < len(words) && words[i].Value == "-C" && literalGoDirectory.MatchString(words[i+1].Value) {
 		i += 2
 	}
 	if i < len(words) && words[i].Value == "test" {
@@ -182,7 +155,7 @@ func timeoutValue(args []hiss.ShellCodeWord, i int) (value string, next int, ok 
 	if i+1 < len(args) {
 		return args[i+1].Value, i + 1, true
 	}
-	return "", i, false
+	return "", i, true
 }
 
 // readTestTimeoutFiles retains workflow paths and adds the optional root Makefile through the
@@ -208,57 +181,71 @@ func readTestTimeoutFiles(ctx context.Context, root string) ([]workflowFile, err
 // judgeTimeout returns the finding for one -timeout value at where, "" within the bound. A value
 // ${{ inputs.<id> }} is judged by that input's workflow_call default; an input without a
 // literal default the gate can read is unreadable, as any other value it cannot parse.
-func judgeTimeout(where, raw string, defaults map[string]exprValue) string {
+func judgeTimeout(where, raw string, defaults map[string]exprValue) (finding, reason string) {
 	value, shown := raw, raw
 	if input := inputExpression.FindStringSubmatch(raw); input != nil {
 		def, ok := defaults[input[1]]
 		if !ok {
-			return fmt.Sprintf("[FAIL] %s: %s sets %s, an unreadable timeout: the input has no default this gate can read", testTimeoutGate, where, raw)
+			return "", fmt.Sprintf("%s is an unreadable timeout: the input has no literal default", raw)
 		}
 		value, shown = def.text, fmt.Sprintf("%s (default %s)", raw, def.text)
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil {
-		return fmt.Sprintf("[FAIL] %s: %s sets %s, an unreadable timeout", testTimeoutGate, where, shown)
+		return "", fmt.Sprintf("%s is an unreadable timeout", shown)
 	}
 	if d > time.Duration(testTimeoutBoundMinutes)*time.Minute {
-		return fmt.Sprintf("[FAIL] %s: %s sets %s, above the %dm bound", testTimeoutGate, where, shown, testTimeoutBoundMinutes)
+		return fmt.Sprintf("[FAIL] %s: %s sets %s, above the %dm bound", testTimeoutGate, where, shown, testTimeoutBoundMinutes), ""
 	}
-	return ""
+	return "", ""
+}
+
+// workflowTimeoutReadError locates the candidate that an incomplete workflow read could not check.
+func workflowTimeoutReadError(rel string, data []byte, err error) error {
+	if at := rawTestCandidate(string(data)); at != nil {
+		return unverifiableTestInvocation(rel, 1+bytes.Count(data[:at[0]], []byte("\n")), err.Error())
+	}
+	return fmt.Errorf("[FAIL] %s: %s: %w", testTimeoutGate, rel, err)
 }
 
 // workflowTimeouts audits decoded run steps and refuses workflows it cannot read.
 func workflowTimeouts(rel string, data []byte) ([]string, error) {
 	spec, err := ghworkflow.Parse(data)
 	if err != nil {
-		return nil, fmt.Errorf("[FAIL] %s: %s: %w", testTimeoutGate, rel, err)
+		return nil, workflowTimeoutReadError(rel, data, err)
 	}
 	steps, err := ghworkflow.RunSteps(&spec)
 	if err != nil {
-		return nil, fmt.Errorf("[FAIL] %s: %s: read run steps: %w", testTimeoutGate, rel, err)
+		return nil, workflowTimeoutReadError(rel, data, fmt.Errorf("read run steps: %w", err))
 	}
 	defaults := workflowCallDefaults(&spec)
 	var out []string
+	var failures []error
 	for _, run := range steps {
-		findings, err := workflowRunTimeouts(rel, run.Step, defaults)
+		findings, err := workflowRunTimeouts(rel, &spec, run, defaults)
 		if err != nil {
-			return nil, err
+			failures = append(failures, err)
 		}
 		out = append(out, findings...)
 	}
-	return out, nil
+	return out, errors.Join(failures...)
 }
 
-// workflowRunTimeouts checks one run script and reports findings at its YAML source lines.
-func workflowRunTimeouts(rel string, step *ghworkflow.Step, defaults map[string]exprValue) ([]string, error) {
-	commands, ok := hiss.WorkflowShellCommands(step.Run, maxTimeoutWorkflowLines)
+// workflowRunTimeouts checks candidate-bearing steps under their resolved interpreter.
+func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunStep, defaults map[string]exprValue) ([]string, error) {
+	script := strings.ReplaceAll(run.Step.Run, "\r\n", "\n")
+	location := timeoutSource{file: rel, line: func(n int) int { return hiss.WorkflowRunLine(run.Step, n+1) }}
+	candidate := rawTestCandidate(script)
+	if candidate == nil {
+		return nil, nil
+	}
+	shell := ghworkflow.StepShell(spec, run.Job, run.Step)
+	if shell != "bash" && shell != "sh" {
+		return nil, location.refuse(script, candidate[0], fmt.Sprintf("resolved shell %q must be bash or sh", shell))
+	}
+	source, ok := hiss.WorkflowShellCommandSource(script, maxTimeoutWorkflowLines)
 	if !ok {
-		return nil, fmt.Errorf("[FAIL] %s: %s:%d has unreadable shell run script", testTimeoutGate, rel, step.RunLine)
+		return nil, location.refuse(script, candidate[0], "unreadable shell run script or shell reader bound")
 	}
-	var out []string
-	for _, command := range commands {
-		where := fmt.Sprintf("%s:%d", rel, hiss.WorkflowRunLine(step, command.Line+1))
-		out = append(out, commandTimeouts(where, command.Words, defaults)...)
-	}
-	return out, nil
+	return location.check(script, source, defaults)
 }

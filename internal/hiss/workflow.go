@@ -139,16 +139,16 @@ func blankExpressions(script string) string {
 	})
 }
 
-// WorkflowShellCommands reads a decoded run script with expressions kept as opaque shell word
+// WorkflowShellCommandSource reads a decoded run script with expressions kept as opaque shell word
 // fragments. This retains the source spelling of timeout values without parsing expressions as shell.
-func WorkflowShellCommands(script string, maxLines int) ([]ShellCodeCommand, bool) {
+func WorkflowShellCommandSource(script string, maxLines int) (ShellCommandSource, bool) {
 	script = strings.ReplaceAll(script, "\r\n", "\n")
 	matches := workflowExpression.FindAllStringIndex(script, -1)
 	literals := make(map[int]int, len(matches))
 	for _, match := range matches {
 		literals[match[0]] = match[1]
 	}
-	return ShellCodeCommands(script, maxLines, literals)
+	return ReadShellCommandSource(script, maxLines, literals)
 }
 
 // WorkflowRunLine maps one-based line n of a step's script to the workflow line: in a literal

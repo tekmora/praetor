@@ -18,56 +18,103 @@ type MakefileRecipe struct {
 	Line         int
 	Text         string
 	LiteralSpans map[int]int
+	// Unresolved names the reader limit or Make mode that prevents interpreting this source.
+	Unresolved string
+}
+
+// MakefileRecipeFile holds the literal rule names and recipe sources from one bounded read.
+type MakefileRecipeFile struct {
+	Targets map[string]bool
+	Recipes []MakefileRecipe
 }
 
 // MakefileRecipes reads recipes using the default tab prefix and visits every conditional
 // branch. Each recipe retains its backslash-newlines for the shell to interpret.
-func MakefileRecipes(text string, maxLines int) ([]MakefileRecipe, error) {
+func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 	physical := strings.Split(strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
 	if len(physical) > maxLines {
-		return nil, fmt.Errorf("%s has %d lines, above the %d-line scan bound", makefileLabel, len(physical), maxLines)
+		return MakefileRecipeFile{}, fmt.Errorf("%s has %d lines, above the %d-line scan bound", makefileLabel, len(physical), maxLines)
 	}
-	reader := makefileScanner{}
-	var recipes []MakefileRecipe
+	file := MakefileRecipeFile{Targets: make(map[string]bool)}
+	reader := makefileRecipeReader{targets: file.Targets}
 	for start := 0; start < len(physical) && start < maxLines; {
-		end, err := makefileRecipeEnd(physical, start, maxLines)
+		end, reason := makefileRecipeEnd(physical, start, maxLines)
+		recipe, found, err := reader.readGroup(physical[start:end], start, reason)
 		if err != nil {
-			return nil, err
-		}
-		recipe, found := reader.recipeText(physical[start:end], start)
-		if reader.lost {
-			return nil, fmt.Errorf("%s:%d has unreadable recipe syntax", makefileLabel, start+1)
+			return MakefileRecipeFile{}, err
 		}
 		if found {
-			recipes = append(recipes, recipe)
+			file.Recipes = append(file.Recipes, recipe)
 		}
 		start = end
 	}
-	return recipes, nil
+	return file, nil
 }
 
-// makefileRecipeEnd returns the first physical line after the current logical line.
-func makefileRecipeEnd(physical []string, start, maxLines int) (int, error) {
+// makefileRecipeEnd delimits the logical line before checking the bounds used by the Make syntax reader.
+func makefileRecipeEnd(physical []string, start, maxLines int) (int, string) {
 	limit := min(len(physical), maxLines)
+	bytes := 0
 	for i := start; i < limit; i++ {
+		bytes += len(physical[i])
 		if !makefileContinues(physical[i]) {
-			return i + 1, nil
+			switch {
+			case bytes+i-start > MaxMakefileLineBytes:
+				return i + 1, fmt.Sprintf("logical line exceeds the %d-byte reader bound", MaxMakefileLineBytes)
+			case i-start > MaxMakefileContinuations:
+				return i + 1, "logical line exceeds the continuation bound"
+			}
+			return i + 1, ""
 		}
 	}
-	return limit, fmt.Errorf("%s:%d has an unfinished continuation", makefileLabel, limit)
+	return limit, "unfinished continuation"
 }
 
-// recipeText extracts a MakefileRecipe from tab-prefixed recipe lines or inline rule recipes.
-func (s *makefileScanner) recipeText(parts []string, start int) (MakefileRecipe, bool) {
-	if s.depth == 0 && strings.HasPrefix(parts[0], "\t") && s.recipe != makefileRecipeClosed {
+// makefileRecipeReader records literal rule names while classifying logical lines.
+type makefileRecipeReader struct {
+	makefileScanner
+	targets map[string]bool
+}
+
+// readGroup preserves unread recipe text for the caller. A lost rule boundary can also
+// change the interpretation of subsequent lines, so it invalidates the structural read.
+func (s *makefileRecipeReader) readGroup(parts []string, start int, reason string) (MakefileRecipe, bool, error) {
+	if reason != "" {
+		if !s.inRecipe(parts[0]) {
+			return MakefileRecipe{}, false, fmt.Errorf("%s:%d unverifiable test invocation: %s", makefileLabel, start+1, reason)
+		}
+		return MakefileRecipe{Line: start, Text: strings.Join(parts, "\n"), Unresolved: reason}, true, nil
+	}
+	recipe, found := s.recipeText(parts, start)
+	if s.lost {
+		return MakefileRecipe{}, false, fmt.Errorf("%s:%d unverifiable test invocation: unreadable recipe syntax", makefileLabel, start+1)
+	}
+	return recipe, found, nil
+}
+
+// inRecipe reports whether a tab can introduce a recipe at this point in the file.
+func (s *makefileRecipeReader) inRecipe(line string) bool {
+	return s.depth == 0 && strings.HasPrefix(line, "\t") && s.recipe != makefileRecipeClosed
+}
+
+// recipeText extracts a tabbed or inline recipe and records the target names already read.
+func (s *makefileRecipeReader) recipeText(parts []string, start int) (MakefileRecipe, bool) {
+	if s.inRecipe(parts[0]) {
 		kind := s.next(parts[0])
 		if kind == makefileRecipeLine || kind == makefileUnsureLine {
 			return makefileRecipeBody(parts, start), true
 		}
 	}
 	syntax := makefileJoinSyntax(parts)
-	if s.next(syntax) != makefileSyntaxLine || makefileTargetNames(syntax) == nil {
+	if s.next(syntax) != makefileSyntaxLine {
 		return MakefileRecipe{}, false
+	}
+	names := makefileTargetNames(syntax)
+	if names == nil {
+		return MakefileRecipe{}, false
+	}
+	for _, name := range names {
+		s.targets[name] = true
 	}
 	return makefileInlineRecipe(parts, start)
 }

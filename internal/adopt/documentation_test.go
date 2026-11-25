@@ -60,11 +60,7 @@ func TestAdoptionDocumentationGatePositive(t *testing.T) {
 			t.Fatalf("adopted README must contain one exact documentation contract %q:\n%s", want, readme)
 		}
 	}
-	before := snapshotTree(t, root)
-	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
-		t.Fatal(err)
-	}
-	assertTreeUnchanged(t, before, snapshotTree(t, root))
+	assertPlainAdoptionPreservesTree(t, opts)
 }
 
 func TestAdoptionDocumentationGateNegativeFacet(t *testing.T) {

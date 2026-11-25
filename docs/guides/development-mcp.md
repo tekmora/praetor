@@ -545,11 +545,31 @@ fixture reads `passed: 12/12`. A reusable workflow's `-timeout=${{ inputs.<id> }
 that input's `workflow_call` default; an input without a literal default, or a default that is no
 duration, is an unreadable timeout and fails (`TestAuditTestTimeouts_Positive_InputDefaultWithinBound`,
 `TestAuditTestTimeouts_Negative_InputDefaultAboveBound` in `internal/forge/test_timeout_audit_test.go`).
-The Makefile read is bounded and also recognizes `$(GO_TEST)` recipes. Only `test-timeout` entries
-may name the root `Makefile`; other workflow-scoped exceptions still require a workflow path
-(`TestAuditTestTimeouts_Makefile` and `TestAuditTestTimeouts_RepositoryMakefile` in
-`internal/forge/test_timeout_audit_test.go`; `TestValidateExceptionsTestTimeoutMakefile` in
-`internal/config/exceptions_test.go`).
+The audit checks explicit Go test timeouts in these sources.
+
+- A workflow `run` step must resolve to `bash` or `sh`. The step's shell takes precedence,
+  followed by the job default, the workflow default and the runner default. Set `shell: bash`
+  on a Bash test step in a Windows or mixed-runner job.
+- The root `Makefile` may use literal tabbed or inline recipes, including continuations.
+  A declaration of `.ONESHELL` makes candidate recipes unverifiable. The reader recognizes
+  `$(GO_TEST)` and `${GO_TEST}` as the test command. Simple Make variable references can
+  supply argument values. Make functions in a candidate recipe require expansion and fail the audit.
+- The command head must be `go test`, `go.exe test` or one of those executables followed by
+  `-C dir test`. The only supported global flag spelling is `-C` with a separate literal
+  directory argument. The test flag can be `-timeout` or `--timeout`, with a separate value
+  or an equals sign. Other arguments may be literal words or quoted shell parameters used
+  as values, including a quoted array of packages. Computed flag names are unverifiable.
+  Separate control operators from invocation words. A trailing `> file`
+  and a standalone trailing `2>&1` are supported.
+
+The gate checks raw test tokens against the commands and comments the reader located. A step
+or recipe without such tokens skips shell parsing. If a candidate remains unexplained, the
+shell is unreadable, or a read exceeds its bound, the finding says `unverifiable test invocation`
+and names the file, line and reason. A duration exception covers a measured timeout above
+the bound. Only `test-timeout` entries may name the root `Makefile`.
+See `TestAuditTestTimeouts_UnverifiableInvocations`, `TestAuditTestTimeouts_UnrelatedMultilineExpression`
+and `TestAuditTestTimeouts_RepositoryMakefile` in `internal/forge/test_timeout_audit_test.go`
+and `TestValidateExceptionsTestTimeoutMakefile` in `internal/config/exceptions_test.go`.
 
 The job-timeout gate runs right beside it (`forge.AuditJobTimeouts`): every job that runs steps
 declares `timeout-minutes`. A reusable workflow call (`uses:` at job level) cannot carry it and

@@ -11,12 +11,12 @@ import (
 
 // ShellCodeWord pairs the masked code of a shell word with its source text after line
 // splicing. Value removes POSIX quote and escape syntax without evaluating expansions.
-// Opaque reports whether the whole word is one of the caller's literal spans.
 type ShellCodeWord struct {
-	Code   string
-	Text   string
-	Value  string
-	Opaque bool
+	Code  string
+	Text  string
+	Value string
+	// Span contains the start and exclusive end byte offsets in the LF-normalized script.
+	Span [2]int
 }
 
 // ShellCodeCommand is a program and its arguments, starting on the zero-based logical
@@ -31,29 +31,56 @@ type ShellCodeCommand struct {
 // in LF-normalized source) for text substituted by the script's host before the shell
 // runs. Opaque spans contribute a single word fragment and cannot run shell commands.
 func ShellCodeCommands(script string, maxLines int, literals map[int]int) ([]ShellCodeCommand, bool) {
+	source, ok := ReadShellCommandSource(script, maxLines, literals)
+	return source.Commands, ok
+}
+
+// ShellCommandSource pairs resolved commands with the source intervals discarded as shell comments.
+type ShellCommandSource struct {
+	Commands []ShellCodeCommand
+	Comments [][2]int
+}
+
+// ReadShellCommandSource retains locations so a caller can account for raw text the shell reader skipped.
+func ReadShellCommandSource(script string, maxLines int, literals map[int]int) (ShellCommandSource, bool) {
 	reader, ok := newShellCodeReader(script, maxLines)
 	if !ok || !reader.maskLiterals(literals) {
-		return nil, false
+		return ShellCommandSource{}, false
 	}
 	words := shellCodeWords{views: []*shellCodeView{{}}}
 	reader.words = &words
 	reader.read(nil)
 	if !reader.readable() || words.overBound {
-		return nil, false
+		return ShellCommandSource{}, false
 	}
-	return words.commands, true
+	return ShellCommandSource{Commands: words.commands, Comments: reader.comments}, true
 }
 
 // shellCodeView retains aligned code and source for the current command context.
 type shellCodeView struct {
 	code, source strings.Builder
 	line         int
-	literals     map[int]int
 	removed      []int
+	origins      []shellSourceOrigin
+}
+
+// shellSourceOrigin maps one contiguous part of a command view to its script byte offset.
+type shellSourceOrigin struct {
+	at, offset int
+}
+
+// offset translates a view byte to the script, accounting for splices and nested views.
+func (v *shellCodeView) offset(at int) int {
+	i := sort.Search(len(v.origins), func(i int) bool { return v.origins[i].at > at }) - 1
+	return v.origins[i].offset + at - v.origins[i].at
 }
 
 // write appends raw source text and emitted code bytes to the view, padding code with placeholders to align lengths.
-func (v *shellCodeView) write(raw, code string) {
+func (v *shellCodeView) write(raw, code string, offset int) {
+	at := v.source.Len()
+	if n := len(v.origins); n == 0 || v.origins[n-1].offset+at-v.origins[n-1].at != offset {
+		v.origins = append(v.origins, shellSourceOrigin{at: at, offset: offset})
+	}
 	v.source.WriteString(raw)
 	v.code.WriteString(code)
 	for i := len(code); i < len(raw); i++ {
@@ -69,28 +96,16 @@ type shellCodeWords struct {
 }
 
 // masked writes raw source text into active views without emitting corresponding code tokens.
-func (w *shellCodeWords) masked(raw string) {
+func (w *shellCodeWords) masked(raw string, offset int) {
 	for _, view := range w.views {
-		view.write(raw, "")
+		view.write(raw, "", offset)
 	}
-}
-
-// markLiteral records an opaque literal span width at the current offset in the active view.
-func (w *shellCodeWords) markLiteral(width int) {
-	if width == 0 {
-		return
-	}
-	view := w.views[len(w.views)-1]
-	if view.literals == nil {
-		view.literals = make(map[int]int)
-	}
-	view.literals[view.source.Len()] = width
 }
 
 // token dispatches a scanned token to active views, tracking nesting depth and stripped quote syntax.
-func (w *shellCodeWords) token(raw, code string, before *shellFrame, lexer *shellLexer, depth, line int) {
+func (w *shellCodeWords) token(raw, code string, before *shellFrame, lexer *shellLexer, depth, line, offset int) {
 	if len(lexer.stack) > depth && shellReadsCommands(lexer.top()) {
-		w.masked(raw)
+		w.masked(raw, offset)
 		w.views = append(w.views, &shellCodeView{line: line})
 		return
 	}
@@ -98,18 +113,18 @@ func (w *shellCodeWords) token(raw, code string, before *shellFrame, lexer *shel
 	if len(lexer.stack) < depth && shellReadsCommands(before) {
 		w.flush(w.views[last])
 		w.views = w.views[:last]
-		w.masked(raw)
+		w.masked(raw, offset)
 		return
 	}
 	for _, view := range w.views[:last] {
-		view.write(raw, "")
+		view.write(raw, "", offset)
 	}
 	view := w.views[last]
 	drop := shellWordSyntax(raw, before, lexer.top(), len(lexer.stack)-depth)
 	for i := 0; i < drop; i++ {
 		view.removed = append(view.removed, view.source.Len()+i)
 	}
-	view.write(raw, code)
+	view.write(raw, code, offset)
 }
 
 // shellWordSyntax reports the leading bytes of a token that the lexer read as quote or
@@ -138,16 +153,16 @@ func shellEscapeRemovesSlash(frame *shellFrame, next byte) bool {
 }
 
 // newline handles line boundary transitions by flushing completed views or masking newlines.
-func (w *shellCodeWords) newline(nextLine int, commands bool) {
+func (w *shellCodeWords) newline(nextLine, offset int, commands bool) {
 	if !commands {
-		w.masked("\n")
+		w.masked("\n", offset)
 		return
 	}
 	last := len(w.views) - 1
 	w.flush(w.views[last])
 	w.views[last] = &shellCodeView{line: nextLine}
 	for _, view := range w.views[:last] {
-		view.write("\n", "")
+		view.write("\n", "", offset)
 	}
 }
 
@@ -176,10 +191,10 @@ func (v *shellCodeView) sourceWords(cmd shellCmd, start int) []ShellCodeWord {
 	for i := start; i < len(cmd.words); i++ {
 		code, at := cmd.words[i], cmd.at[i]
 		words = append(words, ShellCodeWord{
-			Code:   code,
-			Text:   source[at : at+len(code)],
-			Value:  v.spelling(at, at+len(code)),
-			Opaque: v.literals[at] == len(code),
+			Code:  code,
+			Text:  source[at : at+len(code)],
+			Value: v.spelling(at, at+len(code)),
+			Span:  [2]int{v.offset(at), v.offset(at+len(code)-1) + 1},
 		})
 	}
 	return words
