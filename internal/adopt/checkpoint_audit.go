@@ -20,9 +20,10 @@ import (
 // an earlier release left behind. TestCurrentCheckpointDigests_Boundary_MatchShippedBundle
 // fails until a changed script is recorded in both.
 var currentCheckpointDigests = map[string]string{
-	checkpointScript:   "f83bd89938ab00581becbc160d59c1df866f2bcf01f7ab4b8103a6dba05746a2",
-	checkpointCommon:   "c1c74e9d3ecfc87e3afb9b6db19500a961c8e8235a1d38540a4a54b04f1cd278",
-	checkpointLauncher: "577b85ce8fa4eb90aae8fa84b251ed828315baf5a20f5f249e346b74f49df622",
+	checkpointSessionModule: "1971c67fe13b8fc7e8a7beb6cd4ad400db189995836c3439b5bddd2bb4c1bfcb",
+	checkpointScript:        "c013f644842c2b404f74e346fbb6b5e9aaca13972ecfe52f2cff03ca004732a9",
+	checkpointCommon:        "a1714e7cbc94cff501830d65722d679a58931977130c21347a54e67ef93aae35",
+	checkpointLauncher:      "577b85ce8fa4eb90aae8fa84b251ed828315baf5a20f5f249e346b74f49df622",
 }
 
 // AuditCheckpointBundle returns one warning line per checkpoint bundle file of the repository
