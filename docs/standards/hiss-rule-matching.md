@@ -750,8 +750,10 @@ must leave its gap fixtures undetected. A rule that silently *gains* coverage fa
 as one that silently loses it, so the catalog cannot drift in either direction. `Verify` also walks
 `.config/hiss/testdata` in reverse so every fixture file and language directory on disk belongs to a
 valid bucket (`positive`, `negative`, `gap`, or `measured`) of a declared rule and language cell,
-failing with the path when a file or directory goes unowned (`TestVerifyRejectsOrphanFixtures` and
-`TestVerifyRejectsMisspelledLanguageDirectory` in `internal/hisscoverage/verify_test.go`). A `measured/`
+and fails when any entry goes unowned. For each unowned subtree, the report names up to 64 file
+paths. If more files remain, one summary names the subtree and counts the omitted files
+(`TestVerifyBoundsUnownedSubtreeFindings` and `TestVerifyBoundsLooseFilesInUndeclaredRule` in
+`internal/hisscoverage/verify_test.go`). A `measured/`
 bucket holds shapes the scanner reports without enforcing them. Each must yield a measurement and
 no violation, and a negative fixture must yield no measurement. So a measurement can neither
 disappear nor start to enforce unnoticed.
