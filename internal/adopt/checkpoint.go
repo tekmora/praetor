@@ -95,8 +95,8 @@ var priorCheckpointDigests = map[string]map[string]string{
 // source bundle is kept, --force included, and leaves the lifecycle unavailable; one holding an
 // earlier Praetor text of it is refreshed (installCheckpointSources). With vendored set, the
 // repository's lefthook.yml extends the canonical policy, whose scripts are vendored from one
-// reviewed Praetor commit with it: existing scripts stay as they are, never refreshed, so
-// policy and scripts never mix versions (BUG-858), and only missing ones are installed.
+// reviewed Praetor commit with it. Existing script text is kept so policy and scripts never
+// mix versions (BUG-858). A matching script can still have its distribution mode restored.
 func reconcileCheckpointBundle(ctx context.Context, s *adoptSession, vendored bool) (bool, error) {
 	if s.opts.LockSourceRoot == "" {
 		return false, errors.New("no explicit verified checkpoint source root")
@@ -207,10 +207,10 @@ func keptCheckpointText(actual []byte, exists bool, readErr error, source checkp
 // installCheckpointSource installs one evaluator file. An existing copy that holds an earlier
 // Praetor text of it is refreshed to the verified bundle; one that differs otherwise, or cannot
 // be compared with it, is kept, --force included, and leaves the lifecycle unavailable. With
-// vendored set, an existing copy belongs to the vendored canonical bundle and stays as it is.
+// vendored set, an existing copy belongs to the vendored canonical bundle and keeps its text.
 func installCheckpointSource(ctx context.Context, s *adoptSession, source checkpointSource, vendored bool) error {
 	sc := scaffold{
-		rel: source.path, perm: filePerm, content: source.data,
+		rel: source.path, perm: scaffoldSourcePerm(source.data), content: source.data, sourceMode: true,
 		created:   "Installed shared checkpoint evaluator from verified source bundle",
 		verified:  "Existing shared checkpoint evaluator preserved",
 		refreshed: "Refreshed an unedited earlier Praetor checkpoint evaluator to the verified source bundle",

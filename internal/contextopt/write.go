@@ -42,6 +42,16 @@ func ReplaceSnapshotIn(ctx context.Context, root, rel string, data []byte, optio
 	return replaceSnapshotIn(ctx, root, rel, data, options, false)
 }
 
+// ReplaceScaffoldIn publishes an adopted bundle file with its exact distribution mode.
+// It binds both the bytes and the mode to the observed file or absence through ReplaceSnapshotIn.
+func ReplaceScaffoldIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions) error {
+	if options.Mode != 0o644 && options.Mode != 0o755 {
+		return errors.New("scaffold mode must be 0644 or 0755")
+	}
+	options.scaffoldMode = true
+	return ReplaceSnapshotIn(ctx, root, rel, data, options)
+}
+
 // replaceSnapshotIn pins the parent of rel below root, creating absent directories without
 // following a symlink, and publishes through ReplaceRootSnapshot. observe binds the publish to
 // the current file instead of options.Expected and options.Exists.

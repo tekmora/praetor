@@ -12,13 +12,15 @@ import (
 )
 
 // ReplaceOptions binds a write to observed contents or explicit absence. Mode is
-// a permission ceiling: existing restrictive permissions are never widened.
+// a permission ceiling except for the public bundle files installed by ReplaceScaffoldIn.
 type ReplaceOptions struct {
 	Expected []byte
 	Exists   bool
 	Mode     os.FileMode
 	// ExpectedLimit raises only the prior snapshot read bound for a bounded recovery.
 	ExpectedLimit int64
+	// scaffoldMode publishes the exact mode validated by ReplaceScaffoldIn.
+	scaffoldMode bool
 }
 
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
@@ -151,7 +153,7 @@ func validateReplacement(ctx context.Context, data []byte, options ReplaceOption
 		return err
 	}
 
-	if options.Mode == 0 || options.Mode&^0o644 != 0 {
+	if !options.scaffoldMode && (options.Mode == 0 || options.Mode&^0o644 != 0) {
 		return errors.New("snapshot mode must be nonzero owner read/write and optional group/other read bits")
 	}
 	if !options.Exists && len(options.Expected) != 0 {
@@ -198,6 +200,9 @@ func verifyReplacement(ctx context.Context, root *os.Root, name string, options 
 	}
 	if !bytes.Equal(current.Bytes(), options.Expected) {
 		return 0, fmt.Errorf("snapshot changed before replacement: %s", name)
+	}
+	if options.scaffoldMode {
+		return options.Mode, nil
 	}
 	return options.Mode & info.Mode().Perm(), nil
 }

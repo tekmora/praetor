@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
+type: fixed
+title: Adoption installs checkpoint scripts with a shebang as executable and restores the mode on unedited copies
