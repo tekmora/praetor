@@ -20,13 +20,7 @@ const cleanGo = "package p\n\nfunc F(n int) int { return n + 1 }\n"
 func corpusRoot(t *testing.T, rule, lang, bucket, name, body string) string {
 	t.Helper()
 	root := t.TempDir()
-	dir := filepath.Join(root, filepath.FromSlash(FixtureDir), rule, lang, bucket)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatalf("create fixture dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	writeCorpusFixture(t, root, rule, lang, bucket, name, body)
 	return root
 }
 
@@ -432,4 +426,154 @@ func TestValidateTitleComparisonIsExact(t *testing.T) {
 	if got := unknown.Rules[0].CatalogTitle(); got != "Declared Only" {
 		t.Fatalf("CatalogTitle() of an unregistered rule = %q, want the declared title", got)
 	}
+}
+
+// malformedGo is an unparseable Go file: go/parser reports EOF inside the open function body.
+const malformedGo = "package p\n\nfunc F() {\n"
+
+// writeCorpusFixture stages an additional fixture file under an existing corpus root.
+func writeCorpusFixture(t *testing.T, root, rule, lang, bucket, name, body string) {
+	t.Helper()
+	dir := filepath.Join(root, filepath.FromSlash(FixtureDir), rule, lang, bucket)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create fixture dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+// delegatedCatalogFor builds a one-claim catalog attributed to runner.
+func delegatedCatalogFor(rule, lang, runner string) *Catalog {
+	catalog := catalogFor(rule, lang, StatePartial)
+	catalog.Rules[0].Coverage[0].Runner = runner
+	catalog.Rules[0].Coverage[0].Mechanism = runner
+	return catalog
+}
+
+// requireFinding asserts Verify rejects root against catalog with one finding naming fixture and detail.
+func requireFinding(t *testing.T, label, root string, catalog *Catalog, fixture, detail string) {
+	t.Helper()
+	report, err := Verify(t.Context(), root, catalog)
+	if err != nil {
+		t.Fatalf("%s: verify error: %v", label, err)
+	}
+	if report.Passed() {
+		t.Fatalf("%s: non-certifying fixture %s passed silently", label, fixture)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("%s: findings = %+v, want 1", label, report.Findings)
+	}
+	got := report.Findings[0]
+	if got.Fixture != fixture || !strings.Contains(got.Detail, detail) {
+		t.Errorf("%s: finding = %q, want fixture %q containing %q", label, got, fixture, detail)
+	}
+}
+
+// TestVerifyAcceptsCleanNegativeControl is the control case that holds before and after E01:
+// a valid, fully parsed negative Go fixture passes with zero findings on both a HISS-replayed
+// claim and a delegated claim.
+func TestVerifyAcceptsCleanNegativeControl(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "clean.go", cleanGo)
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil || !report.Passed() {
+		t.Fatalf("clean HISS negative control must pass: err=%v findings=%+v", err, report.Findings)
+	}
+
+	delegated := corpusRoot(t, "HISS-10", "go", bucketNegative, "clean.go", cleanGo)
+	report, err = Verify(t.Context(), delegated, delegatedCatalogFor("HISS-10", "go", "golangci-lint"))
+	if err != nil || !report.Passed() {
+		t.Fatalf("clean delegated negative control must pass: err=%v findings=%+v", err, report.Findings)
+	}
+}
+
+// TestVerifyRejectsMalformedNegativeFixture pins E01's primary defect: a malformed negative Go
+// fixture yields zero infractions only because go/parser could not parse its body, so it must
+// fail naming the fixture and the unparsed reason rather than certifying non-overmatching.
+func TestVerifyRejectsMalformedNegativeFixture(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "malformed.go", malformedGo)
+	requireFinding(t, "malformed negative", root, catalogFor("HISS-01", "go", StatePartial),
+		"malformed.go", "no analyzable structure")
+}
+
+// TestVerifyRejectsMalformedGapAndDelegatedFixtures verifies that unmarked unparsed Go fixtures
+// fail in gap/ and in delegated buckets too, rather than certifying absence or attribution.
+func TestVerifyRejectsMalformedGapAndDelegatedFixtures(t *testing.T) {
+	gapRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, gapRoot, "HISS-01", "go", bucketGap, "malformed-gap.go", malformedGo)
+	requireFinding(t, "malformed gap", gapRoot, catalogFor("HISS-01", "go", StatePartial),
+		"malformed-gap.go", "no analyzable structure")
+
+	delRoot := corpusRoot(t, "HISS-10", "go", bucketNegative, "malformed-delegated.go", malformedGo)
+	requireFinding(t, "malformed delegated", delRoot, delegatedCatalogFor("HISS-10", "go", "golangci-lint"),
+		"malformed-delegated.go", "no analyzable structure")
+}
+
+// TestVerifyRejectsTruncatedFixtureScan drives hiss.Scan's AST-depth truncation path and
+// verifies that a truncated negative, gap or delegated scan fails naming the fixture and reason.
+func TestVerifyRejectsTruncatedFixtureScan(t *testing.T) {
+	deepGo := "package p\n\nfunc F() int { return " + strings.Repeat("(", 1030) + "1" + strings.Repeat(")", 1030) + " }\n"
+	buckets := [...]string{bucketNegative, bucketGap}
+	for i := 0; i < len(buckets); i++ {
+		root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+		writeCorpusFixture(t, root, "HISS-01", "go", buckets[i], "deep.go", deepGo)
+		requireFinding(t, "truncated "+buckets[i], root, catalogFor("HISS-01", "go", StatePartial),
+			"deep.go", "truncated")
+	}
+
+	delRoot := corpusRoot(t, "HISS-10", "go", bucketNegative, "deep.go", deepGo)
+	requireFinding(t, "truncated delegated", delRoot, delegatedCatalogFor("HISS-10", "go", "golangci-lint"),
+		"deep.go", "truncated")
+}
+
+// TestVerifyRejectsZeroFileFixtureScan verifies that zero examined files for the claim's
+// language fail negative, gap and delegated claims, including a language with no HISS scanner.
+func TestVerifyRejectsZeroFileFixtureScan(t *testing.T) {
+	negJava := corpusRoot(t, "HISS-01", "java", bucketNegative, "Clean.java", "class Clean {}\n")
+	requireFinding(t, "scannerless negative", negJava, catalogFor("HISS-01", "java", StateUnsupported),
+		"Clean.java", "no HISS scanner reads java")
+
+	gapJava := corpusRoot(t, "HISS-01", "java", bucketGap, "Loop.java", "class Loop { void f() { while (true) {} } }\n")
+	requireFinding(t, "scannerless gap", gapJava, catalogFor("HISS-01", "java", StateUnsupported),
+		"Loop.java", "no HISS scanner reads java")
+
+	delGo := corpusRoot(t, "HISS-10", "go", bucketNegative, "notes.txt", "not Go source\n")
+	requireFinding(t, "zero-file delegated go", delGo, delegatedCatalogFor("HISS-10", "go", "golangci-lint"),
+		"notes.txt", "examined no go file")
+}
+
+// markedUnparsedGo is an intentional parser-failure gap fixture carrying a hiss-fixture header.
+const markedUnparsedGo = "// hiss-fixture: unparsed: partial syntax recovery gap\npackage p\n\nfunc F() {\n"
+
+// markedCleanGo carries an unparsed marker over valid Go source, which must fail as stale.
+const markedCleanGo = "// hiss-fixture: unparsed: partial syntax recovery gap\npackage p\n\nfunc F(n int) int { return n + 1 }\n"
+
+// markedReasonlessGo carries an unparsed marker with no reason, which must be refused.
+const markedReasonlessGo = "// hiss-fixture: unparsed:\npackage p\n\nfunc F() {\n"
+
+// TestVerifyIntentionalGapMarkerContract verifies that an intentional parser-failure gap stays
+// representable in gap/ with a reason, fails when it parses cleanly, and is refused in negative/.
+func TestVerifyIntentionalGapMarkerContract(t *testing.T) {
+	validGap := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, validGap, "HISS-01", "go", bucketGap, "partial.go", markedUnparsedGo)
+	if report, err := Verify(t.Context(), validGap, catalogFor("HISS-01", "go", StatePartial)); err != nil || !report.Passed() {
+		t.Fatalf("marked unparsed gap must hold while unparseable: err=%v findings=%+v", err, report.Findings)
+	}
+
+	staleGap := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, staleGap, "HISS-01", "go", bucketGap, "clean.go", markedCleanGo)
+	requireFinding(t, "stale unparsed marker", staleGap, catalogFor("HISS-01", "go", StatePartial),
+		"clean.go", "marked unparsed")
+
+	negMarked := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, negMarked, "HISS-01", "go", bucketNegative, "marked.go", markedUnparsedGo)
+	requireFinding(t, "negative with marker", negMarked, catalogFor("HISS-01", "go", StatePartial),
+		"marked.go", "only valid in gap/")
+
+	noReason := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	writeCorpusFixture(t, noReason, "HISS-01", "go", bucketGap, "no-reason.go", markedReasonlessGo)
+	requireFinding(t, "marker without reason", noReason, catalogFor("HISS-01", "go", StatePartial),
+		"no-reason.go", "reason")
 }

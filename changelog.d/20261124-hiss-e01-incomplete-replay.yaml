@@ -1,0 +1,3 @@
+type: fixed
+title: Refuse incomplete or zero-file HISS fixture scans in negative, gap, measured and delegated coverage replay so unparsed, truncated or unexamined inputs cannot certify a claim
+issue: '#2050'
