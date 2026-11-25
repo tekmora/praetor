@@ -771,15 +771,29 @@ fails the replay (`TestParseArchive_*` in `internal/hisscoverage/archive_test.go
 
 Each Verify run pins the fixture corpus directory and lists each catalog bucket once. It
 captures regular fixture bytes before replay. The verdict covers those bytes and the entries
-in those listings. A listed regular file that disappears or becomes a directory before capture
-produces an incomplete-replay finding. A change after capture shows on the next run.
+in those listings. The verifier counts names before looking up individual entries. A failed lookup
+produces an incomplete-replay finding naming the entry. After lookup, capture compares
+each regular file with the identity in the listing. On Windows the listing keeps the
+volume's enumerated file ID when available and otherwise captures the identity through
+the pinned parent. A change after capture shows on the next run.
 
 Across all buckets, the snapshot retains at most 1 MiB of fixture backing arrays between
-reads. Further fixture bytes go to a private temporary file, which Verify closes and
-removes when the run ends. Capture and replay each handle one additional fixture of at
-most 1 MiB of text at a time. With the pinned Go toolchain, capture also uses up to
-32 KiB for the streaming copy. Directory metadata and scanner working memory are outside
-the fixture-byte budget.
+reads. Further fixture bytes go to a private temporary file. Capture handles one additional
+fixture of at most 1 MiB and uses up to 32 KiB of streaming copy scratch with the pinned
+Go toolchain. Replay loads and scans one fixture at a time. Each bucket's results are
+consumed before the next bucket. Results retain a canonical marker kind and a detached
+reason of at most 256 bytes. Unknown-class diagnostics likewise quote at most 256 bytes
+of fixture text. Directory metadata, transient parsing copies, scanner working memory and
+accumulated report strings are outside the captured-byte budget.
+
+Cancellation is cooperative. A local directory read and a spill-file read are
+non-interruptible operations. Verify checks cancellation before and after each read.
+If the context expires during a read, the filesystem call must return before Verify can
+finish and run its deferred cleanup, which closes and removes the spill file.
+`TestBucketListingChecksCancellationBetweenReads` covers cancellation between directory
+reads. `TestBucketListingChecksCancellationAtEOF` and `TestSpillReadChecksCancellationOnReturn`
+cover cancellation on the final read. `TestVerifyRemovesSpill` covers cancellation
+between capture and replay.
 
 For each bucket (`positive/`, `negative/`, `gap/`, `measured/`), the verifier can certify a
 listing of at most 4,096 directory entries and replay up to 256 regular files. It reads one

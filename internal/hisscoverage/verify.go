@@ -35,6 +35,8 @@ const (
 	maxFixtureMarkerLines = 32
 	// fixtureMarkerPrefix introduces an intentional gap marker inside a leading fixture comment.
 	fixtureMarkerPrefix = "hiss-fixture:"
+	// maxMarkerTextBytes bounds each fixture-derived excerpt kept in a replay result.
+	maxMarkerTextBytes = 256
 	// maxBucketEntries is the largest bucket listing replay can certify (HISS-02).
 	// The reader requests one extra entry to detect overflow.
 	maxBucketEntries = 4096
@@ -209,9 +211,17 @@ func (r *Report) Passed() bool {
 // report fails. The verdict covers the bytes captured through one pinned corpus root before
 // replay. A later change to the fixture tree is outside this snapshot and shows on the next run.
 // Across all buckets the snapshot retains at most 1 MiB of fixture backing arrays.
-// Additional bytes spill to a private file. Capture and replay each handle one active
-// fixture of at most 1 MiB of text in addition to the retained budget. The pinned Go
-// version uses up to 32 KiB of copy scratch during capture.
+// Further bytes spill to a private file. Capture can hold one additional fixture of
+// up to 1 MiB and up to 32 KiB of copy scratch with the pinned Go version.
+// Replay scans one fixture at a time and consumes each bucket's results before the next
+// bucket. Each result owns its marker text. It keeps a canonical kind and copies at
+// most 256 bytes for the reason or unknown-class excerpt. Scanner allocations,
+// transient parsing copies, directory metadata and the report are separate.
+//
+// Cancellation is cooperative. A local directory read and a spill-file read are
+// non-interruptible operations. The context is checked before and after each read.
+// If cancellation occurs during a read, the call must finish before Verify can return
+// and run its deferred cleanup.
 func Verify(ctx context.Context, rootDir string, catalog *Catalog) (_ *Report, err error) {
 	if ctx == nil {
 		return nil, errors.New("hisscoverage: verify requires a context")
@@ -711,13 +721,12 @@ func examinedLanguage(cov *hiss.ScanCoverage, language string) bool {
 // parseFixtureMarker reads an optional `hiss-fixture: <unparsed|unexamined>: <reason>` header
 // from the leading comment lines of a fixture, returning (kind, reason, errDetail).
 func parseFixtureMarker(data []byte) (intentionalKind, string, string) {
-	text := string(data)
 	var kind intentionalKind
 	var reason string
-	for i := 0; i < maxFixtureMarkerLines && text != ""; i++ {
-		var line string
-		line, text, _ = strings.Cut(text, "\n")
-		body, stop := nextHeaderComment(line)
+	for i := 0; i < maxFixtureMarkerLines && len(data) > 0; i++ {
+		var line []byte
+		line, data, _ = bytes.Cut(data, []byte("\n"))
+		body, stop := nextHeaderComment(string(line))
 		if stop {
 			break
 		}
@@ -762,15 +771,34 @@ func trimFixtureComment(line string) (string, bool) {
 // parseMarkerSpec validates the `<unparsed|unexamined>: <reason>` payload after `hiss-fixture:`.
 func parseMarkerSpec(spec string) (intentionalKind, string, string) {
 	rawKind, rawReason, hasColon := strings.Cut(strings.TrimSpace(spec), ":")
-	kind := intentionalKind(strings.TrimSpace(rawKind))
-	if kind != intentionalUnparsed && kind != intentionalUnexamined {
-		return intentionalNone, "", fmt.Sprintf("unknown hiss-fixture class %q (want unparsed or unexamined)", strings.TrimSpace(rawKind))
+	rawKind = strings.TrimSpace(rawKind)
+	var kind intentionalKind
+	switch rawKind {
+	case string(intentionalUnparsed):
+		kind = intentionalUnparsed
+	case string(intentionalUnexamined):
+		kind = intentionalUnexamined
+	default:
+		return intentionalNone, "", fmt.Sprintf("unknown hiss-fixture class %q (want unparsed or unexamined)", markerExcerpt(rawKind))
 	}
 	reason := strings.TrimSpace(rawReason)
 	if !hasColon || reason == "" {
 		return intentionalNone, "", fmt.Sprintf("hiss-fixture %s marker requires a non-empty ': <reason>'", kind)
 	}
-	return kind, reason, ""
+	return kind, markerExcerpt(reason), ""
+}
+
+// markerExcerpt detaches a diagnostic from its source and marks truncation at a rune boundary.
+func markerExcerpt(text string) string {
+	if len(text) <= maxMarkerTextBytes {
+		return strings.Clone(text)
+	}
+	const suffix = "..."
+	end := maxMarkerTextBytes - len(suffix)
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return text[:end] + suffix
 }
 
 // stage writes one fixture's bytes below root: an archive as the files it holds, any other

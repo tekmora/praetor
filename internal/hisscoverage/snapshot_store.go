@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
@@ -59,14 +60,23 @@ func (s *fixtureStore) save(ctx context.Context, name string, data []byte) (capt
 
 // load retrieves the captured bytes of one fixture without consulting its original path.
 func (s *fixtureStore) load(ctx context.Context, file capturedFixture) ([]byte, error) {
+	if file.data != nil || file.size == 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return file.data, nil
+	}
+	return file.readSpill(ctx, s.spill)
+}
+
+// readSpill checks cancellation around the synchronous read of one captured range.
+func (file capturedFixture) readSpill(ctx context.Context, spill io.ReaderAt) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if file.data != nil || file.size == 0 {
-		return file.data, nil
-	}
 	data := make([]byte, file.size)
-	if _, err := s.spill.ReadAt(data, file.offset); err != nil {
+	_, readErr := spill.ReadAt(data, file.offset)
+	if err := errors.Join(readErr, ctx.Err()); err != nil {
 		return nil, fmt.Errorf("read spilled fixture: %w", err)
 	}
 	return data, nil

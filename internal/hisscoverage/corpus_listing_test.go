@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
@@ -97,5 +98,50 @@ func TestBucketListingChecksCancellationBetweenReads(t *testing.T) {
 	entries, err := collectBucketEntries(ctx, next)
 	if !errors.Is(err, context.Canceled) || entries != nil || reads != 1 {
 		t.Fatalf("canceled cursor: %v, entries %v, reads %d", err, entries, reads)
+	}
+}
+
+// TestBucketListingChecksCancellationAtEOF refuses a terminal chunk when cancellation
+// occurs inside the last directory read. There is no next iteration to catch it.
+func TestBucketListingChecksCancellationAtEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	next := func(int) ([]os.DirEntry, error) {
+		cancel()
+		return nil, io.EOF
+	}
+	entries, err := collectBucketEntries(ctx, next)
+	if entries != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("final directory read completed after cancellation: %v, %v", entries, err)
+	}
+}
+
+// failedLookup wraps a regular entry with a metadata lookup error other than ENOENT.
+type failedLookup struct{ os.DirEntry }
+
+// Info returns a named permission failure as a filesystem lookup would.
+func (e failedLookup) Info() (os.FileInfo, error) {
+	return nil, &os.PathError{Op: "stat", Path: e.Name(), Err: os.ErrPermission}
+}
+
+// TestVerifyNamesFailedLookups requires a finding for every listed lookup failure.
+func TestVerifyNamesFailedLookups(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, "a.go", cleanGo)
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "b.go", cleanGo)
+	ctx := withBucketReader(t.Context(), func(_ string, entries []os.DirEntry) []os.DirEntry {
+		for i, entry := range entries {
+			entries[i] = failedLookup{entry}
+		}
+		return entries
+	})
+	report := verifySnapshot(t, ctx, root)
+	if report.Fixtures != 0 || len(report.Findings) != 2 {
+		t.Fatalf("expected two failed lookups, got %+v", report)
+	}
+	for i, name := range [...]string{"a.go", "b.go"} {
+		finding := report.Findings[i]
+		if finding.Fixture != name || !strings.Contains(finding.Detail, "incomplete replay") {
+			t.Fatalf("expected a named lookup failure on %q, got %+v", name, finding)
+		}
 	}
 }

@@ -405,7 +405,7 @@ func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.Fil
 	if !opened.Mode().IsRegular() {
 		return 0, ErrSourceNotRegular
 	}
-	if !os.SameFile(before, opened) {
+	if !sameListedSource(before, opened) {
 		return 0, fmt.Errorf("source changed while opening")
 	}
 	count, err := io.Copy(dst, io.LimitReader(contextReader{ctx, file}, limit+1))
@@ -423,4 +423,12 @@ func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.Fil
 		return 0, fmt.Errorf("source changed during snapshot")
 	}
 	return count, ctx.Err()
+}
+
+// sameListedSource compares a descriptor-relative listing or a standard Go stat to the open file.
+func sameListedSource(listed, opened os.FileInfo) bool {
+	if native, ok := listed.(interface{ sameFile(os.FileInfo) bool }); ok {
+		return native.sameFile(opened)
+	}
+	return os.SameFile(listed, opened)
 }

@@ -7,9 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
-	"runtime"
 )
 
 // SnapshotDirectory retains the verified directory descriptor as the root for flat leaf
@@ -98,42 +98,106 @@ func validateSnapshotLeaf(ctx context.Context, dir *SnapshotDirectory, name stri
 	return errors.Join(ctx.Err(), validateLeafName(name))
 }
 
-// ReadEntries reads one bounded chunk on the pinned cursor. Unix Readdir obtains
-// metadata with fstatat. Windows listings may load file IDs by path on some volumes,
-// so Info for a Windows entry instead obtains its ID relative to this live handle.
+// listedName retains the enumeration record when it includes a stable file identity.
+type listedName struct {
+	name string
+	info os.FileInfo
+}
+
+// ReadEntries counts up to n names on the pinned cursor before looking up any leaf.
+// A failed lookup stays in its original slot and its Info method returns the cause.
 func (dir *SnapshotDirectory) ReadEntries(ctx context.Context, n int) ([]os.DirEntry, error) {
-	if n <= 0 {
-		return nil, os.ErrInvalid
+	next := func(n int) ([]listedName, error) { return dir.readNames(ctx, n) }
+	names, err := CollectDirectoryEntries(ctx, n, next)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, io.EOF
+	}
+	entries := make([]os.DirEntry, len(names))
+	for i, listed := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries[i] = dir.resolveEntry(listed)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	infos, err := dir.Readdir(n)
-	entries := make([]os.DirEntry, len(infos))
-	for i := range infos {
-		entry := fs.FileInfoToDirEntry(infos[i])
-		if runtime.GOOS == "windows" {
-			entry = handleStatEntry{entry, dir}
+	return entries, nil
+}
+
+// CollectDirectoryEntries fills a bounded allowance through short reads. Each successful
+// nonterminal read consumes at least one slot. A local directory read can block in the OS.
+func CollectDirectoryEntries[T any](ctx context.Context, limit int, next func(int) ([]T, error)) ([]T, error) {
+	if ctx == nil || next == nil || limit <= 0 {
+		return nil, os.ErrInvalid
+	}
+	var entries []T
+	for reads := 0; reads < limit; reads++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		entries[i] = entry
+		remaining := limit - len(entries)
+		chunk, err := next(remaining)
+		if canceled := ctx.Err(); canceled != nil {
+			return nil, canceled
+		}
+		if err := checkDirectoryChunk(len(chunk), remaining, err); err != nil {
+			return nil, err
+		}
+		entries = append(entries, chunk...)
+		if len(entries) == limit || errors.Is(err, io.EOF) {
+			return entries, nil
+		}
 	}
-	return entries, err
+	return nil, io.ErrNoProgress
 }
 
-// handleStatEntry loads Windows identity from the open parent, including on volumes
-// where the listing carries only a name and attributes.
-type handleStatEntry struct {
-	os.DirEntry
-	dir *SnapshotDirectory
+// checkDirectoryChunk refuses stalled or oversized responses and propagates read errors.
+func checkDirectoryChunk(count, remaining int, err error) error {
+	switch {
+	case err != nil && !errors.Is(err, io.EOF):
+		return err
+	case count > remaining:
+		return fmt.Errorf("directory read returned %d entries for %d slots", count, remaining)
+	case count == 0 && err == nil:
+		return io.ErrNoProgress
+	default:
+		return nil
+	}
 }
 
-// Info observes the current flat leaf without following a reparse point.
-func (e handleStatEntry) Info() (os.FileInfo, error) {
-	if err := validateLeafName(e.Name()); err != nil {
-		return nil, err
+// resolveEntry freezes the listed identity before the listing leaves the pinned directory.
+func (dir *SnapshotDirectory) resolveEntry(listed listedName) os.DirEntry {
+	if listed.info != nil {
+		return fs.FileInfoToDirEntry(listed.info)
 	}
-	return observeLeaf(e.dir.File, e.Name(), false)
+	info, err := dir.statListedName(listed.name)
+	if err != nil {
+		return failedEntry{name: listed.name, err: err}
+	}
+	return fs.FileInfoToDirEntry(info)
 }
+
+// failedEntry preserves an enumerated name whose descriptor-relative lookup failed.
+type failedEntry struct {
+	name string
+	err  error
+}
+
+// Name returns the original enumerated name.
+func (e failedEntry) Name() string { return e.name }
+
+// Type marks the entry as requiring inspection through Info.
+func (e failedEntry) Type() os.FileMode { return os.ModeIrregular }
+
+// IsDir cannot certify a directory without metadata.
+func (e failedEntry) IsDir() bool { return false }
+
+// Info returns the failure captured at listing time.
+func (e failedEntry) Info() (os.FileInfo, error) { return nil, e.err }
 
 // ReadListedSnapshot captures text using the file identity saved by the directory listing.
 func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name string, listed os.FileInfo) ([]byte, error) {

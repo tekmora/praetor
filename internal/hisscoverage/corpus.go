@@ -116,74 +116,86 @@ func (stage fixtureStage) captureBucket(ctx context.Context, parent *contextopt.
 		return bucket, err
 	}
 	var report Report
-	for i := 0; i < len(entries) && i < maxBucketEntries; i++ {
-		if err := ctx.Err(); err != nil {
-			return bucket, err
-		}
-		stop, err := bucket.captureEntry(ctx, dir, name, entries[i], &report)
-		if err != nil {
-			return bucket, err
-		}
-		if stop {
-			bucket.findings = report.Findings
-			return bucket, nil
-		}
+	files, err := stage.listedFixtures(ctx, name, entries, &report)
+	if err != nil {
+		return bucket, err
 	}
-	if len(entries) > maxBucketEntries {
-		recordIncompleteBucket(&report, stage.ruleID, stage.language, name,
-			entries[maxBucketEntries].Name(), maxBucketEntries, "directory entries")
+	for _, listed := range files {
+		if err := bucket.captureFile(ctx, dir, name, listed, &report); err != nil {
+			return bucket, err
+		}
 	}
 	bucket.findings = report.Findings
 	return bucket, nil
 }
 
-// captureEntry classifies a listed entry and captures bounded text for a regular fixture.
-func (b *bucketSnapshot) captureEntry(
-	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket string, entry os.DirEntry, report *Report,
-) (bool, error) {
-	name := entry.Name()
-	rule, lang := b.stage.ruleID, b.stage.language
+// listedFixtures records the bounds and inspects every returned lookup, including the
+// overflow sentinel. Only the first 256 eligible regular files proceed to capture.
+func (stage fixtureStage) listedFixtures(ctx context.Context, bucket string, entries []os.DirEntry, report *Report) ([]os.FileInfo, error) {
+	if len(entries) > maxBucketEntries {
+		recordIncompleteBucket(report, stage.ruleID, stage.language, bucket,
+			entries[maxBucketEntries].Name(), maxBucketEntries, "directory entries")
+	}
+	var files []os.FileInfo
+	for i, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		listed := stage.regularFixture(ctx, bucket, entry, report)
+		if listed != nil && i < maxBucketEntries && len(files) <= maxFixturesPerBucket {
+			files = append(files, listed)
+		}
+	}
+	if len(files) > maxFixturesPerBucket {
+		recordIncompleteBucket(report, stage.ruleID, stage.language, bucket,
+			files[maxFixturesPerBucket].Name(), maxFixturesPerBucket, "regular files")
+		files = files[:maxFixturesPerBucket]
+	}
+	return files, ctx.Err()
+}
+
+// regularFixture returns one regular file's frozen identity or records its listing finding.
+func (stage fixtureStage) regularFixture(ctx context.Context, bucket string, entry os.DirEntry, report *Report) os.FileInfo {
 	class, listed, err := classifyBucketEntry(ctx, entry)
 	if err != nil {
-		return false, err
+		report.Findings = append(report.Findings, Finding{
+			Rule: stage.ruleID, Language: stage.language, Bucket: bucket, Fixture: entry.Name(),
+			Detail: "incomplete replay: " + err.Error(),
+		})
+		return nil
 	}
 	switch class {
-	case entryDirectory:
-		return false, nil
+	case entryRegularFile:
+		return listed
 	case entryNonRegular:
-		recordNonRegularEntry(report, rule, lang, bucket, name)
-		return false, nil
+		recordNonRegularEntry(report, stage.ruleID, stage.language, bucket, entry.Name())
 	case entryChanged:
-		recordChangedBucket(report, rule, lang, bucket, name)
-		return true, nil
+		recordChangedBucket(report, stage.ruleID, stage.language, bucket, entry.Name())
 	}
-	if len(b.files) >= maxFixturesPerBucket {
-		recordIncompleteBucket(report, rule, lang, bucket, name, maxFixturesPerBucket, "regular files")
-		return true, nil
-	}
-	return b.captureFile(ctx, dir, bucket, name, listed, report)
+	return nil
 }
 
 // captureFile saves one stable regular file or records a change since listing.
 func (b *bucketSnapshot) captureFile(
-	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket, name string, listed os.FileInfo, report *Report,
-) (bool, error) {
+	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket string, listed os.FileInfo, report *Report,
+) error {
+	name := listed.Name()
 	bounded, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
 	defer cancel()
 	data, err := dir.ReadListedSnapshot(bounded, name, listed)
 	if errors.Is(err, contextopt.ErrSourceNotRegular) || errors.Is(err, os.ErrNotExist) {
 		recordChangedBucket(report, b.stage.ruleID, b.stage.language, bucket, name)
-		return true, nil
+		return nil
 	}
 	if err != nil {
-		return false, escapedError{fmt.Errorf("read fixture %s: %w", name, err)}
+		return escapedError{fmt.Errorf("read fixture %s: %w", name, err)}
 	}
 	file, err := b.store.save(bounded, name, data)
 	if err != nil {
-		return false, err
+		return err
 	}
 	b.files = append(b.files, file)
-	return false, nil
+	return nil
 }
 
 // snapshotReadyKey carries a test callback run after all capture handles close and before replay.
@@ -200,12 +212,14 @@ func readBucketEntries(ctx context.Context, dir *contextopt.SnapshotDirectory) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	next := func(n int) ([]os.DirEntry, error) { return dir.ReadEntries(ctx, n) }
+	var entries []os.DirEntry
+	var err error
 	if stub, ok := ctx.Value(bucketReaderKey{}).(func(string, int) ([]os.DirEntry, error)); ok {
-		next = func(n int) ([]os.DirEntry, error) { return stub(dir.Name(), n) }
+		entries, err = collectBucketEntries(ctx, func(n int) ([]os.DirEntry, error) { return stub(dir.Name(), n) })
+	} else {
+		entries, err = dir.ReadEntries(ctx, maxBucketEntries+1)
 	}
-	entries, err := collectBucketEntries(ctx, next)
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("list fixture bucket %s: %w", dir.Name(), err)
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
@@ -218,25 +232,7 @@ func readBucketEntries(ctx context.Context, dir *contextopt.SnapshotDirectory) (
 // collectBucketEntries consumes a single directory cursor through EOF or the overflow entry.
 // Every successful nonterminal read advances by at least one entry, bounding calls at 4097.
 func collectBucketEntries(ctx context.Context, next func(int) ([]os.DirEntry, error)) ([]os.DirEntry, error) {
-	const limit = maxBucketEntries + 1
-	var entries []os.DirEntry
-	for reads := 0; reads < limit; reads++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		chunk, err := next(limit - len(entries))
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		entries = append(entries, chunk...)
-		if len(entries) == limit || errors.Is(err, io.EOF) {
-			return entries, nil
-		}
-		if len(chunk) == 0 {
-			return nil, io.ErrNoProgress
-		}
-	}
-	return nil, io.ErrNoProgress
+	return contextopt.CollectDirectoryEntries(ctx, maxBucketEntries+1, next)
 }
 
 // entryClass describes a bucket entry's observed kind or a change since listing.

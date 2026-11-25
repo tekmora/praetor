@@ -4,7 +4,10 @@
 package contextopt
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"unsafe"
@@ -39,4 +42,66 @@ func openNativeLeaf(parent uintptr, parentName, name string, _ bool) (*os.File, 
 		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
 	}
 	return os.NewFile(uintptr(handle), filepath.Join(parentName, name)), nil
+}
+
+// readNames keeps the identity in Go's directory record on volumes that enumerate IDs.
+// Other volumes supply names and attributes. Freeze their regular-file IDs from the
+// pinned parent after all names are counted, before returning the listing.
+func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
+	infos, readErr := dir.Readdir(n)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(infos) == 0 || readErr != nil && !errors.Is(readErr, io.EOF) {
+		return nil, readErr
+	}
+	hasIDs, err := dir.listsFileIDs()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]listedName, len(infos))
+	for i, info := range infos {
+		names[i].name = info.Name()
+		if hasIDs || !info.Mode().IsRegular() {
+			names[i].info = info
+		}
+	}
+	return names, readErr
+}
+
+// listsFileIDs checks the volume flags Go uses to select FILE_ID_BOTH_DIR_INFO.
+func (dir *SnapshotDirectory) listsFileIDs() (bool, error) {
+	conn, err := dir.SyscallConn()
+	if err != nil {
+		return false, err
+	}
+	var flags uint32
+	var volumeErr error
+	err = conn.Control(func(fd uintptr) {
+		volumeErr = windows.GetVolumeInformationByHandle(windows.Handle(fd), nil, 0, nil, nil, &flags, nil, 0)
+	})
+	if err != nil {
+		return false, err
+	}
+	// A filesystem without this query also returns name-and-attribute records to Go.
+	if errors.Is(volumeErr, windows.ERROR_NOT_SUPPORTED) || errors.Is(volumeErr, windows.ERROR_INVALID_FUNCTION) {
+		return false, nil
+	}
+	const required = windows.FILE_SUPPORTS_OBJECT_IDS | windows.FILE_SUPPORTS_OPEN_BY_FILE_ID
+	return flags&required == required, volumeErr
+}
+
+// statListedName captures a fallback identity through the enumerating parent.
+func (dir *SnapshotDirectory) statListedName(name string) (os.FileInfo, error) {
+	if err := validateLeafName(name); err != nil {
+		return nil, err
+	}
+	info, err := observeLeaf(dir.File, name, false)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("listed regular file %q changed type", name)
+	}
+	return info, nil
 }

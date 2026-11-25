@@ -6,6 +6,7 @@
 package contextopt
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -13,4 +14,14 @@ import (
 // openNativeLeaf refuses platforms without the pinned snapshot opener.
 func openNativeLeaf(_ uintptr, _, _ string, _ bool) (*os.File, error) {
 	return nil, fmt.Errorf("context snapshots require Unix or Windows")
+}
+
+// readNames refuses platforms without descriptor-relative lookup.
+func (dir *SnapshotDirectory) readNames(_ context.Context, _ int) ([]listedName, error) {
+	return nil, os.ErrInvalid
+}
+
+// statListedName refuses unpinned leaf metadata.
+func (dir *SnapshotDirectory) statListedName(_ string) (os.FileInfo, error) {
+	return nil, os.ErrInvalid
 }
