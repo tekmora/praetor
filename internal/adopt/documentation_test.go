@@ -181,15 +181,9 @@ func TestAdoptionDocumentationGateFacetTransitionConverges(t *testing.T) {
 	if got := mustRead(t, filepath.Join(root, markdownassets.Directory, "operator.txt")); got != "preserve\n" {
 		t.Fatalf("operator file inside documentation tool directory changed: %q", got)
 	}
-	disabled := snapshotTree(t, root)
-	opts.Force = false
-	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
-		t.Fatal(err)
-	}
-	assertTreeUnchanged(t, disabled, snapshotTree(t, root))
+	assertPlainAdoptionPreservesTree(t, opts)
 
 	setDocumentationFacet(t, root, true)
-	opts.Force = true
 	if _, err := Adopt(t.Context(), opts); err != nil {
 		t.Fatal(err)
 	}
@@ -201,12 +195,7 @@ func TestAdoptionDocumentationGateFacetTransitionConverges(t *testing.T) {
 	if !strings.Contains(mustRead(t, filepath.Join(root, prettierIgnoreFile)), DocumentationWorkflowFile) {
 		t.Fatal("re-enabled formatter inventory lacks documentation workflow")
 	}
-	enabled := snapshotTree(t, root)
-	opts.Force = false
-	if _, err := documentationAdoptOrStep(t, opts, false); err != nil {
-		t.Fatal(err)
-	}
-	assertTreeUnchanged(t, enabled, snapshotTree(t, root))
+	assertPlainAdoptionPreservesTree(t, opts)
 }
 
 func TestAdoptionDocumentationGateCRLFConverges(t *testing.T) {

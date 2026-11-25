@@ -8,12 +8,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/gomanifest"
+	"github.com/cordanaLLM/praetor/internal/hiss"
+	"github.com/cordanaLLM/praetor/internal/testsupport"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 var timeoutsToday = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
@@ -678,6 +683,10 @@ var makefileShellReaderCases = []struct {
 		body: "test:\n\tgo test -timeout 30m ./pkg/ # -timeout 99m\\\n\ttrue\n",
 	},
 	{
+		name: "unindented comment after continued package list",
+		body: "test:\n\tgo test ./... \\\n# -timeout 45m\n",
+	},
+	{
 		name: "C13-04 quoted command text",
 		body: "test:\n\techo 'go test -timeout 99m ./pkg/'\n",
 	},
@@ -851,6 +860,77 @@ func TestAuditTestTimeouts_RepositoryMakefile(t *testing.T) {
 	if strings.Count(err.Error(), "Makefile:") != 1 {
 		t.Fatalf("forked Makefile audit: err = %v; want exactly one Makefile finding", err)
 	}
+	t.Run("shared invocation selects adopt", func(t *testing.T) {
+		checkRepositoryTestPackages(t, root)
+	})
+}
+
+// checkRepositoryTestPackages expands both checked-in test recipes over two real Go packages.
+func checkRepositoryTestPackages(t *testing.T, repoRoot string) {
+	t.Helper()
+	makePath := testsupport.GNUMake(t)
+	body, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"MAKEFILES", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"} {
+		t.Setenv(key, "")
+	}
+	env := util.FilterEnvironment(testsupport.OfflineGoEnv(t), func(key string) bool { return strings.HasPrefix(key, "GIT_") })
+	ctx, err := util.WithCommandEnvironment(t.Context(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeForgeTestFile(t, root, "go.mod", "module "+gomanifest.EngineModulePath+"\n")
+	writeForgeTestFile(t, root, "internal/adopt/adopt.go", "package adopt\n")
+	writeForgeTestFile(t, root, "internal/control/control.go", "package control\n")
+	for _, tc := range []struct {
+		name, extra string
+		wantAdopt   bool
+	}{
+		{"checked in", "", true},
+		{"adopt excluded", "\nTEST_PACKAGES := $(filter-out %/internal/adopt,$(TEST_PACKAGES))\n", false},
+	} {
+		writeForgeTestFile(t, root, "Makefile", string(body)+tc.extra)
+		for _, profile := range []string{"", "coverage.out"} {
+			out, err := util.RunCommand(ctx, root, makePath, "-n", "--no-print-directory", "test",
+				"GO_TEST=go test", "HOOK_GO_SOURCES=", "TEST_COVERPROFILE="+profile)
+			if err != nil {
+				t.Fatalf("%s, profile %q: %v", tc.name, profile, err)
+			}
+			if got := sharedTestSelectsAdopt(t, out); got != tc.wantAdopt {
+				t.Fatalf("%s, profile %q: shared invocation selects adopt = %v, want %v:\n%s", tc.name, profile, got, tc.wantAdopt, out)
+			}
+		}
+	}
+}
+
+// sharedTestSelectsAdopt checks membership on the 30m Go test command that also selects the control package.
+func sharedTestSelectsAdopt(t *testing.T, recipe string) bool {
+	t.Helper()
+	commands, ok := hiss.ShellCodeCommands(recipe, maxTimeoutWorkflowLines, nil)
+	if !ok {
+		t.Fatalf("unreadable expanded test recipe:\n%s", recipe)
+	}
+	for _, command := range commands {
+		args := goTestArgs(command.Words)
+		var values []string
+		var timeout string
+		for i := 0; i < len(args); i++ {
+			if value, next, found := timeoutValue(args, i); found {
+				timeout = value
+				i = next
+			} else {
+				values = append(values, args[i].Value)
+			}
+		}
+		if timeout == "30m" && slices.Contains(values, gomanifest.EngineModulePath+"/internal/control") {
+			return slices.Contains(values, gomanifest.EngineModulePath+"/internal/adopt")
+		}
+	}
+	t.Fatalf("missing shared 30m go test for the control package:\n%s", recipe)
+	return false
 }
 
 // Negative: raw YAML physical line starting with # inside a quoted run scalar decodes to shell code.

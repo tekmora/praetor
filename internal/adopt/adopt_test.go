@@ -198,6 +198,17 @@ func assertTreeUnchanged(t *testing.T, before, after map[string]string) {
 	}
 }
 
+// assertPlainAdoptionPreservesTree checks that every adoption step leaves the current tree intact.
+func assertPlainAdoptionPreservesTree(t *testing.T, opts AdoptOptions) {
+	t.Helper()
+	before := snapshotTree(t, opts.Path)
+	opts.Force = false
+	if _, err := Adopt(t.Context(), opts); err != nil {
+		t.Fatal(err)
+	}
+	assertTreeUnchanged(t, before, snapshotTree(t, opts.Path))
+}
+
 func assertNoIssues(t *testing.T, rep *AdoptReport) {
 	t.Helper()
 	if len(rep.Errors) > 0 {

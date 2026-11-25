@@ -60,6 +60,15 @@ func rulesetRequiresAPIGate(t *testing.T, root string) bool {
 	return required
 }
 
+// assertAPIGateAndRuleset checks that the workflow files and required status agree with the facet.
+func assertAPIGateAndRuleset(t *testing.T, root string, enabled bool) {
+	t.Helper()
+	assertAPIGate(t, root, enabled)
+	if got := rulesetRequiresAPIGate(t, root); got != enabled {
+		t.Fatalf("ruleset requires the API compatibility context = %v, want %v", got, enabled)
+	}
+}
+
 // Positive: the default facets emit the gate, its workflow joins the rendered ruleset and the
 // actionlint labels, and a rerun changes nothing. Negative: removing the facet without --force
 // stops while the ruleset requires the context, before the gate or the context goes. Boundary:
@@ -71,35 +80,22 @@ func TestAdoptionAPICompatibilityGateFacetTransitionConverges(t *testing.T) {
 	if _, err := Adopt(t.Context(), opts); err != nil {
 		t.Fatal(err)
 	}
-	assertAPIGate(t, root, true)
-	if !rulesetRequiresAPIGate(t, root) {
-		t.Fatal("the rendered ruleset does not require the API compatibility context")
-	}
+	assertAPIGateAndRuleset(t, root, true)
 	if actionlint := mustRead(t, filepath.Join(root, ".github", "actionlint.yaml")); !strings.Contains(actionlint, "ubuntu-26.04") {
 		t.Fatalf("actionlint configuration lacks the gate's runner label:\n%s", actionlint)
 	}
-	enabled := snapshotTree(t, root)
-	if _, err := adoptOrStep(t, opts, false, reconcileAPICompatibilityGate); err != nil {
-		t.Fatal(err)
-	}
-	assertTreeUnchanged(t, enabled, snapshotTree(t, root))
+	assertPlainAdoptionPreservesTree(t, opts)
 
 	setManifestFacet(t, root, "api:public-contract", false)
 	if _, err := Adopt(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "removes hosted context \"Go API Compatibility\"") {
 		t.Fatalf("unforced disable = %v, want the hosted context refusal", err)
 	}
-	assertAPIGate(t, root, true)
-	if !rulesetRequiresAPIGate(t, root) {
-		t.Fatal("a refused disable dropped the context from the ruleset")
-	}
+	assertAPIGateAndRuleset(t, root, true)
 	opts.Force = true
 	if _, err := Adopt(t.Context(), opts); err != nil {
 		t.Fatal(err)
 	}
-	assertAPIGate(t, root, false)
-	if rulesetRequiresAPIGate(t, root) {
-		t.Fatal("the ruleset still requires the removed gate's context")
-	}
+	assertAPIGateAndRuleset(t, root, false)
 
 	// The lock no longer pins the facet once it was removed, so re-adding it re-pins with --force,
 	// as for any facet; a plain run then converges.
@@ -107,16 +103,8 @@ func TestAdoptionAPICompatibilityGateFacetTransitionConverges(t *testing.T) {
 	if _, err := Adopt(t.Context(), opts); err != nil {
 		t.Fatal(err)
 	}
-	assertAPIGate(t, root, true)
-	if !rulesetRequiresAPIGate(t, root) {
-		t.Fatal("the re-enabled gate's context is not required")
-	}
-	reenabled := snapshotTree(t, root)
-	opts.Force = false
-	if _, err := adoptOrStep(t, opts, false, reconcileAPICompatibilityGate); err != nil {
-		t.Fatal(err)
-	}
-	assertTreeUnchanged(t, reenabled, snapshotTree(t, root))
+	assertAPIGateAndRuleset(t, root, true)
+	assertPlainAdoptionPreservesTree(t, opts)
 }
 
 // Negative: a file the repository already had at a managed path is not overwritten, even under
