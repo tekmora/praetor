@@ -6,7 +6,6 @@
 package contextopt
 
 import (
-	"context"
 	"fmt"
 	"os"
 )
@@ -17,7 +16,7 @@ func openNativeLeaf(_ uintptr, _, _ string, _ bool) (*os.File, error) {
 }
 
 // readNames refuses platforms without descriptor-relative lookup.
-func (dir *SnapshotDirectory) readNames(_ context.Context, _ int) ([]listedName, error) {
+func (dir *SnapshotDirectory) readNames(_ int) ([]listedName, error) {
 	return nil, os.ErrInvalid
 }
 

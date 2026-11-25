@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"golang.org/x/sys/unix"
 )
 
@@ -101,5 +102,43 @@ func vanishingFileReader(t *testing.T, bucket string, prefix int, victim string)
 			return entries, nil
 		}
 		return cursor.ReadEntries(t.Context(), n)
+	}
+}
+
+// TestBucketDirectoryOpenedOnce counts kernel events on the bucket inode itself.
+// Watching closes as well as opens prevents consecutive opens from being coalesced.
+func TestBucketDirectoryOpenedOnce(t *testing.T) {
+	root := t.TempDir()
+	bucket := filepath.Join(root, "bucket")
+	ctx, cancel := context.WithTimeout(t.Context(), contextopt.MaxDuration)
+	defer cancel()
+	if err := contextopt.EnsureDirectory(ctx, bucket, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.InotifyInit1(unix.IN_NONBLOCK | unix.IN_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := unix.Close(fd); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := unix.InotifyAddWatch(fd, bucket, unix.IN_OPEN|unix.IN_CLOSE_NOWRITE); err != nil {
+		t.Fatal(err)
+	}
+	child, err := contextopt.OpenSnapshotDirectoryIn(ctx, root, "bucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := child.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	var events [3 * unix.SizeofInotifyEvent]byte
+	n, err := unix.Read(fd, events[:])
+	if err != nil || n != unix.SizeofInotifyEvent {
+		t.Fatalf("bucket acquisition returned %d event bytes, want one open (%d bytes): %v", n, unix.SizeofInotifyEvent, err)
 	}
 }

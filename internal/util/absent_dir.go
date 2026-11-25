@@ -26,7 +26,7 @@ import (
 // A walk that exhausts its bound, or meets any error other than fs.ErrNotExist, reports
 // false, so the caller surfaces the original error instead of assuming there was nothing.
 func DirectoryAbsent(dir string, err error) bool {
-	if dir == "" || !errors.Is(err, fs.ErrNotExist) {
+	if dir == "" || !SoleNotExist(err) {
 		return false
 	}
 	current := filepath.Clean(dir)
@@ -45,6 +45,27 @@ func DirectoryAbsent(dir string, err error) bool {
 			return false
 		}
 		current = parent
+	}
+	return false
+}
+
+// SoleNotExist reports one missing-file cause through ordinary wrappers and singleton
+// joins. A second cause (for example, closing the parent) must survive verification.
+func SoleNotExist(err error) bool {
+	const maxWrappers = 64
+	for depth := 0; err != nil && depth < maxWrappers; depth++ {
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() []error }:
+			causes := wrapped.Unwrap()
+			if len(causes) != 1 {
+				return false
+			}
+			err = causes[0]
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		default:
+			return errors.Is(err, fs.ErrNotExist)
+		}
 	}
 	return false
 }

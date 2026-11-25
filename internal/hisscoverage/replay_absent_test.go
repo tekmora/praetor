@@ -1,8 +1,13 @@
 package hisscoverage
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // TestReplayBucketDistinguishesAbsentFromMisplaced: a claim may have no bucket, but a regular
@@ -19,5 +24,24 @@ func TestReplayBucketDistinguishesAbsentFromMisplaced(t *testing.T) {
 	}
 	if _, err := Verify(t.Context(), root, catalog); err == nil {
 		t.Fatal("a regular file was replayed as an empty bucket")
+	}
+}
+
+// TestCorpusOpenFailurePreservesCleanup checks both shapes produced by the component
+// walk when the child is missing: a successful parent close and a failed parent close.
+func TestCorpusOpenFailurePreservesCleanup(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, filepath.FromSlash(FixtureDir))
+	_, missing := os.Stat(path)
+	if !errors.Is(missing, os.ErrNotExist) {
+		t.Fatalf("missing corpus fixture: %v", missing)
+	}
+	if !util.DirectoryAbsent(path, errors.Join(missing, nil)) {
+		t.Fatalf("corpus with a sole missing component: %v", missing)
+	}
+	cleanup := &os.PathError{Op: "close", Path: root, Err: os.ErrPermission}
+	err := fmt.Errorf("walk: %w", errors.Join(missing, cleanup))
+	if util.DirectoryAbsent(path, err) {
+		t.Fatalf("accepted an empty fixture corpus after failed cleanup: %v", err)
 	}
 }

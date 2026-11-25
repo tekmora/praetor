@@ -1,3 +1,3 @@
 type: fixed
-title: Fail HISS coverage verification when a fixture bucket exceeds its 256-file bound, exclude subdirectories from the bound, and require matching FILE_ID_INFO volume serials and 128-bit file IDs on Windows
+title: Reject incomplete HISS fixture buckets on overflow, listing errors, or cleanup failure. Count up to 256 regular files, retain one handle per directory, and verify full Windows volume and file IDs.
 issue: "2051"

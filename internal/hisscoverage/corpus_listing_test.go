@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
@@ -117,6 +118,80 @@ func TestBucketListingChecksCancellationAtEOF(t *testing.T) {
 		if entries != nil || !errors.Is(err, context.Canceled) || !errors.Is(err, readErr) {
 			t.Fatalf("final directory read: entries=%v err=%v, want cancellation and %v", entries, err, readErr)
 		}
+	}
+}
+
+// TestCompoundEOFDiscardsPartialListing exercises both the collector and Verify's bucket
+// boundary. A live context cannot turn a terminal permission failure into a partial success.
+func TestCompoundEOFDiscardsPartialListing(t *testing.T) {
+	dir := listingCursor(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(t.Context(), contextopt.MaxDuration)
+	defer cancel()
+	next := func(int) ([]os.DirEntry, error) {
+		return []os.DirEntry{namedTestDirectory{name: "partial"}}, errors.Join(io.EOF, os.ErrPermission)
+	}
+	t.Run("collector", func(t *testing.T) {
+		entries, err := collectBucketEntries(ctx, next)
+		requireCompoundEOF(t, entries, err)
+	})
+	t.Run("corpus", func(t *testing.T) {
+		stub := func(_ string, n int) ([]os.DirEntry, error) { return next(n) }
+		entries, err := readBucketEntries(context.WithValue(ctx, bucketReaderKey{}, stub), dir)
+		requireCompoundEOF(t, entries, err)
+		if !strings.Contains(err.Error(), dir.Name()) {
+			t.Fatalf("bucket missing from listing error: %v", err)
+		}
+	})
+}
+
+// TestFinalDirectorySlotRequiresBareEOF checks completion when the last chunk fills
+// the allowance. A wrapper around EOF still carries a diagnostic that must survive.
+func TestFinalDirectorySlotRequiresBareEOF(t *testing.T) {
+	readErr := io.EOF
+	next := func(int) ([]int, error) { return []int{42}, readErr }
+	entries, err := contextopt.CollectDirectoryEntries(t.Context(), 1, next)
+	if err != nil || len(entries) != 1 || entries[0] != 42 {
+		t.Fatalf("bare EOF at final slot: entries=%v err=%v", entries, err)
+	}
+	readErr = fmt.Errorf("directory cursor: %w", io.EOF)
+	entries, err = contextopt.CollectDirectoryEntries(t.Context(), 1, next)
+	if entries != nil || !errors.Is(err, readErr) {
+		t.Fatalf("wrapped EOF at final slot: entries=%v err=%v", entries, err)
+	}
+}
+
+// requireCompoundEOF requires both causes and discards every entry from the failed read.
+func requireCompoundEOF(t *testing.T, entries []os.DirEntry, err error) {
+	t.Helper()
+	if entries != nil || !errors.Is(err, io.EOF) || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("partial listing: entries=%v err=%v, want EOF and permission denied", entries, err)
+	}
+}
+
+// cancelAfterRead cancels the real context on the first status check after the cursor read.
+type cancelAfterRead struct {
+	context.Context
+	cancel  context.CancelFunc
+	checked atomic.Bool
+}
+
+// Err admits the initial read and delivers cancellation at its completion boundary.
+func (c *cancelAfterRead) Err() error {
+	if c.checked.Swap(true) {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// TestNativeListingPreservesTerminalEOF reads an empty directory with the platform's
+// native reader. Returning only cancellation from that reader loses the observed EOF.
+func TestNativeListingPreservesTerminalEOF(t *testing.T) {
+	dir := listingCursor(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(t.Context(), contextopt.MaxDuration)
+	defer cancel()
+	entries, err := dir.ReadEntries(&cancelAfterRead{Context: ctx, cancel: cancel}, 1)
+	if entries != nil || !errors.Is(err, io.EOF) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("native terminal read: entries=%v err=%v, want EOF and cancellation", entries, err)
 	}
 }
 

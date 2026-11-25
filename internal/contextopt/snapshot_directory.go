@@ -25,12 +25,17 @@ func OpenSnapshotDirectoryIn(ctx context.Context, root, rel string) (*SnapshotDi
 	if err != nil {
 		return nil, err
 	}
+	if ctx == nil {
+		return nil, os.ErrInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
 	base, err := OpenDirectory(ctx, root)
 	if err != nil {
 		return nil, err
 	}
 	current, err := base.Open(".")
-	err = errors.Join(err, base.Close())
+	err = errors.Join(err, base.Close(), ctx.Err())
 	if err != nil {
 		if current != nil {
 			err = errors.Join(err, current.Close())
@@ -40,50 +45,23 @@ func OpenSnapshotDirectoryIn(ctx context.Context, root, rel string) (*SnapshotDi
 	return walkComponents(ctx, &SnapshotDirectory{current}, parts, OpenChildDirectory)
 }
 
-// OpenChildDirectory observes the child's identity and acquires the directory without following
-// its name through a link. Only absence at the initial observation means a missing bucket.
+// OpenChildDirectory opens a child without following links and retains the handle it
+// checks. Listing the directory and opening its descendants use that same handle.
 func OpenChildDirectory(ctx context.Context, dir *SnapshotDirectory, name string) (*SnapshotDirectory, error) {
 	if err := validateSnapshotLeaf(ctx, dir, name); err != nil {
 		return nil, err
 	}
-	listed, err := observeLeaf(dir.File, name, true, (*os.File).Stat)
-	if err != nil {
-		return nil, err
-	}
-	return dir.openListedDirectory(ctx, name, listed)
-}
-
-// observeLeaf collects metadata on a handle acquired relative to the pinned parent.
-func observeLeaf(parent *os.File, name string, directory bool, stat func(*os.File) (os.FileInfo, error)) (_ os.FileInfo, err error) {
-	file, err := openLeafAt(parent, name, directory)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { err = errors.Join(err, file.Close()) }()
-	return stat(file)
-}
-
-// openListedDirectory retains the exact handle it checks, so a rename after Stat cannot
-// redirect any descendant open. A disappearance after observation is a changed directory.
-func (dir *SnapshotDirectory) openListedDirectory(ctx context.Context, name string, listed os.FileInfo) (*SnapshotDirectory, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if !listed.IsDir() {
-		return nil, fmt.Errorf("fixture component %q must be a directory", name)
-	}
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
 	child, err := openLeafAt(dir.File, name, true)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("directory %q disappeared after observation", name)
-	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, ctx.Err())
 	}
-	opened, err := child.Stat()
-	if err == nil && (!opened.IsDir() || !os.SameFile(listed, opened)) {
-		err = fmt.Errorf("directory %q changed while opening", name)
+	info, err := child.Stat()
+	if err == nil && !info.IsDir() {
+		err = fmt.Errorf("fixture component %q must be a directory", name)
 	}
-	if err != nil {
+	if err = errors.Join(err, ctx.Err()); err != nil {
 		return nil, errors.Join(err, child.Close())
 	}
 	return &SnapshotDirectory{child}, nil
@@ -106,8 +84,7 @@ type listedName struct {
 // ReadEntries counts up to n names on the pinned cursor before looking up any leaf.
 // A failed lookup stays in its original slot and its Info method returns the cause.
 func (dir *SnapshotDirectory) ReadEntries(ctx context.Context, n int) ([]os.DirEntry, error) {
-	next := func(n int) ([]listedName, error) { return dir.readNames(ctx, n) }
-	names, err := CollectDirectoryEntries(ctx, n, next)
+	names, err := CollectDirectoryEntries(ctx, n, dir.readNames)
 	if err != nil {
 		return nil, err
 	}
@@ -147,17 +124,22 @@ func CollectDirectoryEntries[T any](ctx context.Context, limit int, next func(in
 			return nil, err
 		}
 		entries = append(entries, chunk...)
-		if len(entries) == limit || errors.Is(err, io.EOF) {
+		if len(entries) == limit || IsDirectoryEOF(err) {
 			return entries, nil
 		}
 	}
 	return nil, io.ErrNoProgress
 }
 
+// IsDirectoryEOF recognizes the bare cursor sentinel. A wrapper can carry a read failure.
+func IsDirectoryEOF(err error) bool {
+	return err == io.EOF //nolint:errorlint // Only the sentinel itself completes a directory listing.
+}
+
 // checkDirectoryChunk refuses stalled or oversized responses and propagates read errors.
 func checkDirectoryChunk(count, remaining int, err error) error {
 	switch {
-	case err != nil && !errors.Is(err, io.EOF):
+	case err != nil && !IsDirectoryEOF(err):
 		return err
 	case count > remaining:
 		return fmt.Errorf("directory read returned %d entries for %d slots", count, remaining)
@@ -199,16 +181,28 @@ func (e failedEntry) IsDir() bool { return false }
 func (e failedEntry) Info() (os.FileInfo, error) { return nil, e.err }
 
 // ReadListedSnapshot captures text using the file identity saved by the directory listing.
-func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name string, listed os.FileInfo) ([]byte, error) {
+func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name string, listed os.FileInfo) (_ []byte, err error) {
 	if err := validateSnapshotLeaf(ctx, dir, name); err != nil {
 		return nil, err
 	}
-	if listed == nil {
-		return nil, ErrSourceNotRegular
+	if err := checkListedSource(listed, MaxSourceBytes); err != nil {
+		return nil, err
 	}
-	return readListedText(ctx, pinnedListing{listed}, func() (*os.File, error) {
-		return openLeafAt(dir.File, name, false)
-	})
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
+	file, err := openLeafAt(dir.File, name, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, file.Close()) }()
+	data, err := stableRead(ctx, file, pinnedListing{listed})
+	if err != nil {
+		return nil, err
+	}
+	if err := validateText(data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // openLeafAt holds a reference to the parent's descriptor until the native open returns,

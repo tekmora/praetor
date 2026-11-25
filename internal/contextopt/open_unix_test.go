@@ -89,16 +89,12 @@ func TestOpenSourceRefusesReplacementSymlink(t *testing.T) {
 	}
 }
 
-// listedTestBucket records the original directory identity and frees its name for a replacement.
-func listedTestBucket(t *testing.T) (*SnapshotDirectory, os.FileInfo, string) {
+// listedTestBucket renames the original directory before the next no-follow acquisition.
+func listedTestBucket(t *testing.T) (*SnapshotDirectory, string) {
 	t.Helper()
 	dir := t.TempDir()
 	root := snapshotDirectory(t, dir)
 	if err := root.Mkdir("bucket", 0o700); err != nil {
-		t.Fatal(err)
-	}
-	listed, err := root.Lstat("bucket")
-	if err != nil {
 		t.Fatal(err)
 	}
 	if err := root.Rename("bucket", "original"); err != nil {
@@ -113,40 +109,40 @@ func listedTestBucket(t *testing.T) (*SnapshotDirectory, os.FileInfo, string) {
 			t.Error(err)
 		}
 	})
-	return parent, listed, filepath.Join(dir, "bucket")
+	return parent, filepath.Join(dir, "bucket")
 }
 
-// openReplacedBucket attempts the post-observation acquisition and releases any accepted handle.
-func openReplacedBucket(ctx context.Context, parent *SnapshotDirectory, listed os.FileInfo) error {
-	child, err := parent.openListedDirectory(ctx, "bucket", listed)
+// openReplacedBucket attempts a fresh no-follow acquisition and releases any accepted handle.
+func openReplacedBucket(ctx context.Context, parent *SnapshotDirectory) error {
+	child, err := OpenChildDirectory(ctx, parent, "bucket")
 	if err != nil {
 		return err
 	}
 	return child.Close()
 }
 
-// TestListedDirectoryRefusesReplacementLink rejects a link back to the observed inode.
+// TestListedDirectoryRefusesReplacementLink rejects a link back to the original directory.
 func TestListedDirectoryRefusesReplacementLink(t *testing.T) {
-	parent, listed, path := listedTestBucket(t)
+	parent, path := listedTestBucket(t)
 	if err := os.Symlink("original", path); err != nil {
 		t.Fatal(err)
 	}
-	if err := openReplacedBucket(t.Context(), parent, listed); err == nil {
-		t.Fatal("opened the observed directory through its replacement link")
+	if err := openReplacedBucket(t.Context(), parent); err == nil {
+		t.Fatal("opened the original directory through its replacement link")
 	}
 }
 
 // TestListedDirectoryRefusesReplacementFIFO requires the acquisition to finish while
 // the FIFO has no writer. A failing blocking opener is released during cleanup.
 func TestListedDirectoryRefusesReplacementFIFO(t *testing.T) {
-	parent, listed, path := listedTestBucket(t)
+	parent, path := listedTestBucket(t)
 	if err := syscall.Mkfifo(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- openReplacedBucket(ctx, parent, listed) }()
+	go func() { done <- openReplacedBucket(ctx, parent) }()
 	select {
 	case err := <-done:
 		if err == nil || ctx.Err() != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -54,7 +53,7 @@ func (store *fixtureStore) openCorpusSnapshot(ctx context.Context, rootDir strin
 // captureRule reads a catalog rule through its directory in the pinned corpus.
 func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.SnapshotDirectory, rule *Rule, store *fixtureStore) (err error) {
 	dir, err := contextopt.OpenChildDirectory(ctx, root, rule.ID)
-	if errors.Is(err, os.ErrNotExist) {
+	if util.SoleNotExist(err) {
 		return nil
 	}
 	if err != nil {
@@ -78,7 +77,7 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.S
 // captureClaim captures each bucket relative to the pinned language directory.
 func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.SnapshotDirectory, store *fixtureStore) (_ claimSnapshot, err error) {
 	dir, err := contextopt.OpenChildDirectory(ctx, rule, stage.language)
-	if errors.Is(err, os.ErrNotExist) {
+	if util.SoleNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -104,7 +103,7 @@ func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.Sna
 func (stage fixtureStage) captureBucket(ctx context.Context, parent *contextopt.SnapshotDirectory, name string, store *fixtureStore) (bucket bucketSnapshot, err error) {
 	bucket.stage, bucket.store = stage, store
 	dir, err := contextopt.OpenChildDirectory(ctx, parent, name)
-	if errors.Is(err, os.ErrNotExist) {
+	if util.SoleNotExist(err) {
 		return bucket, nil
 	}
 	if err != nil {
@@ -221,6 +220,8 @@ func readBucketEntries(ctx context.Context, dir *contextopt.SnapshotDirectory) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
 	var entries []os.DirEntry
 	var err error
 	if stub, ok := ctx.Value(bucketReaderKey{}).(func(string, int) ([]os.DirEntry, error)); ok {
@@ -228,7 +229,7 @@ func readBucketEntries(ctx context.Context, dir *contextopt.SnapshotDirectory) (
 	} else {
 		entries, err = dir.ReadEntries(ctx, maxBucketEntries+1)
 	}
-	if err != nil && (ctx.Err() != nil || !errors.Is(err, io.EOF)) {
+	if err != nil && !contextopt.IsDirectoryEOF(err) {
 		return nil, fmt.Errorf("list fixture bucket %s: %w", dir.Name(), err)
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })

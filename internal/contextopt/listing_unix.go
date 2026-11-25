@@ -6,8 +6,6 @@
 package contextopt
 
 import (
-	"context"
-	"errors"
 	"math"
 	"os"
 	"syscall"
@@ -17,11 +15,8 @@ import (
 )
 
 // readNames consumes directory records without the per-name stat that can drop an entry.
-func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
+func (dir *SnapshotDirectory) readNames(n int) ([]listedName, error) {
 	names, err := dir.Readdirnames(n)
-	if canceled := ctx.Err(); canceled != nil {
-		return nil, errors.Join(err, canceled)
-	}
 	listed := make([]listedName, len(names))
 	for i, name := range names {
 		listed[i].name = name

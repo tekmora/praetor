@@ -64,18 +64,18 @@ func verifyWindowsFileID(t *testing.T, outcome string) {
 	root := corpusRoot(t, "HISS-01", "go", bucketPositive, name, recursiveGo)
 	listed := false
 	var reads [2]int
-	query := winfileid.Query
-	t.Cleanup(func() { winfileid.Query = query })
-	winfileid.Query = func(handle windows.Handle, id *winfileid.Info) error {
+	readRecord := winfileid.ReadRecord
+	t.Cleanup(func() { winfileid.ReadRecord = readRecord })
+	winfileid.ReadRecord = func(handle windows.Handle, record *winfileid.Record) error {
 		if listed {
 			reads[1]++
 		} else {
 			reads[0]++
 		}
-		if err := query(handle, id); err != nil {
+		if err := readRecord(handle, record); err != nil {
 			return err
 		}
-		return modelVolumeResponse(outcome, listed, id)
+		return modelVolumeResponse(outcome, listed, record)
 	}
 	ctx := withBucketReader(t.Context(), func(dir string, entries []os.DirEntry) []os.DirEntry {
 		if filepath.Base(dir) == bucketPositive {
@@ -95,14 +95,14 @@ func verifyWindowsFileID(t *testing.T, outcome string) {
 }
 
 // modelVolumeResponse changes only the selected portion of the native query result.
-func modelVolumeResponse(outcome string, listed bool, id *winfileid.Info) error {
+func modelVolumeResponse(outcome string, listed bool, record *winfileid.Record) error {
 	switch {
 	case !listed && outcome == "listing unsupported", listed && outcome == "open unsupported":
 		return windows.ERROR_NOT_SUPPORTED
 	case listed && outcome == "high ID changed":
-		id.FileID[15] ^= 0x80
+		record[23] ^= 0x80
 	case listed && outcome == "volume changed":
-		id.VolumeSerialNumber ^= 1 << 63
+		record[7] ^= 0x80
 	}
 	return nil
 }

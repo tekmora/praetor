@@ -4,7 +4,6 @@
 package contextopt
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -46,11 +45,8 @@ func openNativeLeaf(parent uintptr, parentName, name string, _ bool) (*os.File, 
 
 // readNames keeps enumeration metadata for nonregular entries. Regular entries need a
 // descriptor-relative FileIdInfo lookup after all names have been counted.
-func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
+func (dir *SnapshotDirectory) readNames(n int) ([]listedName, error) {
 	infos, readErr := dir.Readdir(n)
-	if canceled := ctx.Err(); canceled != nil {
-		return nil, errors.Join(readErr, canceled)
-	}
 	names := make([]listedName, len(infos))
 	for i, info := range infos {
 		names[i].name = info.Name()
@@ -68,11 +64,16 @@ type windowsListedInfo struct {
 }
 
 // statListedName captures the regular file's full identity relative to the enumerating parent.
-func (dir *SnapshotDirectory) statListedName(name string) (os.FileInfo, error) {
+func (dir *SnapshotDirectory) statListedName(name string) (_ os.FileInfo, err error) {
 	if err := validateLeafName(name); err != nil {
 		return nil, err
 	}
-	return observeLeaf(dir.File, name, false, statWindowsFixture)
+	file, err := openLeafAt(dir.File, name, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, file.Close()) }()
+	return statWindowsFixture(file)
 }
 
 // statWindowsFixture freezes size, modification time and FILE_ID_INFO from one handle.
