@@ -46,6 +46,7 @@ func runReuseWorkflowStep(t *testing.T, script string, runner bool) {
 	root := t.TempDir()
 	venv := filepath.Join(root, "praetor-reuse", "bin")
 	mustWrite(t, filepath.Join(venv, "reuse"), "#!/bin/sh\nprintf direct > result\n")
+	// nosemgrep: go_file-permissions_rule-fileperm, go.lang.correctness.permissions.file_permission.incorrect-default-permission -- the virtual environment's reuse stub runs through PATH and needs the owner execute bit
 	if err := os.Chmod(filepath.Join(venv, "reuse"), 0o700); err != nil {
 		t.Fatal(err)
 	}

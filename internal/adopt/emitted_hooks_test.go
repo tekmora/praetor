@@ -525,7 +525,7 @@ func assertEmittedPairItemLines(t *testing.T, indent string, item pyToken, fits 
 func TestEmittedPairGroupingPreservesPolicy(t *testing.T) {
 	python, script := emittedInterceptor(t)
 	current := loadInterceptorModule(t, python, script)
-	before := renderedModule(t, python, mustRead(t, filepath.Join(priorEvasionFixtures, "before-codacy-grouping.block_evasion.py")))
+	before := renderedModule(t, python, mustRead(t, filepath.Join(priorEvasionFixtures, "before-codacy-grouping.block_evasion.py.txt")))
 	if !reflect.DeepEqual(before, current) {
 		t.Fatal("parenthesizing collection items changed the emitted policy values")
 	}
