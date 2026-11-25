@@ -405,7 +405,7 @@ func WriteFileSecure(path string, data []byte, perm os.FileMode) (err error) {
 		}
 	}()
 
-	if err := TightenFilePermissions(file, perm); err != nil {
+	if err := tightenFilePermissions(file, perm); err != nil {
 		return err
 	}
 	if err := file.Truncate(0); err != nil {
@@ -417,9 +417,7 @@ func WriteFileSecure(path string, data []byte, perm os.FileMode) (err error) {
 	return nil
 }
 
-// TightenFilePermissions intersects an open file's existing permissions with perm.
-// On Windows an owner-only request also restricts the file's DACL before data is written.
-func TightenFilePermissions(file *os.File, perm os.FileMode) error {
+func tightenFilePermissions(file *os.File, perm os.FileMode) error {
 	info, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("util: stat %q: %w", file.Name(), err)
@@ -597,7 +595,7 @@ type filePermission struct {
 
 func (p filePermission) apply(file *os.File) error {
 	if !p.exact {
-		return TightenFilePermissions(file, p.mode)
+		return tightenFilePermissions(file, p.mode)
 	}
 	if err := file.Chmod(p.mode); err != nil {
 		return fmt.Errorf("util: chmod temp file %q to %#o: %w", file.Name(), p.mode, err)

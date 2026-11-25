@@ -272,7 +272,7 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 
 // inspectSnapshot copies the bounded snapshot and optionally inspects its still-open
 // descriptor after verifying that the name continues to refer to it.
-func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64, inspect func(*os.File, os.FileInfo) error) (size int64, err error) {
+func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64, inspect func(*os.File) error) (size int64, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -300,9 +300,77 @@ func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Wri
 		return 0, errors.Join(fmt.Errorf("source replaced during snapshot"), err)
 	}
 	if inspect != nil {
-		return size, inspect(file, linked)
+		return size, inspect(file)
 	}
 	return size, nil
+}
+
+// ReconcileExecutableIn checks an installed shebang script against expected and returns
+// whether its POSIX mode needs changing to 0755. A preview runs the same checks without
+// chmod. A repair requires one regular file with one link and no special bits. It changes
+// the open inode, preserving its contents, ownership, named ACL entries and ordinary xattrs.
+// As with any chmod, the ACL mask and change time can change.
+func ReconcileExecutableIn(ctx context.Context, root, rel string, expected []byte, dryRun bool) (changed bool, err error) {
+	if ctx == nil {
+		return false, errors.New("executable mode repair requires a context")
+	}
+	if len(expected) > MaxSourceBytes || !bytes.HasPrefix(expected, []byte("#!")) {
+		return false, errors.New("executable mode repair requires a bounded shebang script")
+	}
+	if err := validateSources([]string{filepath.ToSlash(rel)}); err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
+	dir, err := OpenDirectoryIn(ctx, root, filepath.Dir(rel))
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	unlock, err := LockDirectory(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = errors.Join(err, unlock()) }()
+
+	var current bytes.Buffer
+	_, err = inspectSnapshot(ctx, dir, filepath.Base(rel), &current, MaxSourceBytes, func(file *os.File) error {
+		if !bytes.Equal(current.Bytes(), expected) {
+			return errors.New("script changed before mode repair")
+		}
+		var modeErr error
+		changed, modeErr = reconcileExecutableMode(ctx, file, dryRun)
+		return modeErr
+	})
+	return changed, err
+}
+
+// reconcileExecutableMode checks the verified inode before previewing or applying chmod.
+func reconcileExecutableMode(ctx context.Context, file *os.File, dryRun bool) (bool, error) {
+	const executableMode os.FileMode = 0o755
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if info.Mode() == executableMode {
+		return false, nil
+	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return false, fmt.Errorf("refusing to change special mode bits: %s", info.Name())
+	}
+	if !singleLink(info) {
+		return false, fmt.Errorf("refusing to change mode of shared or unverified inode: %s", info.Name())
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if dryRun {
+		return true, nil
+	}
+	if err := file.Chmod(executableMode); err != nil {
+		return false, err
+	}
+	return true, file.Sync()
 }
 
 func validateText(data []byte) error {

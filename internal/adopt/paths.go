@@ -1,7 +1,6 @@
 package adopt
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,15 +17,6 @@ const (
 	// dirPerm is the mode applied to scaffolded directories.
 	dirPerm os.FileMode = 0o755
 )
-
-// scaffoldSourcePerm selects the installed mode from the source bytes, independent of its
-// filename and the mode of the source checkout.
-func scaffoldSourcePerm(data []byte) os.FileMode {
-	if bytes.HasPrefix(data, []byte("#!")) {
-		return execPerm
-	}
-	return filePerm
-}
 
 // repoFile confines a repository-relative path to repoPath and returns the absolute
 // path to operate on. It refuses any path that leaves the repository lexically or
