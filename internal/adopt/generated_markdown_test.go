@@ -13,22 +13,14 @@ import (
 )
 
 // TestScaffoldedGovernanceDocumentsPassMarkdownlint checks default rules on governance prose.
-// TestPRTemplateChecklistLayout checks the exact ops marker before its replacement.
 func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 	documents := map[string]string{
 		contributingFile: buildContributingGuide("acme-widgets"),
-		prTemplateFile:   buildPullRequestTemplate(),
 		securityFile:     buildSecurityPolicy(),
 		adrIndexFile:     buildADRIndex(),
 		adrTemplateFile:  buildADRTemplate(),
 	}
 	for name, doc := range documents {
-		if name == prTemplateFile {
-			if findings := forge.BodyHardWrapFindings(doc); len(findings) != 0 {
-				t.Errorf("%s contains hard-wrapped prose: %v", name, findings)
-			}
-			doc = strings.Replace(doc, prTemplateOpsMarker, "A change to verify.", 1)
-		}
 		if findings := testsupport.MarkdownFindings(doc); len(findings) != 0 {
 			t.Errorf("%s breaks markdownlint rules: %v\n%s", name, findings, doc)
 		}
@@ -38,11 +30,39 @@ func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 	}
 }
 
+// installedPRTemplate runs fresh template adoption and reads the file it wrote.
+func installedPRTemplate(t *testing.T, root string, plan *VerificationPlan) string {
+	t.Helper()
+	s := &adoptSession{repoPath: root, report: &AdoptReport{}, verification: plan}
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	return repoText(t, root, prTemplateFile)
+}
+
+// TestInstalledPRTemplatePassesDefaultMarkdownlint checks the installed bytes and the sole exception.
+func TestInstalledPRTemplatePassesDefaultMarkdownlint(t *testing.T) {
+	doc := installedPRTemplate(t, t.TempDir(), nil)
+	if findings := testsupport.MarkdownFindings(doc); len(findings) != 0 {
+		t.Errorf("installed template breaks markdownlint defaults: %v", findings)
+	}
+	if findings := forge.BodyHardWrapFindings(doc); len(findings) != 0 {
+		t.Errorf("installed template contains hard-wrapped prose: %v", findings)
+	}
+	if strings.Count(doc, "markdownlint-") != 2 || !strings.Contains(doc, prTemplateMarkerBlock) {
+		t.Fatal("expected MD013 directives around only the description marker")
+	}
+	unscoped := strings.Replace(doc, prTemplateMarkerBlock, prTemplateOpsMarker, 1)
+	if findings := testsupport.MarkdownFindings(unscoped); len(findings) != 1 || !strings.Contains(findings[0], "MD013") {
+		t.Errorf("without the marker exception got %v, want one MD013 finding", findings)
+	}
+}
+
 // TestPriorPresetChecklistExceedsDefaultWidth demonstrates MD013 on the previous checklist.
 func TestPriorPresetChecklistExceedsDefaultWidth(t *testing.T) {
 	prior := mustRead(t, filepath.Join(prTemplateFixtures, "preset.md.prior"))
-	body := strings.Replace(prior, prTemplateOpsMarker, "A change to verify.", 1)
-	if !strings.Contains(strings.Join(testsupport.MarkdownFindings(body), "\n"), "MD013") {
+	_, checklist, ok := strings.Cut(prior, "\n"+prChecklistHeading+"\n")
+	if !ok || !strings.Contains(strings.Join(testsupport.MarkdownFindings(checklist), "\n"), "MD013") {
 		t.Fatal("expected the previous checklist to exceed the default width")
 	}
 }

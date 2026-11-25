@@ -2929,7 +2929,7 @@ repository's own text.
 | File | Rules disabled |
 | :--- | :--- |
 | `CONTRIBUTING.md`, `SECURITY.md`, `docs/adr/README.md`, `docs/adr/0000-template.md` | none; lines are wrapped within 80 columns |
-| `.github/pull_request_template.md` | none; each paragraph and list item stays on one line within 80 columns |
+| `.github/pull_request_template.md` | MD013 only on the 87-column description marker, which ops replaces verbatim. The next line enables MD013 again. |
 | `.agents/agents/repo-auditor.md`, `.agents/agents/repo-gatekeeper.md` | none |
 | `.paperclip/rules.md` | none, except MD013 around a push command too long to wrap; contract lines are wrapped within 80 columns |
 | `AGENTS.md` | MD013 from the first line to `<!-- praetor:harness:end -->`, for the harness table; MD025 after it, because the repository's instructions open with their own H1 |

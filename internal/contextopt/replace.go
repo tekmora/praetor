@@ -19,7 +19,7 @@ type ReplaceOptions struct {
 	Mode     os.FileMode
 	// ExpectedLimit raises only the prior snapshot read bound for a bounded recovery.
 	ExpectedLimit int64
-	// AcceptCurrent lets a refresh succeed if a competing writer already published its exact bytes.
+	// AcceptCurrent accepts a competing writer's exact bytes within the requested mode ceiling.
 	AcceptCurrent bool
 }
 
@@ -86,7 +86,7 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 	defer func() { err = errors.Join(err, unlock()) }()
 	mode, err := verifyReplacement(ctx, root, name, options)
 	if options.AcceptCurrent && errors.Is(err, errSnapshotChanged) {
-		return confirmConcurrentReplacement(ctx, root, name, data, err)
+		return confirmConcurrentReplacement(ctx, root, name, data, options.Mode, err)
 	}
 	if err != nil {
 		return err
@@ -104,16 +104,28 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 	return SyncDirectory(ctx, root)
 }
 
-// confirmConcurrentReplacement rechecks the winner through the same pinned and locked parent.
-func confirmConcurrentReplacement(ctx context.Context, root *os.Root, name string, data []byte, conflict error) error {
+// confirmConcurrentReplacement checks the winning bytes and mode while the parent is locked.
+func confirmConcurrentReplacement(ctx context.Context, root *os.Root, name string, data []byte, ceiling os.FileMode, conflict error) error {
 	current, exists, err := ObserveRootSnapshot(ctx, root, name)
 	if err != nil {
 		return errors.Join(conflict, err)
 	}
-	if exists && bytes.Equal(current, data) {
-		return nil
+	if !exists || !bytes.Equal(current, data) {
+		return conflict
 	}
-	return conflict
+	info, err := root.Lstat(name)
+	if err != nil {
+		return errors.Join(conflict, err)
+	}
+	mode := info.Mode()
+	if runtime.GOOS == "windows" && mode.IsRegular() {
+		// Chmod controls only the owner-write bit on Windows.
+		mode &= 0o200
+	}
+	if mode&^ceiling != 0 {
+		return conflict
+	}
+	return nil
 }
 
 // stagedPath names the staging entry the way the operator has to look for it. Every

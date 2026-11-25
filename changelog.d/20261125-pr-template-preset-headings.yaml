@@ -1,2 +1,5 @@
 type: fixed
-title: Align the engine and scaffolded pull request templates with the review preset and refresh unedited templates on readoption
+title: >-
+  Align PR templates with the review preset, scope the width exception to the description marker,
+  and ask authors for their actual test results. Readoption refreshes unedited templates and
+  respects the requested permission ceiling when another writer finishes first.

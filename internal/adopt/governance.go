@@ -603,7 +603,9 @@ var prTemplateLines = []string{
 	"",
 	prDescriptionHeading,
 	"",
+	"<!-- markdownlint-disable MD013 -->",
 	"<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->",
+	"<!-- markdownlint-enable MD013 -->",
 	"",
 	prChecklistHeading,
 	"",
@@ -630,7 +632,7 @@ var prTemplateLines = []string{
 	"- [ ] **HISS-07** Handle or wrap every error. No `.unwrap()` or `.expect()`.",
 	"- [ ] **HISS-08** No dynamic evaluation or banned C calls (e.g. `strcpy`).",
 	"- [ ] **HISS-09** Each unsafe operation has a preceding `// SAFETY:` proof.",
-	"- [ ] **HISS-10** The compiler, `go vet`, and all configured linters are clean.",
+	"- [ ] **HISS-10** The compiler and all configured linters report zero warnings.",
 	"",
 	"#### Supply Chain & API Governance",
 	"",
@@ -673,7 +675,7 @@ var prTemplateLines = []string{
 	"<!-- Paste the signed receipt JSON here. -->",
 	"```",
 	"",
-	"- **Local Race Detector Status**: `go test -v -race ./...` (PASS)",
+	"- [ ] Record the test command you ran and its outcome.",
 }
 
 // buildPullRequestTemplate renders the pull request template for both adoption and the engine.
@@ -749,4 +751,5 @@ var priorPRTemplateDigests = map[string]string{
 	"523db04e188480eb0d5d08d21d400a80afe3c1919de26a776696a6d6a70c8902": "single-line scaffold checklist (#1643)",
 	"146faf6f2df563898a4de3e51473a6d8641dd3f92171c4987ea304dc39ca45bd": "shared preset headings and nested HISS checklist (2026-11-25)",
 	"feac202b5f9ffb025be8af0848b1ba4f72b6f8439866b344dd2a8edca39ac4c7": "concise checklist for the default Markdown width (#2063)",
+	"f8208c878433aa167841408a5e19ac07e17c3e5ef602c025123567b912b5737d": "scoped description marker and author-supplied test result (#2063)",
 }

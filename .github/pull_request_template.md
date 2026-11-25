@@ -2,7 +2,9 @@
 
 ## Description
 
+<!-- markdownlint-disable MD013 -->
 <!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->
+<!-- markdownlint-enable MD013 -->
 
 ## Pre-Merge Verification Checklist
 
@@ -29,7 +31,7 @@ All PRs must strictly adhere to the declared HISS invariants before merging:
 - [ ] **HISS-07** Handle or wrap every error. No `.unwrap()` or `.expect()`.
 - [ ] **HISS-08** No dynamic evaluation or banned C calls (e.g. `strcpy`).
 - [ ] **HISS-09** Each unsafe operation has a preceding `// SAFETY:` proof.
-- [ ] **HISS-10** The compiler, `go vet`, and all configured linters are clean.
+- [ ] **HISS-10** The compiler and all configured linters report zero warnings.
 
 #### Supply Chain & API Governance
 
@@ -72,4 +74,4 @@ Run the gate again after a rebase.
 <!-- Paste the signed receipt JSON here. -->
 ```
 
-- **Local Race Detector Status**: `go test -v -race ./...` (PASS)
+- [ ] Record the test command you ran and its outcome.

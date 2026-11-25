@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -20,8 +21,12 @@ const prTemplateFixtures = "testdata/pr-template"
 // prTemplateOpsMarker is replaced verbatim when ops fills the PR description.
 const prTemplateOpsMarker = "<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->"
 
+// prTemplateMarkerBlock limits the width exception to the ops marker.
+const prTemplateMarkerBlock = "<!-- markdownlint-disable MD013 -->\n" + prTemplateOpsMarker + "\n<!-- markdownlint-enable MD013 -->"
+
 // priorPRTemplateFiles lists the recorded renderings in filename order.
 var priorPRTemplateFiles = [...]string{
+	"concise.md.prior",
 	"hiss-16.md.prior",
 	"hiss.md.prior",
 	"preset.md.prior",
@@ -75,6 +80,32 @@ func TestPRTemplateMatchesScaffold(t *testing.T) {
 	}
 }
 
+// TestPRTemplatesRequestActualTestResult checks both copies and replays the prefilled template.
+func TestPRTemplatesRequestActualTestResult(t *testing.T) {
+	root, plan := verificationFixture(t, map[string]string{"Cargo.toml": cargoToml})
+	if len(plan.Test) != 1 || !slices.Equal(plan.Test[0], []string{"cargo", "test", "--locked"}) {
+		t.Fatalf("Cargo-only fixture selected test commands %q", plan.Test)
+	}
+	cargo := installedPRTemplate(t, root, plan)
+	if command := regexp.MustCompile(`\bgo[ \t]+\w+`).FindString(cargo); command != "" {
+		t.Errorf("Cargo-only template names the Go command %q", command)
+	}
+	const prompt = "\n- [ ] Record the test command you ran and its outcome.\n"
+	for _, tc := range [...]struct {
+		name, body string
+		wantPrompt bool
+	}{
+		{"engine", repoText(t, sourceCheckout, prTemplateFile), true},
+		{"Cargo-only adopter", cargo, true},
+		{"prefilled result plus prompt", mustRead(t, filepath.Join(prTemplateFixtures, "preset.md.prior")) + prompt, false},
+	} {
+		hasPrompt := strings.Contains(tc.body, prompt) && !strings.Contains(tc.body, "(PASS)")
+		if hasPrompt != tc.wantPrompt {
+			t.Errorf("%s: unchecked command and outcome prompt without a prefilled result = %t, want %t", tc.name, hasPrompt, tc.wantPrompt)
+		}
+	}
+}
+
 // TestPRTemplateSocialTextHeading ties the writing instructions to the preset heading.
 func TestPRTemplateSocialTextHeading(t *testing.T) {
 	want := "prose under `" + prDescriptionHeading + "`"
@@ -123,7 +154,7 @@ func TestPRTemplatePresetHeadings(t *testing.T) {
 func TestPRTemplateChecklistLayout(t *testing.T) {
 	body := buildPullRequestTemplate()
 	description, checklist, ok := strings.Cut(body, "\n"+prChecklistHeading+"\n")
-	if !ok || description != "# Pull Request\n\n"+prDescriptionHeading+"\n\n"+prTemplateOpsMarker+"\n" {
+	if !ok || description != "# Pull Request\n\n"+prDescriptionHeading+"\n\n"+prTemplateMarkerBlock+"\n" {
 		t.Fatal("expected the title and description placeholder immediately before the checklist")
 	}
 	intro, _, _ := strings.Cut(checklist, "\n### ")
