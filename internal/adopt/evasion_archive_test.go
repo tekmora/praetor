@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // TestEvasionArchiveRejectsEscapeDigests checks existing and absent outside archives,
@@ -66,11 +68,66 @@ func TestEvasionArchiveRejectsEscapingSymlinks(t *testing.T) {
 	if err := archiveEvasionRendering(dir, digest, previous); err == nil {
 		t.Error("escaping archive symlink accepted")
 	}
+	assertFixtureSymlinkUnchanged(t, archive, outside, previous)
+}
+
+// assertFixtureSymlinkUnchanged checks the link destination and the bytes at that destination.
+func assertFixtureSymlinkUnchanged(t *testing.T, link, outside, previous string) {
+	t.Helper()
 	if got := mustRead(t, outside); got != previous {
 		t.Errorf("outside bytes changed: %q", got)
 	}
-	if got, err := os.Readlink(archive); err != nil || got != outside {
-		t.Errorf("archive link changed: %q, %v", got, err)
+	if got, err := os.Readlink(link); err != nil || got != outside {
+		t.Errorf("fixture link changed: %q, %v", got, err)
+	}
+}
+
+// TestEvasionUpdateRejectsEscapingCurrentFixture exercises the fixture updater in a temporary checkout.
+func TestEvasionUpdateRejectsEscapingCurrentFixture(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs developer mode on Windows")
+	}
+	checkout := t.TempDir()
+	dir := filepath.Join(checkout, priorEvasionFixtures)
+	outside := filepath.Join(checkout, "outside.py")
+	const previous = "outgoing rendering\n"
+	mustWrite(t, outside, previous)
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a directory needs the owner search bit to hold entries
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, currentEvasionFixture)
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(updateEmittedFixturesEnv, "1")
+	out, err := util.RunCommand(t.Context(), checkout, exe, "-test.run=^TestEmittedHookFixturesMatchTheRendering$")
+	if err == nil || !strings.Contains(out, "read "+currentEvasionFixture) {
+		t.Errorf("want refusal reading the current fixture, got %v: %s", err, out)
+	}
+	assertFixtureSymlinkUnchanged(t, link, outside, previous)
+	archive := fixtureDigest(t, "outside", []byte(previous)) + ".block_evasion.py"
+	if _, err := os.Stat(filepath.Join(dir, archive)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("outside bytes archived or archive unreadable: %v", err)
+	}
+}
+
+// TestEvasionUpdateNormalizesCurrentFixture writes the rendered bytes without archiving a checkout-only difference.
+func TestEvasionUpdateNormalizesCurrentFixture(t *testing.T) {
+	current := buildBlockEvasionPY()
+	t.Chdir(t.TempDir())
+	path := filepath.Join(priorEvasionFixtures, currentEvasionFixture)
+	mustWrite(t, path, crlfText(current))
+	updateEvasionRenderingFixtures(t, current)
+	if got := mustRead(t, path); got != current {
+		t.Error("current fixture differs from the rendered bytes")
+	}
+	if files := readFixtureDir(t, priorEvasionFixtures); len(files) != 1 {
+		t.Errorf("line-ending change created an archive in %s", priorEvasionFixtures)
 	}
 }
 
@@ -116,7 +173,16 @@ func TestEvasionArchivePreservesHexDigestBytes(t *testing.T) {
 	if err := archiveEvasionRendering(dir, digest, "different\n"); err == nil {
 		t.Error("mismatched archive accepted")
 	}
-	if got := mustRead(t, filepath.Join(dir, digest+".block_evasion.py")); got != previous {
+	path := filepath.Join(dir, digest+".block_evasion.py")
+	if got := mustRead(t, path); got != previous {
 		t.Errorf("archive bytes = %q, want %q", got, previous)
+	}
+	const mixed = "first line\r\nsecond line\n"
+	mustWrite(t, path, mixed)
+	if err := archiveEvasionRendering(dir, digest, "first line\nsecond line\n"); err == nil || !strings.Contains(err.Error(), "mixed LF and CRLF") {
+		t.Errorf("want mixed line-ending error, got %v", err)
+	}
+	if got := mustRead(t, path); got != mixed {
+		t.Errorf("mixed archive bytes = %q, want %q", got, mixed)
 	}
 }

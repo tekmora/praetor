@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 )
 
 // ExceptionEntry identifies the disposition of a declared exception for a counted file.
@@ -28,12 +29,28 @@ type exceptionRun struct {
 }
 
 // loadExceptionRun reads docstring exceptions through the shared manifest loader.
-func loadExceptionRun(ctx context.Context, root string) (*exceptionRun, error) {
-	entries, err := config.LoadExceptionsFor(ctx, root, config.ExceptionRuleDocstrings)
+func loadExceptionRun(ctx context.Context, root, headRef string) (*exceptionRun, error) {
+	entries, err := docstringExceptions(ctx, root, headRef)
 	if err != nil {
 		return nil, fmt.Errorf("load docstrings exceptions: %w", err)
 	}
 	return &exceptionRun{entries: entries, today: time.Now().UTC()}, nil
+}
+
+// docstringExceptions selects the rule's entries from the manifest paired with the source.
+func docstringExceptions(ctx context.Context, root, headRef string) ([]config.Exception, error) {
+	if isWorktreeHead(headRef) {
+		return config.LoadExceptionsFor(ctx, root, config.ExceptionRuleDocstrings)
+	}
+	data, ok, err := readGitRevisionFile(ctx, root, headRef, config.ManifestFileName, contextopt.MaxSourceBytes)
+	if err != nil || !ok {
+		return nil, err
+	}
+	manifest, err := config.ParseManifest(headRef+":"+config.ManifestFileName, data)
+	if err != nil {
+		return nil, err
+	}
+	return config.ExceptionsFor(manifest.Exceptions, config.ExceptionRuleDocstrings), nil
 }
 
 // excuses records stale and expired entries and excuses only a live content-matching file.

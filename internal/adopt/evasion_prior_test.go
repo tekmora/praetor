@@ -1,6 +1,7 @@
 package adopt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // priorEvasionFixtures holds every interceptor rendering a Praetor release wrote, one file per
@@ -25,14 +28,11 @@ const currentEvasionFixture = "current-rendering.block_evasion.py"
 // hooks.go, so refreshing emitted fixtures cannot silently drop an adopter's earlier text.
 func updateEvasionRenderingFixtures(t *testing.T, current string) {
 	t.Helper()
-	path := filepath.Join(priorEvasionFixtures, currentEvasionFixture)
-	previous := mustRead(t, path)
-	if strings.ReplaceAll(previous, "\r\n", "\n") != current {
-		digest := fixtureDigest(t, path, []byte(previous))
-		if err := archiveEvasionRendering(priorEvasionFixtures, digest, previous); err != nil {
-			t.Fatal(err)
-		}
-		mustWrite(t, path, current)
+	err := util.InConfinedDirectory(".", priorEvasionFixtures, func(root *os.Root) error {
+		return updateCurrentEvasionRendering(root, []byte(current))
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	digest := fixtureDigest(t, "current rendering", []byte(current))
 	if _, recorded := priorEvasionHookDigests[digest]; recorded {
@@ -49,29 +49,60 @@ func updateEvasionRenderingFixtures(t *testing.T, current string) {
 	priorEvasionHookDigests[digest] = origin
 }
 
-// archiveEvasionRendering preserves outgoing bytes under their digest. Taking the digest
-// separately lets confinement tests exercise names the canonical digest cannot produce.
-func archiveEvasionRendering(dir, digest, previous string) (err error) {
-	root, err := os.OpenRoot(dir)
+// updateCurrentEvasionRendering archives the outgoing fixture before replacing it through the same root.
+func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
+	previous, err := root.ReadFile(currentEvasionFixture)
 	if err != nil {
-		return fmt.Errorf("open outgoing rendering root %s: %w", dir, err)
+		return fmt.Errorf("read %s: %w", currentEvasionFixture, err)
 	}
-	defer func() {
-		if closeErr := root.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close outgoing rendering root %s: %w", dir, closeErr))
+	if bytes.Equal(previous, current) {
+		return nil
+	}
+	equal, err := util.CanonicalTextEquivalent(previous, current)
+	if err != nil {
+		return fmt.Errorf("compare %s: %w", currentEvasionFixture, err)
+	}
+	if !equal {
+		digest, _, err := util.CanonicalTextDigest(previous)
+		if err != nil {
+			return fmt.Errorf("digest %s: %w", currentEvasionFixture, err)
 		}
-	}()
+		if err := archiveEvasionRenderingIn(root, digest, previous); err != nil {
+			return err
+		}
+	}
+	if err := root.WriteFile(currentEvasionFixture, current, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", currentEvasionFixture, err)
+	}
+	return nil
+}
+
+// archiveEvasionRendering opens a temporary fixture root for the archive regression cases.
+func archiveEvasionRendering(dir, digest, previous string) error {
+	return util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
+		return archiveEvasionRenderingIn(root, digest, []byte(previous))
+	})
+}
+
+// archiveEvasionRenderingIn preserves outgoing bytes under their digest in the fixture root.
+func archiveEvasionRenderingIn(root *os.Root, digest string, previous []byte) error {
 	archive := digest + ".block_evasion.py"
-	if existing, err := root.ReadFile(archive); err == nil {
-		if strings.ReplaceAll(string(existing), "\r\n", "\n") != strings.ReplaceAll(previous, "\r\n", "\n") {
-			return fmt.Errorf("outgoing rendering archive %s differs from its recorded bytes", archive)
-		}
-	} else if errors.Is(err, os.ErrNotExist) {
-		if err := root.WriteFile(archive, []byte(previous), 0o644); err != nil {
+	existing, err := root.ReadFile(archive)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := root.WriteFile(archive, previous, 0o644); err != nil {
 			return fmt.Errorf("write outgoing rendering archive %s: %w", archive, err)
 		}
-	} else {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("read outgoing rendering archive %s: %w", archive, err)
+	}
+	equal, err := util.CanonicalTextEquivalent(existing, previous)
+	if err != nil {
+		return fmt.Errorf("compare outgoing rendering archive %s: %w", archive, err)
+	}
+	if !equal {
+		return fmt.Errorf("outgoing rendering archive %s differs from its recorded bytes", archive)
 	}
 	return nil
 }
