@@ -111,7 +111,11 @@ func (rs *rulesetServer) serve(w http.ResponseWriter, method, path string, body 
 
 func (rs *rulesetServer) serveRead(w http.ResponseWriter, id int) {
 	if id == 0 {
-		writeRulesetJSON(w, http.StatusOK, rs.existing)
+		entries := rs.existing
+		if entries == nil {
+			entries = []map[string]any{}
+		}
+		writeRulesetJSON(w, http.StatusOK, entries)
 		return
 	}
 	if doc, found := rs.stored[id]; found {

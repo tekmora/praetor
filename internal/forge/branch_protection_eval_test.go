@@ -36,6 +36,7 @@ func matchingRuleset(t *testing.T) *LiveBranchProtection {
 	t.Helper()
 	return &LiveBranchProtection{
 		Branch:       "main",
+		managedID:    7,
 		RulesetNames: map[int]string{7: RepositoryRulesetName},
 		Rules: []LiveBranchRule{
 			liveRule(t, "deletion", 7, nil), liveRule(t, "non_fast_forward", 7, nil),
@@ -221,7 +222,7 @@ func TestEvaluateBranchProtection_Positive_ActiveManagedRulesetIsEnforced(t *tes
 func TestEvaluateBranchProtection_Negative_InactiveManagedRulesetDrifts(t *testing.T) {
 	for _, enforcement := range []string{"evaluate", "disabled"} {
 		live := &LiveBranchProtection{
-			Branch: "main", RulesetNames: map[int]string{7: RepositoryRulesetName},
+			Branch: "main", managedID: 7, RulesetNames: map[int]string{7: RepositoryRulesetName},
 			RulesetEnforcement: map[int]string{7: enforcement},
 		}
 		findings, err := EvaluateBranchProtection(declaredHighSecurity(), []string{"CI"}, live)
@@ -242,8 +243,7 @@ func TestEvaluateBranchProtection_Negative_InactiveManagedRulesetDrifts(t *testi
 
 // Boundary (#159): a branch protected by the legacy protection object alone, with no ruleset of
 // praetor's name, is compared on what that object enforces and not on a ruleset; a listing that
-// does not report the enforcement is not judged on it; of two rulesets of that name the lowest id
-// is compared.
+// does not report the enforcement is not judged on it.
 func TestEvaluateBranchProtection_Boundary_ManagedRulesetAbsentOrUnreported(t *testing.T) {
 	classic := &LiveBranchProtection{
 		Branch: "main", RulesetNames: map[int]string{3: "operator-ruleset"},
@@ -266,20 +266,12 @@ func TestEvaluateBranchProtection_Boundary_ManagedRulesetAbsentOrUnreported(t *t
 		}
 	}
 
-	unreported := &LiveBranchProtection{Branch: "main", RulesetNames: map[int]string{7: RepositoryRulesetName}}
+	unreported := &LiveBranchProtection{Branch: "main", managedID: 7, RulesetNames: map[int]string{7: RepositoryRulesetName}}
 	if findings, err = EvaluateBranchProtection(policy, nil, unreported); err != nil {
 		t.Fatal(err)
 	}
 	if slices.Contains(ProtectionDrifts(findings), "Ruleset enforcement") {
 		t.Fatalf("an unreported enforcement was judged: %+v", findings)
-	}
-
-	twice := &LiveBranchProtection{
-		Branch: "main", RulesetNames: map[int]string{9: RepositoryRulesetName, 4: RepositoryRulesetName},
-		RulesetEnforcement: map[int]string{9: "active", 4: "evaluate"},
-	}
-	if id, enforcement, found := twice.managedRuleset(); !found || id != 4 || enforcement != "evaluate" {
-		t.Fatalf("managed ruleset = %d %q %t, want the lowest id 4", id, enforcement, found)
 	}
 }
 

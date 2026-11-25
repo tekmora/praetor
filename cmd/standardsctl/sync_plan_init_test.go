@@ -282,6 +282,7 @@ type forgeStub struct {
 	rulesUnenforced bool
 	branchMissing   bool
 	reverseRulesets bool
+	listingOverride json.RawMessage
 }
 
 const forgeStubRepo = "/repos/acme/widgets/"
@@ -481,6 +482,10 @@ func stubRulesetEntry(id int, doc map[string]any) map[string]any {
 
 // serveRulesetList returns deterministic, bounded listing pages with explicit ownership.
 func (s *forgeStub) serveRulesetList(w http.ResponseWriter) {
+	if s.listingOverride != nil {
+		stubRespond(w, http.StatusOK, s.listingOverride)
+		return
+	}
 	const maxStubRulesets = 1000
 	if len(s.rulesets) > maxStubRulesets {
 		stubRespond(w, http.StatusInternalServerError, map[string]any{"message": "too many fixture rulesets"})

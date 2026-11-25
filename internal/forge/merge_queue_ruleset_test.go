@@ -128,7 +128,12 @@ func TestGitHubDriver_ReconcileMergeQueue_Boundary_LiveWildcardSurvivesTheMerge(
 		!strings.Contains(put.Raw, `"merge_method":"MERGE"`) {
 		t.Fatalf("the union merge dropped the live include or parameter: %s %s", put.Method, put.Raw)
 	}
-	queue, err := gh.readQueueRuleset(context.Background(), map[int]string{5: MergeQueueRulesetName}, map[int]string{5: "active"})
+	const listPath = "/repos/acme/widgets/rulesets"
+	list, err := gh.readRulesetListing(t.Context(), listPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := gh.readQueueRuleset(t.Context(), listPath, list)
 	if err != nil || queue == nil || !slices.Equal(queue.Wildcards(), []string{"refs/heads/lts-*"}) {
 		t.Fatalf("live read = %+v (%v), want the lts-* wildcard", queue, err)
 	}
@@ -136,7 +141,7 @@ func TestGitHubDriver_ReconcileMergeQueue_Boundary_LiveWildcardSurvivesTheMerge(
 
 func TestGitHubDriver_ReadQueueRuleset_Boundary_NoneReadsNil(t *testing.T) {
 	gh, _ := rulesetForge(t, &rulesetServer{})
-	if none, err := gh.readQueueRuleset(context.Background(), map[int]string{3: RepositoryRulesetName}, nil); err != nil || none != nil {
+	if none, err := gh.readQueueRuleset(t.Context(), "/repos/acme/widgets/rulesets", rulesetListing{}); err != nil || none != nil {
 		t.Fatalf("a repository without a queue ruleset read %+v (%v)", none, err)
 	}
 }

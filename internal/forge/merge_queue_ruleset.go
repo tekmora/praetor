@@ -84,23 +84,16 @@ func (r *LiveQueueRuleset) Wildcards() []string {
 	return wild
 }
 
-// readQueueRuleset reads the merge queue ruleset named in the listing (names), taking the lowest
-// id of two with the name, or returns nil when the repository has none.
-func (g *GitHubDriver) readQueueRuleset(ctx context.Context, names, enforcement map[int]string) (*LiveQueueRuleset, error) {
-	id := 0
-	for rulesetID, name := range names {
-		if name == MergeQueueRulesetName && (id == 0 || rulesetID < id) {
-			id = rulesetID
-		}
-	}
-	if id == 0 {
-		return nil, nil
-	}
-	listPath, err := g.repoPath("rulesets")
+// readQueueRuleset reads the repository-owned queue's refs, or returns nil when it is absent.
+func (g *GitHubDriver) readQueueRuleset(ctx context.Context, listPath string, list rulesetListing) (*LiveQueueRuleset, error) {
+	queue, err := list.ownedRuleset(MergeQueueRulesetName)
 	if err != nil {
 		return nil, err
 	}
-	ruleset, err := g.getRuleset(ctx, listPath, id)
+	if queue.ID == 0 {
+		return nil, nil
+	}
+	ruleset, err := g.getRuleset(ctx, listPath, queue.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read ruleset %q: %w", MergeQueueRulesetName, err)
 	}
@@ -108,7 +101,7 @@ func (g *GitHubDriver) readQueueRuleset(ctx context.Context, names, enforcement 
 	if err != nil {
 		return nil, err
 	}
-	return &LiveQueueRuleset{ID: id, Enforcement: enforcement[id], Includes: includes}, nil
+	return &LiveQueueRuleset{ID: queue.ID, Enforcement: queue.Enforcement, Includes: includes}, nil
 }
 
 // MergeQueueRulesetFindings compares the live merge queue with a policy that declares one: an

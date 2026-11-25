@@ -75,11 +75,11 @@ type managedRulesetCase struct {
 }
 
 // managedRulesetCases covers ownership, unread scope and ambiguous repository names.
-func managedRulesetCases() []managedRulesetCase {
+func managedRulesetCases() [13]managedRulesetCase {
 	parent := map[string]any{"id": 1, "name": RepositoryRulesetName, "source_type": "Organization", "source": "acme", "bypass_actors": []any{}}
 	repo := map[string]any{"id": 2, "name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/widgets",
 		"bypass_actors": []any{map[string]any{"actor_id": 42, "actor_type": "Team", "bypass_mode": "always"}}}
-	return []managedRulesetCase{
+	return [...]managedRulesetCase{
 		{"parent first", []map[string]any{parent, repo}, 2, ""},
 		{"repository first", []map[string]any{repo, parent}, 2, ""},
 		{"only inherited", []map[string]any{parent}, 0, ""},
@@ -88,6 +88,10 @@ func managedRulesetCases() []managedRulesetCase {
 		{"unread source", []map[string]any{{"id": 3, "name": RepositoryRulesetName, "source_type": "Repository"}}, 0, "unread scope"},
 		{"unread source type", []map[string]any{{"id": 3, "name": RepositoryRulesetName, "source": "acme/widgets"}}, 0, "unread scope"},
 		{"another repository", []map[string]any{{"id": 3, "name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/other"}}, 0, ""},
+		{"omitted id", []map[string]any{{"name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/widgets"}}, 0, "unread id"},
+		{"null id", []map[string]any{{"id": nil, "name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/widgets"}}, 0, "unread id"},
+		{"zero id", []map[string]any{{"id": 0, "name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/widgets"}}, 0, "unread id"},
+		{"negative id", []map[string]any{{"id": -1, "name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/widgets"}}, 0, "unread id"},
 		{"duplicate repository names", []map[string]any{repo,
 			{"id": 4, "name": RepositoryRulesetName, "source_type": "Repository", "source": "acme/widgets"}}, 0, "ids 2 and 4"},
 	}
@@ -96,8 +100,7 @@ func managedRulesetCases() []managedRulesetCase {
 // TestGitHubDriver_LiveRuleset_Scope compares actors only from an unambiguous repository ruleset.
 func TestGitHubDriver_LiveRuleset_Scope(t *testing.T) {
 	cases := managedRulesetCases()
-	for i := 0; i < len(cases) && i < 9; i++ {
-		c := cases[i]
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			gh, fake := rulesetForge(t, &rulesetServer{existing: c.entries})
 			gh.RulesetName = RepositoryRulesetName
@@ -146,8 +149,7 @@ func assertManagedRulesetRead(t *testing.T, c managedRulesetCase, body []byte, e
 // TestGitHubDriver_ReconcileProtection_Scope never updates an inherited or ambiguous ruleset.
 func TestGitHubDriver_ReconcileProtection_Scope(t *testing.T) {
 	cases := managedRulesetCases()
-	for i := 0; i < len(cases) && i < 9; i++ {
-		c := cases[i]
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			gh, fake := rulesetForge(t, &rulesetServer{existing: c.entries})
 			gh.RulesetName = RepositoryRulesetName

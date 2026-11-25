@@ -35,8 +35,8 @@ type liveBypassRuleset struct {
 // with those policy renders (rulesetBypassActors). A declared actor that is missing and a live
 // actor that is not declared are both drift: an extra actor can pass every rule of the ruleset.
 // A body that omits bypass_actors is drift named unread, so an unread list never passes. sync
-// --remote keeps a live ruleset's bypass actors (mergeRuleset), so this drift is changed on
-// GitHub by hand.
+// --remote keeps a live ruleset's bypass actors (mergeRuleset), so an observed mismatch
+// requires a hand edit. An omitted list requires another read with sufficient access.
 func EvaluateBypassActors(policy config.BranchProtectionPolicy, liveRuleset []byte) (ProtectionFinding, error) {
 	declared, err := bypassActorKeys(rulesetBypassActors(policy))
 	if err != nil {
@@ -55,6 +55,7 @@ func EvaluateBypassActors(policy config.BranchProtectionPolicy, liveRuleset []by
 		return ProtectionFinding{}, fmt.Errorf("parse the bypass actors of the live ruleset: %w", err)
 	}
 	if body.BypassActors == nil {
+		finding.Unread = true
 		finding.Live, finding.Verdict = "unread (GitHub returns bypass_actors only with write access to the ruleset)", ProtectionDrift
 		return finding, nil
 	}

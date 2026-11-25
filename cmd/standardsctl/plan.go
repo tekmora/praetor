@@ -153,27 +153,31 @@ type liveRulesetReader interface {
 }
 
 // planBypassActors compares the bypass actors of the live praetor ruleset with the declared ones
-// and prints the finding; missing rulesets need creation, existing actors need a hand edit.
-func planBypassActors(ctx context.Context, reader liveRulesetReader, target protectionTarget) (bool, error) {
+// and prints the finding and remedy. It returns the drift summary, or an empty string on agreement.
+func planBypassActors(ctx context.Context, reader liveRulesetReader, target protectionTarget) (string, error) {
 	body, err := reader.LiveRuleset(ctx, target.branch)
 	if err != nil {
-		return false, &forgeReadError{err: fmt.Errorf("read the live ruleset of %s: %w", target.branch, err)}
+		return "", &forgeReadError{err: fmt.Errorf("read the live ruleset of %s: %w", target.branch, err)}
 	}
 	finding, err := forge.EvaluateBypassActors(target.policy, body)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	fmt.Println("    " + formatProtectionFinding(finding))
 	if finding.Verdict != forge.ProtectionDrift {
-		return false, nil
+		return "", nil
+	}
+	if finding.Unread {
+		fmt.Println("    Action: Repeat the read with sufficient access to see the ruleset's bypass actors.")
+		return fmt.Sprintf("The bypass actors of ruleset %q on %s could not be read.", forge.RepositoryRulesetName, target.branch), nil
 	}
 	if body == nil {
 		fmt.Printf("    Action: Run 'praetorctl sync --remote' to create missing ruleset %q with the declared bypass actors.\n", forge.RepositoryRulesetName)
-		return true, nil
+	} else {
+		fmt.Printf("    sync --remote keeps the bypass actors of a live ruleset; change those of ruleset %q on GitHub by hand "+
+			"(repository Settings, Rules) if the declared policy is intended\n", forge.RepositoryRulesetName)
 	}
-	fmt.Printf("    sync --remote keeps the bypass actors of a live ruleset; change those of ruleset %q on GitHub by hand "+
-		"(repository Settings, Rules) if the declared policy is intended\n", forge.RepositoryRulesetName)
-	return true, nil
+	return fmt.Sprintf("The bypass actors of ruleset %q on %s differ from the declared ones.", forge.RepositoryRulesetName, target.branch), nil
 }
 
 // planRemoteProtection reads what GitHub enforces on the default branch, from its rulesets and
@@ -207,11 +211,11 @@ func planRemoteProtection(ctx context.Context, rootDir string, manifest *config.
 		return err
 	}
 	switch {
-	case len(drifted) == 0 && !bypassDrift:
+	case len(drifted) == 0 && bypassDrift == "":
 		fmt.Println("\nStatus: GitHub enforces every declared branch protection property.")
 		return nil
 	case len(drifted) == 0:
-		fmt.Printf("\n[DRIFT] The bypass actors of ruleset %q on %s differ from the declared ones.\n", forge.RepositoryRulesetName, target.branch)
+		fmt.Printf("\n[DRIFT] %s\n", bypassDrift)
 	default:
 		fmt.Printf("\n[DRIFT] GitHub does not enforce the declared %s on %s.\n", strings.Join(drifted, ", "), target.branch)
 		fmt.Println("Action: Run 'praetorctl sync --remote' to reconcile branch protection on GitHub.")

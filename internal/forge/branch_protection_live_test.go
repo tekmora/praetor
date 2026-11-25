@@ -23,7 +23,8 @@ func protectionForgeWithStatus(t *testing.T, rulesStatus int, rules any, legacyS
 		case strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/rules/branches/"):
 			writeJSON(t, w, rulesStatus, rules)
 		case r.URL.Path == "/repos/acme/widgets/rulesets":
-			writeJSON(t, w, http.StatusOK, []map[string]any{{"id": 7, "name": RepositoryRulesetName, "enforcement": "evaluate"}})
+			writeJSON(t, w, http.StatusOK, []map[string]any{{"id": 7, "name": RepositoryRulesetName, "enforcement": "evaluate",
+				"source_type": "Repository", "source": "acme/widgets"}})
 		case strings.HasSuffix(r.URL.Path, "/protection"):
 			writeJSON(t, w, legacyStatus, legacy)
 		default:

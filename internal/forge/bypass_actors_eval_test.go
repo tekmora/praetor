@@ -40,7 +40,7 @@ func TestEvaluateBypassActors_Positive(t *testing.T) {
 // TestEvaluateBypassActors_Negative checks actor drift and sorted reporting of reversed actors.
 // Extra, missing, duplicated and unread actors, and a missing ruleset, are drift.
 func TestEvaluateBypassActors_Negative(t *testing.T) {
-	cases := []struct {
+	cases := [...]struct {
 		name   string
 		policy config.BranchProtectionPolicy
 		body   []byte
@@ -53,6 +53,10 @@ func TestEvaluateBypassActors_Negative(t *testing.T) {
 		{"extra actor, none declared", config.BranchProtectionPolicy{}, []byte(`{"bypass_actors": [{"actor_id": null, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}]}`),
 			"[OrganizationAdmin - always]"},
 		{"missing declared actor", singleMaintainer, []byte(`{"bypass_actors": []}`), "none"},
+		{"different id", singleMaintainer, []byte(`{"bypass_actors": [{"actor_id": 6, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]}`),
+			"[RepositoryRole 6 pull_request]"},
+		{"different type", singleMaintainer, []byte(`{"bypass_actors": [{"actor_id": 5, "actor_type": "Team", "bypass_mode": "pull_request"}]}`),
+			"[Team 5 pull_request]"},
 		{"wider mode", singleMaintainer, []byte(`{"bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]}`),
 			"[RepositoryRole 5 always]"},
 		{"duplicated actor", singleMaintainer, []byte(`{"bypass_actors": [` + adminPullRequestActor + `, ` + adminPullRequestActor + `]}`),
@@ -60,8 +64,7 @@ func TestEvaluateBypassActors_Negative(t *testing.T) {
 		{"unread list", singleMaintainer, []byte(`{"name": "praetor-main-protection"}`), "unread (GitHub returns bypass_actors only with write access to the ruleset)"},
 		{"no ruleset", singleMaintainer, nil, "no " + RepositoryRulesetName + " ruleset"},
 	}
-	for i := 0; i < len(cases) && i < 8; i++ {
-		c := cases[i]
+	for _, c := range cases {
 		finding, err := EvaluateBypassActors(c.policy, c.body)
 		if err != nil || finding.Verdict != ProtectionDrift || finding.Live != c.live {
 			t.Errorf("%s: finding %+v, error %v; want drift with live %q", c.name, finding, err, c.live)

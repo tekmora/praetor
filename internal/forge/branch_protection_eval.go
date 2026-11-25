@@ -40,6 +40,8 @@ type ProtectionFinding struct {
 	Live       string
 	EnforcedBy []string
 	Verdict    ProtectionVerdict
+	// Unread means the forge omitted the live value needed for comparison.
+	Unread bool
 }
 
 // liveFlag is an on-or-off requirement and the mechanisms that switch it on.
