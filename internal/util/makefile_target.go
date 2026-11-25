@@ -347,7 +347,37 @@ func makefileRule(line string) ([]string, string) {
 	if makefileBindsVariable(prerequisites) {
 		return nil, ""
 	}
-	return strings.Fields(line[:colon]), prerequisites
+	return makefileTargetWords(line[:colon]), prerequisites
+}
+
+// makefileTargetWords splits a rule head at unquoted blanks. Before a blank, each pair of
+// backslashes contributes a literal backslash and an odd final backslash quotes the blank.
+func makefileTargetWords(head string) []string {
+	names := []string{} // A rule with an empty head is distinct from a non-rule (nil).
+	var word strings.Builder
+	for start := 0; start < len(head) && start < MaxMakefileLineBytes; {
+		blank := strings.IndexAny(head[start:], " \t")
+		if blank < 0 {
+			word.WriteString(head[start:])
+			break
+		}
+		end := start + blank
+		part := head[start:end]
+		literal := strings.TrimRight(part, "\\")
+		slashes := len(part) - len(literal)
+		word.WriteString(part[:len(literal)+slashes/2])
+		if slashes%2 == 1 {
+			word.WriteByte(head[end])
+		} else if word.Len() > 0 {
+			names = append(names, word.String())
+			word.Reset()
+		}
+		start = end + 1
+	}
+	if word.Len() > 0 {
+		names = append(names, word.String())
+	}
+	return names
 }
 
 // makefileTrackedLine records one logical line together with the file and 1-indexed line number
@@ -562,7 +592,7 @@ func makefileStepTargetBody(
 		return false
 	}
 	scanner.targetOpen = true
-	return makefileRuleTailHasBody(tail)
+	return makefileRuleTailHasBody(tail, index, variables)
 }
 
 // makefileHasRecipeText reports whether a logical recipe line holds non-blank command text.
@@ -581,19 +611,28 @@ func makefileHasRecipeText(line string) bool {
 }
 
 // makefileRuleTailHasBody reports whether tail, the text of a rule line after its colon, holds at
-// least one prerequisite before "#" or ";" or a non-blank inline recipe after ";".
-func makefileRuleTailHasBody(tail string) bool {
+// least one prerequisite before "#" or ";" or a non-blank inline recipe after ";". References
+// fixed by the variable reader contribute their value. Other references remain structural text.
+func makefileRuleTailHasBody(tail string, index int, variables makefileVariables) bool {
 	for i := 0; i < len(tail) && i < MaxMakefileLineBytes; {
 		kind, width := makefileOperatorAt(tail, i)
-		if kind == makefileEndToken {
-			if tail[i] == ';' && makefileInlineRecipeHasText(tail[i+1:]) {
+		word := tail[i : i+width]
+		switch kind {
+		case makefileEndToken:
+			return tail[i] == ';' && makefileInlineRecipeHasText(tail[i+1:])
+		case makefileReferenceToken:
+			value, known := variables.lookup(word, index)
+			if !known || strings.TrimSpace(value.text) != "" {
 				return true
 			}
-			return strings.Trim(tail[:i], " \t|") != ""
+		default:
+			if strings.Trim(word, " \t|") != "" {
+				return true
+			}
 		}
 		i += width
 	}
-	return strings.Trim(tail, " \t|") != ""
+	return false
 }
 
 // makefileInlineRecipeHasText reports whether text after ";" on a rule line holds non-blank recipe

@@ -949,6 +949,9 @@ var makefileTargetHasBodyPositiveCases = []makefileBodyCase{
 	{"colon-in-variable-reference-prerequisite", "verify-all", "verify-all: $(SRCS:.c=.o)\n", true},
 	{"recipe-only", "verify-all", "verify-all:\n\t@true\n", true},
 	{"inline-semicolon-recipe", "verify-all", "verify-all: ; @true\n", true},
+	{"literal-name-with-space", "release verify-all", "release\\ verify-all: ; @true\n", true},
+	{"literal-name-with-tab", "release\tverify-all", "release\\\tverify-all: ; @true\n", true},
+	{"even-backslashes-before-space", "verify-all", "release\\\\ verify-all: ; @true\n", true},
 	{"continued-prerequisite", "verify-all", "verify-all: \\\n  lint\n", true},
 	{"continued-recipe", "verify-all", "verify-all:\n\t@echo \\\n  ok\n", true},
 	{"continued-blank-then-recipe", "verify-all", "verify-all:\n\t\\\n\t@true\n", true},
@@ -964,6 +967,7 @@ var makefileTargetHasBodyPositiveCases = []makefileBodyCase{
 
 var makefileTargetHasBodyNegativeCases = []makefileBodyCase{
 	{"absent-target", "verify-all", "build:\n\t@true\n", false},
+	{"suffix-after-quoted-tab", "verify-all", "release\\\tverify-all: ; @true\n", false},
 	{"empty-makefile", "verify-all", "", false},
 	{"empty-target", "verify-all", "verify-all:\n", false},
 	{"empty-target-before-other", "verify-all", "verify-all:\n\nother:\n\t@true\n", false},

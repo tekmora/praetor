@@ -60,10 +60,15 @@ func validForgeSetting(setting ForgeSetting) bool {
 	}
 }
 
+// registryNeedsForge reports whether any rule within the audit bounds declares a forge setting pointer, so the forge is read only when evidence needs it.
 func registryNeedsForge(registry *Registry) bool {
 	for i := 0; i < len(registry.Rules) && i < maxAuditRules; i++ {
-		for j := 0; j < len(registry.Rules[i].Evidence) && j < maxEvidencePointers; j++ {
-			if _, ok := forgeSetting(registry.Rules[i].Evidence[j]); ok {
+		pointers := registry.Rules[i].Evidence
+		if len(pointers) > maxEvidencePointers {
+			continue
+		}
+		for j := 0; j < len(pointers) && j < maxEvidencePointers; j++ {
+			if _, ok := forgeSetting(pointers[j]); ok {
 				return true
 			}
 		}

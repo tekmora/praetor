@@ -75,7 +75,7 @@ func TestAudit_MakeTargetBodyShapes(t *testing.T) {
 			root := fixtureRoot(t, registry)
 			writeTestFile(t, root, "Makefile", tc.makefile)
 			report, err := Audit(t.Context(), root)
-			assertMakeShapeResult(t, report, err, tc.wantError)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
 		})
 	}
 }
@@ -100,13 +100,13 @@ func TestAudit_MakeConditionalTargetBody(t *testing.T) {
 			root := fixtureRoot(t, registry)
 			writeTestFile(t, root, "Makefile", tc.makefile)
 			report, err := Audit(t.Context(), root)
-			assertMakeShapeResult(t, report, err, tc.wantError)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
 		})
 	}
 }
 
-// assertMakeShapeResult verifies the audit result and row status for one Makefile shape test case.
-func assertMakeShapeResult(t *testing.T, report *Report, err error, wantError bool) {
+// assertLocalEvidenceStatus verifies the audit result and row status for one local evidence pointer.
+func assertLocalEvidenceStatus(t *testing.T, report *Report, err error, wantError bool) {
 	t.Helper()
 	if (err != nil) != wantError {
 		t.Fatalf("Audit() error = %v, wantError = %t", err, wantError)
@@ -130,6 +130,13 @@ func TestAudit_MakeSharedParserRegressions(t *testing.T) {
 		{"define endef decoy", "empty", "empty:\n\ndefine M\nempty: ; @true\nendef\n", true},
 		{"continued recipe decoy", "empty", "empty:\n\nother:\n\t@echo \\\nempty: ; @true\n", true},
 		{"variable expanded target", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", false},
+		{"escaped space in one target", "verify-all", "release\\ verify-all: ; @true\n", true},
+		{"unescaped space between targets", "verify-all", "release verify-all: ; @true\n", false},
+		{"escaped space in computed target", "verify-all", "PREFIX := release\n$(PREFIX)\\ verify-all: ; @true\n", true},
+		{"known empty prerequisites", "verify-all", "DEPS :=\nverify-all: $(DEPS)\n", true},
+		{"known nonempty prerequisites", "verify-all", "DEPS := lint\nverify-all: $(DEPS)\n", false},
+		{"empty order-only prerequisites", "verify-all", "DEPS :=\nverify-all: | ${DEPS} ; # comment\n", true},
+		{"empty prerequisites with recipe", "verify-all", "DEPS :=\nverify-all: $(DEPS) ; @true\n", false},
 		{"ifeq quoted rule target", "verify-all", "verify-all:\nifeq\"other\":\n\t@true\n", true},
 	}
 	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {
@@ -139,7 +146,7 @@ func TestAudit_MakeSharedParserRegressions(t *testing.T) {
 			root := fixtureRoot(t, registry)
 			writeTestFile(t, root, "Makefile", tc.makefile)
 			report, err := Audit(t.Context(), root)
-			assertMakeShapeResult(t, report, err, tc.wantError)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
 			row := findRow(t, report, "HISS-01")
 			wantEvidence := "resolved"
 			if tc.wantError {
@@ -184,6 +191,19 @@ func TestAudit_ConditionalWorkflowJobResolvesAsPresent(t *testing.T) {
 	}
 }
 
+// TestAudit_WorkflowDirectory resolves a workflow pointer only in the directory GitHub runs workflows from.
+func TestAudit_WorkflowDirectory(t *testing.T) {
+	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [workflow:"
+	for _, file := range [...]string{"ci.yml", "archive/ci.yml", "archive/../ci.yml"} {
+		t.Run(file, func(t *testing.T) {
+			root := fixtureRoot(t, registry+file+"#verify]\n")
+			writeTestFile(t, root, ".github/workflows/archive/ci.yml", "jobs:\n  verify:\n    runs-on: ubuntu-latest\n")
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, file != "ci.yml")
+		})
+	}
+}
+
 // TestAudit_WorkflowJobAlias checks evidence resolution for aliases of jobs and their conditions.
 func TestAudit_WorkflowJobAlias(t *testing.T) {
 	tests := []struct {
@@ -197,6 +217,9 @@ func TestAudit_WorkflowJobAlias(t *testing.T) {
 		{"alias of expression false job", "jobs:\n  disabled: &disabled\n    if: ${{ false }}\n    runs-on: ubuntu-latest\n  verify: *disabled\n", true},
 		{"aliased active condition", "jobs:\n  base:\n    if: &condition github.event_name == 'push'\n  verify:\n    if: *condition\n", false},
 		{"aliased false condition", "jobs:\n  base:\n    if: &condition false\n  verify:\n    if: *condition\n", true},
+		{"mixed case false", "jobs:\n  verify:\n    if: False\n", true},
+		{"aliased uppercase false", "jobs:\n  base:\n    if: &condition FALSE\n  verify:\n    if: *condition\n", true},
+		{"uppercase true", "jobs:\n  verify:\n    if: TRUE\n", false},
 		{"condition alias without anchor", "jobs:\n  verify:\n    if: *missing\n", true},
 	}
 	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [workflow:ci.yml#verify]\n"
@@ -206,7 +229,7 @@ func TestAudit_WorkflowJobAlias(t *testing.T) {
 			root := fixtureRoot(t, registry)
 			writeTestFile(t, root, ".github/workflows/ci.yml", tc.workflow)
 			report, err := Audit(t.Context(), root)
-			assertMakeShapeResult(t, report, err, tc.wantError)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
 		})
 	}
 }
@@ -231,6 +254,49 @@ func TestAudit_PresentTestNotEnforced(t *testing.T) {
 	}
 	if !slices.Contains(report.UnenforcedIDs(), "HISS-01") {
 		t.Fatalf("UnenforcedIDs() = %v, want HISS-01 included", report.UnenforcedIDs())
+	}
+}
+
+// TestAudit_TestDeclaration resolves a test pointer only to a parsed top-level test declaration.
+func TestAudit_TestDeclaration(t *testing.T) {
+	const declaration = "func TestGhost(t *testing.T) {}\n"
+	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [test:internal/check.TestGhost]\n"
+	tests := [...]struct {
+		name, source string
+		wantError    bool
+	}{
+		{"block comment", "/*\n" + declaration + "*/\n", true},
+		{"raw string", "const example = `\n" + declaration + "`\n", true},
+		{"method", "type runner struct{}\nfunc (runner) TestGhost(t *testing.T) {}\n", true},
+		{"wrong signature", "func TestGhost() {}\n", true},
+		{"test function", declaration, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRoot(t, registry)
+			writeTestFile(t, root, "internal/check/check_test.go", "package check\nimport \"testing\"\n"+tc.source)
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
+		})
+	}
+}
+
+// TestAudit_TestFileErrors surfaces a test file's parse and read errors instead of skipping the file.
+func TestAudit_TestFileErrors(t *testing.T) {
+	tests := [...]struct{ name, source, diagnostic string }{
+		{"parse error", "package check\nfunc unfinished(\n", "parse zz_bad_test.go:"},
+		{"read error", "\xff", "read zz_bad_test.go:"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRoot(t, fixtureRegistry(t))
+			writeTestFile(t, root, "internal/check/zz_bad_test.go", tc.source)
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, true)
+			if !strings.Contains(strings.Join(report.Problems, "\n"), tc.diagnostic) {
+				t.Fatalf("problems = %v, want %q", report.Problems, tc.diagnostic)
+			}
+		})
 	}
 }
 
@@ -422,6 +488,35 @@ func TestAudit_EmptyRulesAndMaximumPointer(t *testing.T) {
 				t.Fatal("Audit() report = nil")
 			}
 		})
+	}
+}
+
+// TestAudit_EvidencePointerCount accepts 32 evidence pointers and leaves a rule with 33 unresolved.
+func TestAudit_EvidencePointerCount(t *testing.T) {
+	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [forge:required_signatures" +
+		strings.Repeat(", make:verify-all", 31)
+	opts := forgeOptions(ForgeRequiredSignatures, forgeState("required", "required", true, true), nil)
+	report, err := AuditWithOptions(t.Context(), fixtureRoot(t, registry+"]\n"), opts)
+	if err != nil {
+		t.Fatalf("32 pointers: %v", err)
+	}
+	row := findRow(t, report, "HISS-01")
+	if row.Status != StatusForgeObserved || !row.Enforced {
+		t.Fatalf("32 pointers: row = %#v", row)
+	}
+	provider := opts.Forge
+	called := false
+	opts.Forge = func(ctx context.Context) (map[ForgeSetting]ForgeState, error) {
+		called = true
+		return provider(ctx)
+	}
+	report, err = AuditWithOptions(t.Context(), fixtureRoot(t, registry+", make:missing]\n"), opts)
+	if err == nil || !slices.Contains(report.Problems, "HISS-01: evidence exceeds 32 pointers") {
+		t.Fatalf("33 pointers: row = %#v, problems = %v, error = %v", findRow(t, report, "HISS-01"), report.Problems, err)
+	}
+	row = findRow(t, report, "HISS-01")
+	if row.Status != StatusUnresolved || row.Enforced || len(row.Forge) != 0 || called {
+		t.Fatalf("33 pointers: row = %#v, provider called = %t", row, called)
 	}
 }
 

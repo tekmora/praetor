@@ -180,6 +180,10 @@ func validateEntry(entry *Entry, report *Report) {
 	if entry.Class != ClassGuidance && len(entry.Evidence) == 0 {
 		report.Problems = append(report.Problems, fmt.Sprintf("%s: %s requires evidence", entry.ID, entry.Class))
 	}
+	if len(entry.Evidence) > maxEvidencePointers {
+		report.Problems = append(report.Problems, fmt.Sprintf("%s: evidence exceeds %d pointers", entry.ID, maxEvidencePointers))
+		return
+	}
 	for i := 0; i < len(entry.Evidence) && i < maxEvidencePointers; i++ {
 		if len(entry.Evidence[i]) > maxPointerLength {
 			report.Problems = append(report.Problems, fmt.Sprintf("%s: evidence pointer exceeds %d bytes", entry.ID, maxPointerLength))
@@ -199,10 +203,14 @@ func auditRule(
 	if entry == nil {
 		return proseRow(rule, ClassGuidance)
 	}
+	row := Row{ID: rule.ID, Class: entry.Class, Status: StatusUnresolved}
+	if len(entry.Evidence) > maxEvidencePointers {
+		row.Evidence = "unresolved: too many evidence pointers"
+		return row
+	}
 	if entry.Class == ClassGuidance {
 		return proseRow(rule, entry.Class)
 	}
-	row := Row{ID: rule.ID, Class: entry.Class, Status: StatusUnresolved}
 	if !validClass(entry.Class) {
 		row.Evidence = "unresolved: invalid class"
 		return row
@@ -386,30 +394,6 @@ func resolve(ctx context.Context, root, pointer string) error {
 	return fmt.Errorf("unresolved evidence pointer %q", pointer)
 }
 
-// resolveTest checks that a Go *_test.go file in the named package directory defines TestX.
-func resolveTest(ctx context.Context, root, value string) error {
-	index := strings.LastIndex(value, ".")
-	if index < 1 || index == len(value)-1 {
-		return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
-	}
-	directory, name := value[:index], value[index+1:]
-	if !safeRelative(directory) || !regexp.MustCompile(`^Test[A-Za-z0-9_]+$`).MatchString(name) {
-		return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
-	}
-	files, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(directory), "*_test.go"))
-	if err != nil || len(files) > maxTestFiles {
-		return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
-	}
-	matcher := regexp.MustCompile(`(?m)^func\s+` + regexp.QuoteMeta(name) + `\s*\(`)
-	for i := 0; i < len(files) && i < maxTestFiles; i++ {
-		data, readErr := readFile(ctx, root, filepath.ToSlash(strings.TrimPrefix(files[i], root+string(filepath.Separator))))
-		if readErr == nil && matcher.Match(data) {
-			return nil
-		}
-	}
-	return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
-}
-
 // resolveMake checks that Makefile declares target with at least one prerequisite or non-empty recipe line.
 func resolveMake(ctx context.Context, root, target string) error {
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(target) {
@@ -425,10 +409,11 @@ func resolveMake(ctx context.Context, root, target string) error {
 // resolveWorkflow checks that .github/workflows/<file> defines job and its if: condition is not literal false.
 func resolveWorkflow(ctx context.Context, root, value string) error {
 	file, job, ok := strings.Cut(value, "#")
-	if !ok || !safeWorkflow(file) || !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(job) {
+	path := ghworkflow.Dir + "/" + filepath.ToSlash(file)
+	if !ok || !safeRelative(file) || !ghworkflow.IsWorkflowPath(path) || !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(job) {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
-	data, err := readFile(ctx, root, filepath.ToSlash(filepath.Join(".github/workflows", file)))
+	data, err := readFile(ctx, root, path)
 	if err != nil || !hasActiveWorkflowJob(data, job) {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
@@ -451,7 +436,14 @@ func hasActiveWorkflowJob(data []byte, job string) bool {
 		return true
 	}
 	ifNode = unwrapYAMLAlias(ifNode)
-	return ifNode != nil && ifNode.Kind == yaml.ScalarNode && !ghworkflow.NeverRuns(ifNode.Value)
+	if ifNode == nil || ifNode.Kind != yaml.ScalarNode {
+		return false
+	}
+	if ifNode.ShortTag() == "!!bool" {
+		var enabled bool
+		return ifNode.Decode(&enabled) == nil && enabled
+	}
+	return !ghworkflow.NeverRuns(ifNode.Value)
 }
 
 // unwrapYAMLAlias follows one YAML alias level to its target node, returning nil for nil or a nil Alias target.
@@ -484,11 +476,6 @@ func resolveHook(ctx context.Context, root, value string) error {
 // safeRelative reports whether value is a non-empty local relative path.
 func safeRelative(value string) bool {
 	return value != "" && !filepath.IsAbs(value) && filepath.IsLocal(filepath.FromSlash(value))
-}
-
-// safeWorkflow reports whether file is a safe relative YAML filename.
-func safeWorkflow(file string) bool {
-	return safeRelative(file) && (strings.HasSuffix(file, ".yml") || strings.HasSuffix(file, ".yaml"))
 }
 
 // validHookName reports whether value is an allowed lefthook hook or command identifier.

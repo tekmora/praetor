@@ -375,6 +375,11 @@ func (v makefileVariables) targets(names []string, line int) ([]string, bool) {
 			resolved = append(resolved, name)
 			continue
 		}
+		// A blank still inside a name was quoted in the rule head. Splitting the expanded
+		// text would lose that distinction and could invent another target.
+		if strings.ContainsAny(name, " \t") {
+			return nil, false
+		}
 		expanded, _, ok := v.expand(name, line)
 		if !ok {
 			return nil, false
