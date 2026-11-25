@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -104,6 +105,7 @@ func TestAudit_MakeWholeFile(t *testing.T) {
 	for _, tc := range [...]struct{ name, makefile string }{
 		{"later empty recipe", rule + "check: ;\n"},
 		{"later rule without recipe", rule + "other check: dep\n"},
+		{"remade Makefile", rule + "Makefile: next.mk ; cp next.mk Makefile\n"},
 		{"included recipe prefix", "include settings.mk\ncheck:\n\tX := one\n"},
 		{"optional include", rule + "-include settings.mk\n"},
 		{"explicit prefix", rule + ".RECIPEPREFIX := >\n"},
@@ -434,6 +436,63 @@ func TestAudit_TestPackageFiles(t *testing.T) {
 	}
 }
 
+// TestAudit_TestFilenameConstraints requires portable files for all three parts of the evidence.
+func TestAudit_TestFilenameConstraints(t *testing.T) {
+	const pointer = "test:check.TestGate"
+	for _, tc := range [...]struct {
+		name, base, alias, test string
+		wantError               bool
+	}{
+		{"OS test", "base.go", "alias_test.go", "gate_windows_test.go", true},
+		{"architecture test", "base.go", "alias_test.go", "gate_amd64_test.go", true},
+		{"OS and architecture test", "base.go", "alias_test.go", "gate_linux_arm64_test.go", true},
+		{"OS package", "base_linux.go", "alias_test.go", "gate_test.go", true},
+		{"architecture alias", "base.go", "alias_arm64_test.go", "gate_test.go", true},
+		{"OS without prefix", "base.go", "alias_test.go", "windows_test.go", false},
+		{"non-platform suffix", "base.go", "alias_test.go", "gate_portable_test.go", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := pointerFixtureRoot(t, pointer)
+			writeTestFile(t, root, "check/"+tc.base, "package check\n")
+			writeTestFile(t, root, "check/"+tc.alias, "package check\nimport \"testing\"\ntype T = testing.T\n")
+			writeTestFile(t, root, "check/"+tc.test, "package check\nfunc TestGate(*T) {}\n")
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
+		})
+	}
+}
+
+// TestAudit_TestBuildHeader checks whether a malformed neighbor belongs to an otherwise provable package.
+func TestAudit_TestBuildHeader(t *testing.T) {
+	const pointer = "test:internal/check.TestEnforced"
+	const malformed = "package check\nfunc unfinished(\n"
+	for _, tc := range [...]struct {
+		name, source string
+		wantParseErr bool
+	}{
+		{"modern", "//go:build ignore\n\n" + malformed, false},
+		{"negated", "/* license */\n//go:build !windows\n\n" + malformed, false},
+		{"legacy", "// +build !windows\n\n" + malformed, false},
+		{"unconstrained", malformed, true},
+		{"empty", "", true},
+		{"legacy package comment", "// +build !windows\n" + malformed, true},
+		{"block comment text", "/*\n//go:build ignore\n*/\n" + malformed, true},
+		{"split directive keyword", "//go:\rbuild ignore\n\n" + malformed, true},
+		{"body comment", "package check\n//go:build ignore\nfunc unfinished(\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := pointerFixtureRoot(t, pointer)
+			writeTestFile(t, root, "internal/check/generator.go", tc.source)
+			if tc.wantParseErr {
+				assertPointerProblem(t, root, pointer, "parse generator.go:")
+				return
+			}
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, false)
+		})
+	}
+}
+
 // TestAudit_TestParameterAlias checks package-scoped literal aliases and rejects other type bindings.
 func TestAudit_TestParameterAlias(t *testing.T) {
 	const alias = "import std \"testing\"\ntype T = std.T\n"
@@ -452,6 +511,7 @@ func TestAudit_TestParameterAlias(t *testing.T) {
 		{"different package", "zz_test.go", "package check_test\n" + alias, test, true},
 		{"constrained alias", "zz_test.go", "//go:build ignore\n\n" + direct, test, true},
 		{"legacy constrained source", "types.go", "// +build ignore\n\n" + direct, test, true},
+		{"cgo-only alias", "types.go", "package check\nimport \"C\"\n" + alias, test, true},
 		{"alias of alias", "zz_test.go", "package check\nimport \"testing\"\ntype Base = testing.T\ntype T = Base\n", test, true},
 		{"defined type", "zz_test.go", "package check\nimport \"testing\"\ntype T testing.T\n", test, true},
 		{"unrelated import", "zz_test.go", "package check\nimport std \"example.com/other\"\ntype T = std.T\n", test, true},
@@ -465,6 +525,34 @@ func TestAudit_TestParameterAlias(t *testing.T) {
 			report, err := Audit(t.Context(), root)
 			assertLocalEvidenceStatus(t, report, err, tc.wantError)
 		})
+	}
+}
+
+// hookSnapshotContext runs a fixture action when a confined read starts its per-snapshot timeout.
+type hookSnapshotContext struct {
+	context.Context
+	beforeRead func()
+}
+
+// Deadline forwards the test deadline after preparing the next version of the fixture.
+func (c hookSnapshotContext) Deadline() (time.Time, bool) {
+	c.beforeRead()
+	return c.Context.Deadline()
+}
+
+// TestAudit_HookSnapshot replaces the config with malformed YAML if command lookup opens it again.
+func TestAudit_HookSnapshot(t *testing.T) {
+	const pointer = "hook:commit-msg.message-policy"
+	root := pointerFixtureRoot(t, pointer)
+	reads := 0
+	ctx := hookSnapshotContext{Context: t.Context(), beforeRead: func() {
+		reads++
+		if reads == 2 {
+			writeTestFile(t, root, "lefthook.yml", "commit-msg: [\n")
+		}
+	}}
+	if err := resolve(ctx, root, pointer); err != nil || reads != 1 {
+		t.Fatalf("resolve = %v after %d reads, want command from the first snapshot", err, reads)
 	}
 }
 
@@ -482,6 +570,17 @@ func TestAudit_HookCause(t *testing.T) {
 	assertLocalEvidenceStatus(t, report, auditErr, true)
 	if !errors.As(auditErr, &cause) || !strings.Contains(strings.Join(report.Problems, "\n"), cause.Error()) {
 		t.Fatalf("Audit = %v, problems = %v, want YAML cause", auditErr, report.Problems)
+	}
+	const extension = ".config/lefthook/extra.yml"
+	writeTestFile(t, root, "lefthook.yml", "extends: ["+extension+"]\npre-commit:\n  commands:\n    lint: {}\n")
+	writeTestFile(t, root, extension, "extends: {unexpected: mapping}\n")
+	err = resolve(t.Context(), root, pointer)
+	if !errors.As(err, &cause) || !strings.Contains(err.Error(), extension) {
+		t.Fatalf("resolve = %v, want extension path and *yaml.TypeError despite matching root command", err)
+	}
+	writeTestFile(t, root, extension, "")
+	if err := resolve(t.Context(), root, pointer); err != nil {
+		t.Fatalf("resolve with empty extension = %v", err)
 	}
 }
 

@@ -4,16 +4,18 @@
 package ruleregistry
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/build/constraint"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode"
@@ -141,16 +143,16 @@ func (e *testEvidence) hasTest() bool {
 
 // readFile collects evidence from one unconstrained file and establishes the non-test package.
 func (e *testEvidence) readFile(ctx context.Context, dir *os.Root, file, name string) error {
-	data, err := contextopt.ReadRootSnapshot(ctx, dir, file)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", file, err)
+	data, portable, err := portableGoSource(ctx, dir, file)
+	if err != nil || !portable {
+		return err
 	}
-	parsed, err := parser.ParseFile(token.NewFileSet(), file, data, parser.SkipObjectResolution|parser.ParseComments)
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, data, parser.SkipObjectResolution)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", file, err)
 	}
 	pkg := parsed.Name.Name
-	if pkg == "documentation" || hasBuildConstraint(parsed) {
+	if pkg == "documentation" {
 		return nil
 	}
 	isTest := strings.HasSuffix(file, "_test.go")
@@ -164,13 +166,44 @@ func (e *testEvidence) readFile(ctx context.Context, dir *os.Root, file, name st
 	return nil
 }
 
-// hasBuildConstraint recognizes both build directive spellings in Go line comments.
-func hasBuildConstraint(file *ast.File) bool {
-	return slices.ContainsFunc(file.Comments, func(group *ast.CommentGroup) bool {
-		return slices.ContainsFunc(group.List, func(comment *ast.Comment) bool {
-			return constraint.IsGoBuild(comment.Text) || constraint.IsPlusBuild(comment.Text)
-		})
-	})
+// portableGoSource gives go/build a directory containing only file, so Package.AllTags
+// describes this file alone. Both filename suffixes and build headers contribute tags,
+// even when a negated tag matches. The full parser receives the same confined snapshot.
+func portableGoSource(ctx context.Context, dir *os.Root, file string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	info, err := dir.Lstat(file)
+	if err != nil {
+		return nil, false, fmt.Errorf("stat %s: %w", file, err)
+	}
+	var data []byte
+	var readErr error
+	platform := build.Context{
+		Compiler: runtime.Compiler,
+		IsDir:    func(path string) bool { return path == "." },
+		ReadDir:  func(string) ([]os.FileInfo, error) { return []os.FileInfo{info}, nil },
+		OpenFile: func(string) (io.ReadCloser, error) {
+			data, readErr = contextopt.ReadRootSnapshot(ctx, dir, file)
+			if readErr != nil {
+				return nil, readErr
+			}
+			return io.NopCloser(bytes.NewReader(data)), nil
+		},
+	}
+	pkg, err := platform.ImportDir(".", 0)
+	if readErr != nil {
+		return nil, false, fmt.Errorf("read %s: %w", file, readErr)
+	}
+	if len(pkg.AllTags) != 0 {
+		return nil, false, nil
+	}
+	// An unconstrained package documentation file also produces NoGoError.
+	// Parse it as before so a malformed body still has a diagnostic.
+	if _, noGo := errors.AsType[*build.NoGoError](err); err != nil && !noGo {
+		return nil, false, fmt.Errorf("parse %s: %w", file, err)
+	}
+	return data, true, nil
 }
 
 // collect indexes top-level type declarations and matching test functions in one file.

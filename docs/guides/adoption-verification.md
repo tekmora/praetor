@@ -806,18 +806,23 @@ The reader must recognize **every line** of the Makefile, including lines after 
 It accepts blanks, comments, tab-led recipe lines, single-colon rules with literal target and
 prerequisite words, and simple literal assignments to ordinary variables. An include, directive,
 conditional, continuation, byte-order mark, special variable assignment or second declaration of
-the requested target makes the pointer unresolved with `not statically provable`. A missing
+the requested target makes the pointer unresolved with `not statically provable`. A rule that
+targets `GNUmakefile`, `makefile` or `Makefile` has the same effect on every pointer in the
+file because Make can replace and re-read its rules before running the requested target. A missing
 target in a fully recognized file reports `unresolved evidence pointer`.
 See `TestAudit_MakeWholeFile` and `TestAudit_MakeTargetBodyShapes` in
 `internal/ruleregistry/registry_test.go`.
 
 A `test:<directory>.<name>` pointer needs a top-level test function in a visible `_test.go`
 file. Its package must match the package declared by ordinary Go files in that directory or its
-external `_test` package. The reader skips `package documentation` and files carrying
-`//go:build` or `// +build` constraints. It needs an ordinary source file to establish the
-package. The parameter may use a pointer to the imported `testing.T` or a direct type alias
-such as `type T = testing.T` in another qualifying file of the same package.
-See `TestAudit_TestPackageFiles` and `TestAudit_TestParameterAlias`.
+external `_test` package. The reader skips `package documentation`. A Go filename suffix
+restricting the OS or architecture, or a leading `//go:build` or `// +build` constraint,
+excludes a file before the reader parses its body. For example, `gate_windows_test.go` is
+excluded and `windows_test.go` is eligible. The reader needs an eligible ordinary source file
+to establish the package. The parameter may use a pointer to the imported `testing.T` or a
+direct type alias such as `type T = testing.T` in another qualifying file of the same package.
+See `TestAudit_TestPackageFiles`, `TestAudit_TestFilenameConstraints`, `TestAudit_TestBuildHeader`
+and `TestAudit_TestParameterAlias`.
 
 A `workflow:<file>#<job>` pointer reads the effective `if` condition from the parsed job.
 A YAML merge key (`<<`) in the document, the `jobs` mapping or the selected job mapping makes

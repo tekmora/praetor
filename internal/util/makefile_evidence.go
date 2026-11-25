@@ -84,22 +84,16 @@ func (r *makefileEvidenceReader) declaration(line, target string) bool {
 // rule validates every rule and refuses a second declaration, including one in a target list.
 func (r *makefileEvidenceReader) rule(line string, colon int, target string) bool {
 	head := strings.Trim(line[:colon], " \t")
-	if head == "" || !makefileLiteralWords(head) || strings.Contains(line, "$") {
+	names := strings.Fields(head)
+	if len(names) == 0 || !makefileLiteralWords(head) || strings.Contains(line, "$") {
 		return false
 	}
 	literal, recipe := makefileLiteralRuleTail(line[colon+1:])
-	if !literal {
+	if !literal || makefileRuleCanReplace(names, target) {
 		return false
 	}
-	names := strings.Fields(head)
 	r.inRule = true
 	r.wanted = slices.Contains(names, target)
-	// A different spelling of the same path can replace this target's recipe.
-	if slices.ContainsFunc(names, func(name string) bool {
-		return name != target && makefileNormalizeName(name) == target
-	}) {
-		return false
-	}
 	if r.wanted {
 		if r.status != MakefileTargetMissing {
 			return false
@@ -110,6 +104,14 @@ func (r *makefileEvidenceReader) rule(line string, colon int, target string) boo
 		}
 	}
 	return true
+}
+
+// makefileRuleCanReplace reports whether a rule can remake the makefile or replace the requested recipe under another spelling.
+func makefileRuleCanReplace(names []string, target string) bool {
+	return slices.ContainsFunc(names, func(name string) bool {
+		normalized := makefileNormalizeName(name)
+		return makefileIsMakefileName(normalized) || (name != target && normalized == target)
+	})
 }
 
 // makefileLiteralWords accepts only Make word bytes and the horizontal blanks that separate them.

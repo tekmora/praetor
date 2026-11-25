@@ -1,4 +1,11 @@
 type: changed
-title: "Separate structural pointer resolution from live enforcement in `standardsctl rules audit` (`status` reports `present`, `forge-observed`, `forge-pending`, `unresolved`, or `guidance`, empty Make targets and `if: false` workflow jobs fail resolution, and `enforced` is true only when live forge read-back matches with no pending forge pointer); read `status` for local pointer presence or pass `--remote` when checking `enforced`"
+title: >-
+  Separate structural pointer resolution from live enforcement in `standardsctl rules audit`.
+  Read `status` for `present`, `forge-observed`, `forge-pending`, `unresolved`, or `guidance`.
+  Empty Make targets and `if: false` workflow jobs fail resolution.
+  Use `--remote` to check `enforced`, which requires all pointers to resolve and live forge read-back to match.
+  Any unprovable Makefile line leaves every `make:` declaration for that file unresolved, even with `--remote`.
+  The computed assignment at `Makefile:8` affects all seven declarations in this repository, including `make:secrets`.
+  Migrate affected rules by pointing them at independently verifiable evidence.
 issue: "#1134"
 breaking: true

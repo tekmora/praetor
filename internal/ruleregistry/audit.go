@@ -509,18 +509,12 @@ func resolveHook(ctx context.Context, root, value string) error {
 	if !ok || !validHookName(hook) || !validHookName(command) {
 		return fmt.Errorf("unresolved evidence pointer %q", "hook:"+value)
 	}
-	files, err := hookFiles(ctx, root)
+	found, err := hookCommandInFiles(ctx, root, hook, command)
 	if err != nil {
 		return fmt.Errorf("resolve hook:%s: %w", value, err)
 	}
-	for i := 0; i < len(files) && i < 16; i++ {
-		data, readErr := readFile(ctx, root, files[i])
-		if readErr != nil {
-			return fmt.Errorf("read %s for hook:%s: %w", files[i], value, readErr)
-		}
-		if hasHookCommand(data, hook, command) {
-			return nil
-		}
+	if found {
+		return nil
 	}
 	return fmt.Errorf("unresolved evidence pointer %q", "hook:"+value)
 }
@@ -535,36 +529,45 @@ func validHookName(value string) bool {
 	return regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(value)
 }
 
-// hookFiles collects lefthook.yml and up to 16 extended configs below .config/lefthook/, rejecting cycles.
-func hookFiles(ctx context.Context, root string) ([]string, error) {
-	queue, files := []string{"lefthook.yml"}, []string{}
+// hookCommandInFiles checks each snapshot for extensions and commands, validating the complete extension graph.
+func hookCommandInFiles(ctx context.Context, root, hook, command string) (bool, error) {
+	queue := []string{"lefthook.yml"}
 	seen := map[string]bool{}
+	found := false
 	for i := 0; i < len(queue) && i < 16; i++ {
 		file := queue[i]
 		if seen[file] {
-			return nil, fmt.Errorf("lefthook extensions form a cycle")
+			return false, fmt.Errorf("lefthook extensions form a cycle")
 		}
 		data, err := readFile(ctx, root, file)
 		if err != nil {
-			return nil, err
+			return false, fmt.Errorf("read %s: %w", file, err)
 		}
-		seen[file], files = true, append(files, file)
-		extends, err := checkedExtensions(data, len(queue))
+		var document yaml.Node
+		if err := yaml.Unmarshal(data, &document); err != nil {
+			return false, fmt.Errorf("decode %s: %w", file, err)
+		}
+		extends, err := checkedExtensions(&document, len(queue))
 		if err != nil {
-			return nil, err
+			return false, fmt.Errorf("%s: %w", file, err)
 		}
+		seen[file] = true
+		found = found || hasHookCommand(&document, hook, command)
 		queue = append(queue, extends...)
 	}
-	return files, nil
+	return found, nil
 }
 
 // checkedExtensions are the extends entries of one lefthook file: at most 16 files in all, each a safe relative path
 // below .config/lefthook/.
-func checkedExtensions(data []byte, queued int) ([]string, error) {
-	extends, err := lefthookExtends(data)
-	if err != nil {
-		return nil, err
+func checkedExtensions(document *yaml.Node, queued int) ([]string, error) {
+	var config struct {
+		Extends []string `yaml:"extends"`
 	}
+	if err := document.Decode(&config); err != nil {
+		return nil, fmt.Errorf("decode lefthook YAML: %w", err)
+	}
+	extends := config.Extends
 	if queued+len(extends) > 16 {
 		return nil, fmt.Errorf("lefthook extensions exceed 16 files")
 	}
@@ -576,21 +579,9 @@ func checkedExtensions(data []byte, queued int) ([]string, error) {
 	return extends, nil
 }
 
-// lefthookExtends decodes the extends list from a lefthook YAML file.
-func lefthookExtends(data []byte) ([]string, error) {
-	var document struct {
-		Extends []string `yaml:"extends"`
-	}
-	if err := yaml.Unmarshal(data, &document); err != nil {
-		return nil, fmt.Errorf("decode lefthook YAML: %w", err)
-	}
-	return document.Extends, nil
-}
-
 // hasHookCommand reports whether a lefthook YAML document declares command under hook's commands, scripts, or jobs.
-func hasHookCommand(data []byte, hook, command string) bool {
-	var document yaml.Node
-	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {
+func hasHookCommand(document *yaml.Node, hook, command string) bool {
+	if len(document.Content) != 1 {
 		return false
 	}
 	hookNode := util.YAMLMappingValue(document.Content[0], hook)
