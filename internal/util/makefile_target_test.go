@@ -165,7 +165,7 @@ type makefileOwnershipRow struct {
 // target name declared nothing, and a define whose continued line swallows endef closed there.
 // info-message is the one bare expansion the reader exempts: a line made only of info, warning
 // and error calls expands to nothing (makefileSilentRows). computed-target-list declares
-// verify-all, but the reader claims no target from a line whose target list holds a reference.
+// verify-all even when the sibling reference stays unresolved.
 var makefileIssue554Rows = map[string]makefileOwnershipRow{
 	"single-line-template": {
 		makefile:  "make-rule = $(1): ; @echo custom\n$(call make-rule,verify-all)\n",
@@ -188,7 +188,7 @@ var makefileIssue554Rows = map[string]makefileOwnershipRow{
 	},
 	"computed-target-list": {
 		makefile:  "$(PREFIX) verify-all: dep\n\t@echo custom\n",
-		mayDefine: true, makeTarget: true,
+		hasTarget: true, mayDefine: true, makeTarget: true,
 	},
 	"continued-assignment": {
 		makefile: "HELP = usage \\\n  verify-all: run every gate\nall:\n\t@echo all\n",
@@ -686,11 +686,30 @@ func TestMakefileComputedTargetQuotedBlank(t *testing.T) {
 			t.Fatal("split the computed target at its quoted blank")
 		}
 		target := "doc" + blank + "notes"
+		if !util.MakefileHasTarget(file, target) {
+			t.Fatalf("lost the quoted blank in %q", target)
+		}
 		if got := util.MakefileTargetStatus(file, target); got != util.MakefileTargetUnproven {
 			t.Fatalf("computed target %q evidence = %v, want unproven", target, got)
 		}
 		if util.MakefileHasTarget(head, target) || !util.MakefileMayDefineTarget(head, target) {
 			t.Fatalf("unbound NAME should leave %q unresolved", target)
+		}
+	}
+}
+
+// TestMakefileUnresolvedTargetWord keeps the known siblings on either side of an unprovable
+// expansion. Blanks inside the reference belong to that reference.
+func TestMakefileUnresolvedTargetWord(t *testing.T) {
+	const file = "NAME := notes\n$(NAME) x$(if , phantom , fallback ) verify-all: ; @true\n"
+	for _, name := range [...]string{"notes", "verify-all"} {
+		if !util.MakefileHasTarget(file, name) {
+			t.Errorf("lost known sibling %q", name)
+		}
+	}
+	for _, name := range [...]string{"x", "phantom", "fallback"} {
+		if util.MakefileHasTarget(file, name) || !util.MakefileMayDefineTarget(file, name) {
+			t.Errorf("%q should remain unresolved", name)
 		}
 	}
 }
@@ -1054,6 +1073,25 @@ func TestMakefileTargetHasBodyNegative(t *testing.T) {
 	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyNegativeCases)
 }
 
+// TestMakefileAssignmentComments checks dollars on both sides of a possible comment boundary.
+func TestMakefileAssignmentComments(t *testing.T) {
+	for _, tc := range [...]struct {
+		value string
+		want  util.MakefileEvidence
+	}{
+		{"fast # see $(MODE)", util.MakefileTargetPresent},
+		{`fast\\# see $(MODE)`, util.MakefileTargetPresent},
+		{"$(MODE) # see mode", util.MakefileTargetUnproven},
+		{`fast\# see $(MODE)`, util.MakefileTargetUnproven},
+		{"fast; $(MODE) # see mode", util.MakefileTargetUnproven},
+	} {
+		file := "MODE := " + tc.value + "\ncheck: ; @true\n"
+		if got := util.MakefileTargetStatus(file, "check"); got != tc.want {
+			t.Errorf("assignment value %q: status = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
 // TestMakefileTargetWholeFile requires the complete file to qualify before reporting any evidence.
 func TestMakefileTargetWholeFile(t *testing.T) {
 	const rule = "check: ; @true\n"
@@ -1063,7 +1101,7 @@ func TestMakefileTargetWholeFile(t *testing.T) {
 	}{
 		{"literal file", "# gates\nMODE := fast\n\tOPTS = -v\n\nall: check\ncheck: lint | out\n\t@true\n", util.MakefileTargetPresent},
 		{"reference in Make comment", "check: # documents $(MODE)\n\ttrue\n", util.MakefileTargetPresent},
-		{"semicolon in Make comment", "check: # note ; echo $(MODE)\n", util.MakefileTargetUnproven},
+		{"semicolon in Make comment", "check: # note ; echo ok\n", util.MakefileTargetUnproven},
 		{"reference after hash in inline recipe", rule + "other: ; echo '# $(MODE)'\n", util.MakefileTargetUnproven},
 		{"replacement", rule + "check: ;\n", util.MakefileTargetUnproven},
 		{"duplicate without recipe", rule + "other check:\n", util.MakefileTargetUnproven},

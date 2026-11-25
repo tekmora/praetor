@@ -7,8 +7,8 @@ title: >-
   Any unprovable Makefile line leaves every `make:` declaration for that file unresolved, even with `--remote`.
   This includes dot targets other than `.PHONY` (such as `.SUFFIXES` and single- or double-suffix rules), `%` in targets or prerequisites (including static pattern rules), `vpath` directives and `VPATH` assignments.
   Every `make:` pointer is unresolved when the selected makefile has a possible built-in remake source beside it or its directory cannot be read within the 4096-entry limit.
-  A variable reference in a Make rule comment no longer invalidates a literal recipe.
-  The declared verification stage recognizes a literal `verify-all` beside a target name that expands from a known variable and contains a quoted blank.
+  Variable references in Make rule and assignment comments no longer invalidate a literal recipe.
+  The declared verification stage recognizes a literal `verify-all` beside an unresolved target word and preserves quoted blanks and literal backslashes in computed names.
   When the audit finds an invalid declaration and cannot write the report, the command returns both errors.
   The computed assignment at `Makefile:8` affects all seven declarations in this repository, including `make:secrets`.
   Migrate affected rules by pointing them at independently verifiable evidence.

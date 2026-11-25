@@ -54,8 +54,8 @@ var makefileSpecialTargets = map[string]bool{
 
 // makefileTargetForbidden are the bytes a rule target may not hold for the allow-list to read it
 // as a literal name: a reference or pattern, a grouped-target separator, a wildcard, an archive
-// member, an escape, a quote or a redirect.
-const makefileTargetForbidden = "$%&()[]{}*?~\\\"'`<>|"
+// member, an escape, a quoted blank, a quote or a redirect.
+const makefileTargetForbidden = " \t$%&()[]{}*?~\\\"'`<>|"
 
 // makefileCLIVariableLines holds the lines of MakefileCLIVariable after line-ending normalisation
 // and trailing-space trimming.
@@ -189,12 +189,13 @@ func makefileAllowedGrammar(line string, operands map[string]struct{}) bool {
 	case assign >= 0 && (colon < 0 || assign < colon):
 		return makefileAllowedAssignment(line, assign)
 	case colon >= 0 && assign < 0:
-		return makefileAllowedRule(line, colon, operands)
+		return len(makefileAllowedRuleTargets(line, colon, operands)) > 0
 	default:
 		return false
 	}
 }
 
+// makefileAllowedAssignment accepts an ordinary binding with no reference in its value.
 func makefileAllowedAssignment(line string, assign int) bool {
 	op := makefileAssignmentOperator(line, assign)
 	if op == "" {
@@ -204,8 +205,21 @@ func makefileAllowedAssignment(line string, assign int) bool {
 	if !makefileMatchesIdentifier(name) || makefileSpecialVariables[name] {
 		return false
 	}
-	value := line[assign+len(op):]
+	value := makefileBeforeComment(line[assign+len(op):])
 	return !strings.Contains(value, "$")
+}
+
+// makefileBeforeComment returns the text before the first unescaped Make comment. An escaped
+// hash and a semicolon in an assignment are value bytes. A hash inside a reference stays there.
+func makefileBeforeComment(text string) string {
+	for i := 0; i < len(text) && i < MaxMakefileLineBytes; {
+		if text[i] == '#' {
+			return text[:i]
+		}
+		_, width := makefileOperatorAt(text, i)
+		i += width
+	}
+	return text
 }
 
 func makefileAssignmentOperator(line string, assign int) string {
@@ -255,16 +269,20 @@ func makefileMatchesIdentifier(name string) bool {
 	return true
 }
 
-func makefileAllowedRule(line string, colon int, operands map[string]struct{}) bool {
+// makefileAllowedRuleTargets returns the names of an allowed literal rule for the shape and evidence readers.
+func makefileAllowedRuleTargets(line string, colon int, operands map[string]struct{}) []string {
 	head := line[:colon]
-	rest := line[colon:]
-	if strings.HasPrefix(rest, "::") || strings.Contains(head, "&") || strings.ContainsAny(head, "$%") {
-		return false
+	if strings.HasPrefix(line[colon:], "::") || strings.ContainsAny(head, "&$%") {
+		return nil
 	}
 	if !makefileAllowedPrerequisites(line, colon, operands) {
-		return false
+		return nil
 	}
-	return makefileAllowedTargets(head, operands)
+	names := MakefileTargetWords(head)
+	if !makefileAllowedTargets(names, operands) {
+		return nil
+	}
+	return names
 }
 
 func makefileAllowedPrerequisites(line string, colon int, operands map[string]struct{}) bool {
@@ -293,8 +311,7 @@ func makefileAllowedPrerequisites(line string, colon int, operands map[string]st
 // makefileAllowedTargets reports whether every target in a rule head is a literal name the audit can prove:
 // no forbidden syntax, no followed operand or makefile name, no special dot target other than .PHONY, and
 // no implicit-rule target or prerequisite.
-func makefileAllowedTargets(head string, operands map[string]struct{}) bool {
-	fields := strings.Fields(head)
+func makefileAllowedTargets(fields []string, operands map[string]struct{}) bool {
 	if len(fields) == 0 {
 		return false
 	}
@@ -455,6 +472,7 @@ func makefileGrammarShape(line string, operands map[string]struct{}) string {
 	return "unsupported syntax"
 }
 
+// makefileAssignmentShape describes the first unsupported part of a refused binding.
 func makefileAssignmentShape(line string, assign int) string {
 	if line[assign] == '!' {
 		return "command assignment"
@@ -472,12 +490,13 @@ func makefileAssignmentShape(line string, assign int) string {
 	if strings.HasPrefix(name, ".") || makefileSpecialVariables[name] {
 		return "special variable assignment"
 	}
-	if strings.Contains(line[assign:], "$") {
+	if strings.Contains(makefileBeforeComment(line[assign:]), "$") {
 		return "variable value expansion"
 	}
 	return "assignment"
 }
 
+// makefileRuleShape describes the delimiter, target or prerequisite that excludes a rule.
 func makefileRuleShape(head, rest string, operands map[string]struct{}) string {
 	if strings.HasPrefix(rest, "::") {
 		return "double-colon rule"
@@ -485,7 +504,7 @@ func makefileRuleShape(head, rest string, operands map[string]struct{}) string {
 	if strings.Contains(head, "&:") || strings.Contains(head, "&") {
 		return "grouped target"
 	}
-	for _, field := range strings.Fields(head) {
+	for _, field := range MakefileTargetWords(head) {
 		if shape := makefileRuleTargetShape(field, operands); shape != "" {
 			return shape
 		}

@@ -83,9 +83,8 @@ func (r *makefileEvidenceReader) declaration(line, target string) bool {
 
 // rule validates every rule and refuses a second declaration, including one in a target list.
 func (r *makefileEvidenceReader) rule(line string, colon int, target string) bool {
-	head := strings.Trim(line[:colon], " \t")
-	names := strings.Fields(head)
-	if !makefileLiteralWords(head) || !makefileAllowedRule(line, colon, makefileNames) {
+	names := makefileAllowedRuleTargets(line, colon, makefileNames)
+	if len(names) == 0 || !makefileLiteralWords(line[:colon]) {
 		return false
 	}
 	literal, recipe := makefileLiteralRuleTail(line[colon+1:])

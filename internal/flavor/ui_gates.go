@@ -286,6 +286,7 @@ func verifyAllRunsUIGates(normalized string) bool {
 	return false
 }
 
+// makefileLineHasPrereq checks a rule head for the target and its tail for the prerequisite.
 func makefileLineHasPrereq(line, target, prereq string) bool {
 	if strings.HasPrefix(line, "\t") || strings.HasPrefix(strings.TrimSpace(line), "#") {
 		return false
@@ -294,5 +295,5 @@ func makefileLineHasPrereq(line, target, prereq string) bool {
 	if !found {
 		return false
 	}
-	return slices.Contains(strings.Fields(head), target) && slices.Contains(strings.Fields(prereqs), prereq)
+	return slices.Contains(util.MakefileTargetWords(head), target) && slices.Contains(strings.Fields(prereqs), prereq)
 }

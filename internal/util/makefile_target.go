@@ -317,32 +317,21 @@ func makefileExportDirective(line string) bool {
 	return word == "export" || word == "unexport"
 }
 
-// makefileTargetNames returns the target names a Makefile line declares, and none when the line
-// declares no rule. Make cuts the line at the first comment or inline-recipe ";" and decides on
-// what is left, so the test runs twice over text Make still reads: once over the whole line and
-// once over the prerequisites. Measured against GNU Make 4.4.1: "verify-all := x",
-// "verify-all = a:b", "verify-all ?= a:b", "verify-all += x:y", "verify-all != date" and
-// "override verify-all := x" all bind a variable, and "verify-all: CFLAGS := -g" -- with or
-// without a trailing comment or ";" recipe -- binds a target-specific variable; each answers
-// "make verify-all" with "No rule to make target". "verify-all:: dep", "verify-all: $(SRCS:.c=.o)",
-// "verify-all: lint ## run gates (FAST=1)" and "verify-all: ; FOO=1 echo c" all declare the target:
-// an "=" a comment or a recipe carries is not an assignment operator.
-func makefileTargetNames(line string) []string {
-	targets, _ := makefileRule(line)
-	return targets
-}
-
-// makefileRule returns the target names and the prerequisite text of the rule line declares, and
-// none when the line declares no rule (makefileTargetNames).
-func makefileRule(line string) ([]string, string) {
+// makefileRule returns the target words and prerequisites on a rule line. A nil list marks
+// a non-rule, including a target-specific assignment.
+func makefileRule(line string) ([]makefileTargetWord, string) {
 	colon, end := makefileRuleDelimiter(line)
 	if colon < 0 {
 		return nil, ""
 	}
-	return makefileTargetWords(line[:colon]), line[end:]
+	return makefileSplitTargets(line[:colon]), line[end:]
 }
 
 // makefileRuleDelimiter returns the start and end of the rule colon, or -1 for a non-rule.
+// Make cuts off comments and inline recipes before deciding whether the line or its prerequisites
+// bind a variable. Measured against GNU Make 4.4.1, "verify-all: CFLAGS := -g" binds a
+// target-specific variable, while "verify-all: lint ## run gates (FAST=1)" and
+// "verify-all: ; FOO=1 echo c" declare verify-all.
 func makefileRuleDelimiter(line string) (int, int) {
 	if strings.HasPrefix(line, "\t") || makefileExportDirective(line) {
 		return -1, -1
@@ -359,34 +348,67 @@ func makefileRuleDelimiter(line string) (int, int) {
 	return colon, end
 }
 
-// makefileTargetWords splits a rule head at unquoted blanks. Before a blank, each pair of
-// backslashes contributes a literal backslash and an odd final backslash quotes the blank.
-func makefileTargetWords(head string) []string {
-	names := []string{} // A rule with an empty head is distinct from a non-rule (nil).
-	var word strings.Builder
-	for start := 0; start < len(head) && start < MaxMakefileLineBytes; {
-		blank := strings.IndexAny(head[start:], " \t")
-		if blank < 0 {
-			word.WriteString(head[start:])
-			break
-		}
-		end := start + blank
-		part := head[start:end]
-		literal := strings.TrimRight(part, "\\")
-		slashes := len(part) - len(literal)
-		word.WriteString(part[:len(literal)+slashes/2])
-		if slashes%2 == 1 {
-			word.WriteByte(head[end])
-		} else if word.Len() > 0 {
-			names = append(names, word.String())
-			word.Reset()
-		}
-		start = end + 1
+// makefileTargetWord retains the unquoted spelling and whether its literal parts use only
+// supported syntax. A reference stays intact, including any blanks inside its brackets.
+type makefileTargetWord struct {
+	text       string
+	expandable bool
+}
+
+// MakefileTargetWords returns the unquoted target words in a rule head before variable expansion.
+// A head longer than MaxMakefileLineBytes returns nil.
+func MakefileTargetWords(head string) []string {
+	words := makefileSplitTargets(head)
+	if words == nil {
+		return nil
 	}
-	if word.Len() > 0 {
-		names = append(names, word.String())
+	names := make([]string, len(words))
+	for i, word := range words {
+		names[i] = word.text
 	}
 	return names
+}
+
+// makefileSplitTargets splits only at unquoted horizontal blanks. An empty head differs from a non-rule.
+func makefileSplitTargets(head string) []makefileTargetWord {
+	if len(head) > MaxMakefileLineBytes {
+		return nil
+	}
+	words := []makefileTargetWord{}
+	for head = strings.TrimLeft(head, " \t"); len(head) > 0; head = strings.TrimLeft(head, " \t") {
+		var word strings.Builder
+		expandable := true
+		for len(head) > 0 && head[0] != ' ' && head[0] != '\t' {
+			part, width, supported := makefileTargetPart(head)
+			word.WriteString(part)
+			expandable = expandable && supported
+			head = head[width:]
+		}
+		words = append(words, makefileTargetWord{word.String(), expandable})
+	}
+	return words
+}
+
+// makefileTargetPart consumes a literal byte, a whole reference or a run of backslashes.
+// GNU Make 4.4.1 src/read.c (parse_file_seq and find_map_unquote) keeps one backslash per
+// pair before a blank. An odd last backslash includes the blank in the current filename.
+func makefileTargetPart(text string) (part string, width int, supported bool) {
+	switch text[0] {
+	case '$':
+		width = makefileReferenceWidth(text)
+		return text[:width], width, true
+	case '\\':
+		run := len(text) - len(strings.TrimLeft(text, `\`))
+		if run == len(text) || (text[run] != ' ' && text[run] != '\t') {
+			return text[:run], run, false
+		}
+		if run%2 == 1 {
+			return text[:run/2] + text[run:run+1], run + 1, true
+		}
+		return text[:run/2], run, true
+	default:
+		return text[:1], 1, makefileWordByte(text[0])
+	}
 }
 
 // makefileTrackedLine records one logical line together with the file and 1-indexed line number
@@ -479,11 +501,10 @@ func makefileJoinText(parts []string) string {
 }
 
 // MakefileHasTarget reports whether data, the text of a Makefile, declares a rule for target on a
-// line this reader resolves without Make: makefileTargetNames decides rule versus assignment, a
+// line this reader resolves without Make: makefileRule distinguishes rules from assignments, a
 // define body is variable text, not rules, so a "target:" line inside one declares nothing, a
 // computed name counts once the file fixes its value ("$(GATE):" after "GATE := verify-all",
-// makefileVariables), and a line makefileLineIsAmbiguous reports, such as "$(PREFIX) verify-all:
-// dep" with PREFIX bound nowhere, declares nothing the reader can claim. A Makefile that names
+// makefileVariables). An unresolved word leaves literal siblings available. A Makefile that names
 // .RECIPEPREFIX declares nothing the reader can claim either (makefileNamesRecipePrefix).
 // MakefileMayDefineTarget reports the files where Make may still declare the target some other
 // way. Lines may end in "\n" or "\r\n"; the reading stops where makefileLogicalLines does.
@@ -544,15 +565,12 @@ func makefileDeclaresTarget(line string, index int, variables makefileVariables,
 	if makefileConditionalLine(line, strings.Fields(line)) {
 		return false
 	}
-	targets := makefileTargetNames(line)
-	if targets == nil {
+	targets, prerequisites := makefileRule(line)
+	if targets == nil || makefileUncertainRule(line, prerequisites) {
 		return false
 	}
-	names, resolved := variables.targets(targets, index)
-	if !resolved || !slices.Contains(names, target) {
-		return false
-	}
-	return !makefileLineIsAmbiguous(strings.TrimSpace(line), index, variables)
+	names, _ := variables.targets(targets, index)
+	return slices.Contains(names, target)
 }
 
 // MakefileTargetRecipe returns the tab-prefixed recipe lines, each ending in "\n", that follow
@@ -630,17 +648,19 @@ func makefileLineIsAmbiguous(line string, index int, variables makefileVariables
 	if strings.HasPrefix(line, "#") {
 		return false
 	}
-	if makefileParsesComputedText(line) {
-		return true
-	}
 	targets, prerequisites := makefileRule(line)
-	if _, unnamed := makefileAssignment(prerequisites); unnamed && targets != nil {
+	if makefileUncertainRule(line, prerequisites) {
 		return true
 	}
-	names, resolved := variables.targets(targets, index)
-	return !resolved || slices.ContainsFunc(names, func(name string) bool {
-		return strings.Contains(name, "%")
-	})
+	_, complete := variables.targets(targets, index)
+	return !complete
+}
+
+// makefileUncertainRule reports line-wide ambiguity from parsing computed text or an unnamed
+// prerequisite assignment. Individual target references are resolved separately.
+func makefileUncertainRule(line, prerequisites string) bool {
+	_, unnamed := makefileAssignment(prerequisites)
+	return unnamed || makefileParsesComputedText(strings.TrimSpace(line))
 }
 
 // MakefileMayDefineTarget reports whether data, the text of a Makefile with "\n" line endings,
