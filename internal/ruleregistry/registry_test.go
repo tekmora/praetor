@@ -78,6 +78,31 @@ func TestAudit_MakeTargetBodyShapes(t *testing.T) {
 	}
 }
 
+// TestAudit_MakeConditionalTargetBody verifies conditional Make recipes resolve while directive-only targets fail.
+func TestAudit_MakeConditionalTargetBody(t *testing.T) {
+	tests := []struct {
+		name      string
+		makefile  string
+		wantError bool
+	}{
+		{"recipe after ifeq and endif", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", false},
+		{"recipe after closed ifdef endif", "verify-all:\nifdef CI\nendif\n\t@true\n", false},
+		{"directives without recipe", "verify-all:\nifeq (1,1)\nelse\nendif\n", true},
+		{"directives without recipe before other target", "verify-all:\nifneq (a,b)\nendif\nother:\n\t@true\n", true},
+		{"else branch recipe", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", false},
+	}
+	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:verify-all]\n"
+	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {
+		tc := tests[i]
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRoot(t, registry)
+			writeTestFile(t, root, "Makefile", tc.makefile)
+			report, err := Audit(t.Context(), root)
+			assertMakeShapeResult(t, report, err, tc.wantError)
+		})
+	}
+}
+
 // assertMakeShapeResult verifies the audit result and row status for one Makefile shape test case.
 func assertMakeShapeResult(t *testing.T, report *Report, err error, wantError bool) {
 	t.Helper()
@@ -122,6 +147,30 @@ func TestAudit_ConditionalWorkflowJobResolvesAsPresent(t *testing.T) {
 	row := findRow(t, report, "HISS-01")
 	if row.Status != StatusPresent || row.Enforced || row.Evidence != "resolved" {
 		t.Fatalf("HISS-01 = %#v, want status=present, enforced=false", row)
+	}
+}
+
+// TestAudit_WorkflowJobAlias verifies aliased active workflow jobs resolve while aliases of disabled jobs fail.
+func TestAudit_WorkflowJobAlias(t *testing.T) {
+	tests := []struct {
+		name      string
+		workflow  string
+		wantError bool
+	}{
+		{"aliased active job", "jobs:\n  base: &base\n    runs-on: ubuntu-latest\n  verify: *base\n", false},
+		{"aliased conditional active job", "jobs:\n  base: &base\n    if: github.event_name == 'push'\n    runs-on: ubuntu-latest\n  verify: *base\n", false},
+		{"alias of literal false job", "jobs:\n  disabled: &disabled\n    if: false\n    runs-on: ubuntu-latest\n  verify: *disabled\n", true},
+		{"alias of expression false job", "jobs:\n  disabled: &disabled\n    if: ${{ false }}\n    runs-on: ubuntu-latest\n  verify: *disabled\n", true},
+	}
+	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [workflow:ci.yml#verify]\n"
+	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {
+		tc := tests[i]
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRoot(t, registry)
+			writeTestFile(t, root, ".github/workflows/ci.yml", tc.workflow)
+			report, err := Audit(t.Context(), root)
+			assertMakeShapeResult(t, report, err, tc.wantError)
+		})
 	}
 }
 

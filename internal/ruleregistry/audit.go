@@ -479,15 +479,84 @@ func scanMakeRulesForBody(lines []string, target string) bool {
 }
 
 // stepMakeRuleScan advances openRecipe over one logical Makefile line and reports whether target gained a body.
+// A recipe inside a branch the scanner cannot evaluate counts as a recipe (the scanner does not evaluate
+// conditions), so conditional directives keep openRecipe unchanged while directive-only targets stay unresolved.
 func stepMakeRuleScan(line, target string, openRecipe bool) (bool, bool) {
 	if strings.HasPrefix(line, "\t") {
 		return openRecipe, openRecipe && strings.TrimSpace(line) != ""
 	}
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") || isMakeConditionalDirective(trimmed) {
 		return openRecipe, false
 	}
 	return matchMakeRuleBody(line, target)
+}
+
+// isMakeConditionalDirective reports whether trimmed is a GNU Make conditional directive line.
+func isMakeConditionalDirective(trimmed string) bool {
+	body := strings.TrimSpace(trimMakeComment(trimmed))
+	if hasCompactMakeEqDirective(body) {
+		return true
+	}
+	fields := strings.Fields(body)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "endif":
+		return len(fields) == 1
+	case "else":
+		return len(fields) == 1 || hasCompactMakeEqDirective(fields[1]) || isMakeBranchFields(fields[1:])
+	default:
+		return isMakeBranchFields(fields)
+	}
+}
+
+// isMakeBranchFields reports whether fields opens an ifeq, ifneq, ifdef, or ifndef directive with a non-operator argument.
+func isMakeBranchFields(fields []string) bool {
+	return len(fields) > 1 && isMakeBranchDirective(fields[0]) && !isMakeOperatorPrefix(fields[1])
+}
+
+// isMakeBranchDirective reports whether word is one of the four condition-taking Make directives.
+func isMakeBranchDirective(word string) bool {
+	return word == "ifeq" || word == "ifneq" || word == "ifdef" || word == "ifndef"
+}
+
+// hasCompactMakeEqDirective reports whether body opens with ifeq or ifneq followed directly by '(', '"' or '\”.
+func hasCompactMakeEqDirective(body string) bool {
+	if rest, ok := strings.CutPrefix(body, "ifeq"); ok {
+		return hasMakeEqDelimiter(rest)
+	}
+	rest, ok := strings.CutPrefix(body, "ifneq")
+	return ok && hasMakeEqDelimiter(rest)
+}
+
+// hasMakeEqDelimiter reports whether s starts with a GNU Make ifeq/ifneq delimiter ('(', '"', or '\”).
+func hasMakeEqDelimiter(s string) bool {
+	return s != "" && (s[0] == '(' || s[0] == '"' || s[0] == '\'')
+}
+
+// isMakeOperatorPrefix reports whether token starts with a Make rule colon or variable assignment operator.
+func isMakeOperatorPrefix(token string) bool {
+	return strings.HasPrefix(token, ":") ||
+		strings.HasPrefix(token, "=") ||
+		strings.HasPrefix(token, "+=") ||
+		strings.HasPrefix(token, "?=") ||
+		strings.HasPrefix(token, "!=")
+}
+
+// trimMakeComment returns text before its first unescaped '#' comment character.
+func trimMakeComment(text string) string {
+	for i := 0; i < len(text) && i < util.MaxMakefileLineBytes; i++ {
+		if text[i] == '\\' {
+			i++
+			continue
+		}
+		if text[i] == '#' {
+			return text[:i]
+		}
+	}
+	return text
 }
 
 // matchMakeRuleBody reports whether line is a rule declaring target and whether it carries prerequisites or an inline recipe.
@@ -562,13 +631,14 @@ func resolveWorkflow(ctx context.Context, root, value string) error {
 	return nil
 }
 
-// hasActiveWorkflowJob reports whether data defines jobs.<job> as a mapping whose if: is not literal false.
+// hasActiveWorkflowJob reports whether data defines jobs.<job> as a mapping (directly or via a
+// one-level YAML alias) whose if: condition is not literal false.
 func hasActiveWorkflowJob(data []byte, job string) bool {
 	var document yaml.Node
 	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {
 		return false
 	}
-	jobNode := util.YAMLMappingValue(util.YAMLMappingValue(document.Content[0], "jobs"), job)
+	jobNode := unwrapYAMLAlias(util.YAMLMappingValue(util.YAMLMappingValue(document.Content[0], "jobs"), job))
 	if jobNode == nil || jobNode.Kind != yaml.MappingNode {
 		return false
 	}
@@ -577,6 +647,14 @@ func hasActiveWorkflowJob(data []byte, job string) bool {
 		return true
 	}
 	return ifNode.Kind == yaml.ScalarNode && !ghworkflow.NeverRuns(ifNode.Value)
+}
+
+// unwrapYAMLAlias follows one YAML alias level to its target node, returning nil for nil or a nil Alias target.
+func unwrapYAMLAlias(node *yaml.Node) *yaml.Node {
+	if node != nil && node.Kind == yaml.AliasNode {
+		return node.Alias
+	}
+	return node
 }
 
 // resolveHook checks that lefthook.yml or an extended lefthook config defines hook.command.
