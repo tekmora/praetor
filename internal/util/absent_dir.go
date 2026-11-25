@@ -54,18 +54,19 @@ func DirectoryAbsent(dir string, err error) bool {
 func SoleNotExist(err error) bool {
 	const maxWrappers = 64
 	for depth := 0; err != nil && depth < maxWrappers; depth++ {
-		switch wrapped := err.(type) {
-		case interface{ Unwrap() []error }:
-			causes := wrapped.Unwrap()
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			causes := joined.Unwrap()
 			if len(causes) != 1 {
 				return false
 			}
 			err = causes[0]
-		case interface{ Unwrap() error }:
-			err = wrapped.Unwrap()
-		default:
-			return errors.Is(err, fs.ErrNotExist)
+			continue
 		}
+		if single, ok := err.(interface{ Unwrap() error }); ok {
+			err = single.Unwrap()
+			continue
+		}
+		return errors.Is(err, fs.ErrNotExist)
 	}
 	return false
 }
