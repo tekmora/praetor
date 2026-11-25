@@ -797,15 +797,32 @@ reads the same list the pipeline executes (`pipelineStages` in
 so a stage the pipeline drops stops resolving and fails the audit
 (`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`).
 
-A `make:<target>` pointer reads `present` when an unconditional, single-colon rule names the
-target in plain literal words and supplies a literal prerequisite or a literal command. A command
-may follow `;` on the rule line or start on a tab-led recipe line. To count as evidence, the
-command must contain more than whitespace or a comment and be free of variable references. The
-rule line must be free of variable references, patterns, wildcards and quoted or escaped target
-names. A backslash continuation on the rule or any of its recipe
-lines prevents that rule from serving as evidence. The diagnostic for an unprovable rule is
-`not statically provable`. A missing target keeps the `unresolved evidence pointer` diagnostic.
-See `TestAudit_MakeTargetBodyShapes` in `internal/ruleregistry/registry_test.go`.
+A `make:<target>` pointer reads `present` only when exactly one rule names the target and that
+rule has a literal recipe. The command can follow `;` or begin on a tab-led recipe line. A
+prerequisite, a recipe comment or a command containing a Make variable reference supplies no
+literal command evidence.
+
+The reader must recognize **every line** of the Makefile, including lines after the recipe.
+It accepts blanks, comments, tab-led recipe lines, single-colon rules with literal target and
+prerequisite words, and simple literal assignments to ordinary variables. An include, directive,
+conditional, continuation, byte-order mark, special variable assignment or second declaration of
+the requested target makes the pointer unresolved with `not statically provable`. A missing
+target in a fully recognized file reports `unresolved evidence pointer`.
+See `TestAudit_MakeWholeFile` and `TestAudit_MakeTargetBodyShapes` in
+`internal/ruleregistry/registry_test.go`.
+
+A `test:<directory>.<name>` pointer needs a top-level test function in a visible `_test.go`
+file. Its package must match the package declared by ordinary Go files in that directory or its
+external `_test` package. The reader skips `package documentation` and files carrying
+`//go:build` or `// +build` constraints. It needs an ordinary source file to establish the
+package. The parameter may use a pointer to the imported `testing.T` or a direct type alias
+such as `type T = testing.T` in another qualifying file of the same package.
+See `TestAudit_TestPackageFiles` and `TestAudit_TestParameterAlias`.
+
+A `workflow:<file>#<job>` pointer reads the effective `if` condition from the parsed job.
+A YAML merge key (`<<`) in the document, the `jobs` mapping or the selected job mapping makes
+the pointer unresolved, including when the job inherits `if: false`. Direct aliases for jobs
+and conditions use the condition of the referenced value. See `TestAudit_WorkflowJobAlias`.
 
 Each text row shows the rule ID, class, status and evidence. A guidance rule appears as
 

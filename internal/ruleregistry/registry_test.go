@@ -77,9 +77,10 @@ func TestAudit_MakeTargetBodyShapes(t *testing.T) {
 		{"comment only", "verify-all: # no body\n", unproven},
 		{"whitespace tab line", "verify-all:\n\t   \n", unproven},
 		{"tab comment", "verify-all:\n\t# explanatory note\n", unproven},
-		{"prerequisite without recipe", "verify-all: lint\n", ""},
+		{"prerequisite without recipe", "verify-all: lint\n", unproven},
 		{"inline semicolon recipe", "verify-all: ; @true\n", ""},
 		{"tab recipe", "verify-all:\n\t@true\n", ""},
+		{"literal file", "# targets\nMODE := fast\nall: verify-all\nverify-all: | out\n\t@true\n", ""},
 		{"missing target", "other: lint\n", missing},
 	}
 	for _, tc := range tests {
@@ -95,6 +96,34 @@ func TestAudit_MakeTargetBodyShapes(t *testing.T) {
 	}
 }
 
+// TestAudit_MakeWholeFile verifies that an unsupported file defeats even a matching forge assertion.
+func TestAudit_MakeWholeFile(t *testing.T) {
+	const rule = "check: ; @true\n"
+	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:check, forge:required_signatures]\n"
+	opts := forgeOptions(ForgeRequiredSignatures, forgeState("required", "required", true, true), nil)
+	for _, tc := range [...]struct{ name, makefile string }{
+		{"later empty recipe", rule + "check: ;\n"},
+		{"later rule without recipe", rule + "other check: dep\n"},
+		{"included recipe prefix", "include settings.mk\ncheck:\n\tX := one\n"},
+		{"optional include", rule + "-include settings.mk\n"},
+		{"explicit prefix", rule + ".RECIPEPREFIX := >\n"},
+		{"define", rule + "define FLAGS\none\nendef\n"},
+		{"export", rule + "export MODE := fast\n"},
+		{"BOM hides conditional", "\ufeffifeq (a,b)\ncheck: dep\nendif\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRoot(t, registry)
+			writeTestFile(t, root, "settings.mk", ".RECIPEPREFIX := >\n")
+			writeTestFile(t, root, "Makefile", tc.makefile)
+			report, err := AuditWithOptions(t.Context(), root, opts)
+			assertLocalEvidenceStatus(t, report, err, true)
+			if !slices.Contains(report.Problems, `HISS-01: unresolved evidence pointer "make:check": not statically provable`) {
+				t.Fatalf("problems = %v", report.Problems)
+			}
+		})
+	}
+}
+
 // TestAudit_MakeConditionalTargetBody requires a recipe whose ownership is unconditional.
 func TestAudit_MakeConditionalTargetBody(t *testing.T) {
 	tests := []struct {
@@ -103,7 +132,7 @@ func TestAudit_MakeConditionalTargetBody(t *testing.T) {
 		wantError bool
 	}{
 		{"recipe inside ifeq", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", true},
-		{"recipe after closed ifdef endif", "verify-all:\nifdef CI\nendif\n\t@true\n", false},
+		{"recipe after closed ifdef endif", "verify-all:\nifdef CI\nendif\n\t@true\n", true},
 		{"directives without recipe", "verify-all:\nifeq (1,1)\nelse\nendif\n", true},
 		{"directives without recipe before other target", "verify-all:\nifneq (a,b)\nendif\nother:\n\t@true\n", true},
 		{"else branch recipe", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", true},
@@ -262,6 +291,9 @@ func TestAudit_WorkflowJobAlias(t *testing.T) {
 		{"alias of expression false job", "jobs:\n  disabled: &disabled\n    if: ${{ false }}\n    runs-on: ubuntu-latest\n  verify: *disabled\n", true},
 		{"aliased active condition", "jobs:\n  base:\n    if: &condition github.event_name == 'push'\n  verify:\n    if: *condition\n", false},
 		{"aliased false condition", "jobs:\n  base:\n    if: &condition false\n  verify:\n    if: *condition\n", true},
+		{"merged false", "jobs:\n  verify: {<<: {if: false}, runs-on: ubuntu-latest}\n", true},
+		{"merged active", "jobs:\n  verify: {<<: {if: true}, runs-on: ubuntu-latest}\n", true},
+		{"merged ancestor", "jobs:\n  <<: {base: {runs-on: ubuntu-latest}}\n  verify: {if: true}\n", true},
 		{"mixed case false", "jobs:\n  verify:\n    if: False\n", true},
 		{"aliased uppercase false", "jobs:\n  base:\n    if: &condition FALSE\n  verify:\n    if: *condition\n", true},
 		{"uppercase true", "jobs:\n  verify:\n    if: TRUE\n", false},
@@ -340,6 +372,7 @@ func TestAudit_TestNames(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
+			writeTestFile(t, root, "check/check.go", "package check\n")
 			writeTestFile(t, root, "check/names_test.go", "package check\nimport \"testing\"\nfunc "+tc.name+"(*testing.T) {}\n")
 			err := resolve(t.Context(), root, "test:check."+tc.name)
 			if (err != nil) != tc.wantError {
@@ -370,6 +403,83 @@ func TestAudit_TestParameterImport(t *testing.T) {
 			report, err := Audit(t.Context(), root)
 			assertLocalEvidenceStatus(t, report, err, tc.wantError)
 		})
+	}
+}
+
+// TestAudit_TestPackageFiles checks package clauses and build constraints independently of directory names.
+func TestAudit_TestPackageFiles(t *testing.T) {
+	const function = "\nimport \"testing\"\nfunc TestGhost(*testing.T) {}\n"
+	for _, tc := range [...]struct {
+		name, production, test string
+		wantError              bool
+	}{
+		{"internal", "package example", "package example", false},
+		{"external", "package example", "package example_test", false},
+		{"documentation", "package example", "package documentation", true},
+		{"wrong package", "package example", "package check", true},
+		{"wrong external", "package example", "package check_test", true},
+		{"go build", "package example", "//go:build ignore\n\npackage example", true},
+		{"plus build", "package example", "// +build ignore\n\npackage example_test", true},
+		{"test only", "", "package check", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := pointerFixtureRoot(t, "test:check.TestGhost")
+			if tc.production != "" {
+				writeTestFile(t, root, "check/base.go", tc.production+"\n")
+			}
+			writeTestFile(t, root, "check/ghost_test.go", tc.test+function)
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
+		})
+	}
+}
+
+// TestAudit_TestParameterAlias checks package-scoped literal aliases and rejects other type bindings.
+func TestAudit_TestParameterAlias(t *testing.T) {
+	const alias = "import std \"testing\"\ntype T = std.T\n"
+	const direct = "package check\n" + alias
+	const test = "package check\nfunc TestGate(*T) {}\n"
+	for _, tc := range [...]struct {
+		name, file, source, test string
+		wantError                bool
+	}{
+		{"same file", "gate_test.go", "package check\nimport \"testing\"\ntype T = testing.T\nfunc TestGate(*T) {}\n", "", false},
+		{"later test file", "zz_test.go", direct, test, false},
+		{"ordinary source", "types.go", direct, test, false},
+		{"external test package", "zz_test.go", "package check_test\n" + alias, "package check_test\nfunc TestGate(*T) {}\n", false},
+		{"different package", "zz_test.go", "package check_test\n" + alias, test, true},
+		{"constrained alias", "zz_test.go", "//go:build ignore\n\n" + direct, test, true},
+		{"legacy constrained source", "types.go", "// +build ignore\n\n" + direct, test, true},
+		{"alias of alias", "zz_test.go", "package check\nimport \"testing\"\ntype Base = testing.T\ntype T = Base\n", test, true},
+		{"defined type", "zz_test.go", "package check\nimport \"testing\"\ntype T testing.T\n", test, true},
+		{"unrelated import", "zz_test.go", "package check\nimport std \"example.com/other\"\ntype T = std.T\n", test, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := pointerFixtureRoot(t, "test:internal/check.TestGate")
+			writeTestFile(t, root, "internal/check/"+tc.file, tc.source)
+			if tc.test != "" {
+				writeTestFile(t, root, "internal/check/gate_test.go", tc.test)
+			}
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
+		})
+	}
+}
+
+// TestAudit_HookCause checks that a malformed extension list retains its typed YAML diagnostic.
+func TestAudit_HookCause(t *testing.T) {
+	const pointer = "hook:pre-commit.lint"
+	root := pointerFixtureRoot(t, pointer)
+	writeTestFile(t, root, "lefthook.yml", "extends: {unexpected: mapping}\n")
+	err := resolve(t.Context(), root, pointer)
+	var cause *yaml.TypeError
+	if !errors.As(err, &cause) || !strings.Contains(err.Error(), pointer) {
+		t.Fatalf("resolve = %v, want pointer and *yaml.TypeError", err)
+	}
+	report, auditErr := Audit(t.Context(), root)
+	assertLocalEvidenceStatus(t, report, auditErr, true)
+	if !errors.As(auditErr, &cause) || !strings.Contains(strings.Join(report.Problems, "\n"), cause.Error()) {
+		t.Fatalf("Audit = %v, problems = %v, want YAML cause", auditErr, report.Problems)
 	}
 }
 
@@ -431,6 +541,9 @@ func TestAudit_PointerReadErrors(t *testing.T) {
 			root := pointerFixtureRoot(t, tc.pointer)
 			writeTestFile(t, root, tc.path, "\xff")
 			assertPointerProblem(t, root, tc.pointer, "source must be UTF-8 text")
+			if tc.path == "Makefile" {
+				assertPointerProblem(t, root, tc.pointer, "not statically provable")
+			}
 		})
 	}
 }
@@ -705,6 +818,7 @@ func fixtureRoot(t *testing.T, registry string) string {
 	root := t.TempDir()
 	writeTestFile(t, root, "AGENTS.md", fixtureAgents(t))
 	writeTestFile(t, root, File, registry)
+	writeTestFile(t, root, "internal/check/check.go", "package check\n")
 	writeTestFile(t, root, "internal/check/check_test.go", "package check\nimport \"testing\"\nfunc TestEnforced(t *testing.T) {}\n")
 	writeTestFile(t, root, "lefthook.yml", "commit-msg:\n  commands:\n    message-policy:\n      run: test\n")
 	maxTarget := strings.Repeat("a", maxPointerLength-len("make:"))

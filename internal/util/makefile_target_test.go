@@ -944,20 +944,20 @@ type makefileBodyCase struct {
 }
 
 var makefileTargetHasBodyPositiveCases = []makefileBodyCase{
-	{"prerequisites-only", "verify-all", "verify-all: lint\nlint:\n\t@true\n", true},
-	{"order-only-prerequisite", "verify-all", "verify-all: | out\nout:\n\t@true\n", true},
 	{"recipe-only", "verify-all", "verify-all:\n\t@true\n", true},
-	{"literal-before-wait", "verify-all", "verify-all: lint .WAIT\n", true},
-	{"prerequisite-with-variable-recipe", "verify-all", "verify-all: lint\n\t$(MAKE) lint\n", true},
-	{"other-continued-recipe", "verify-all", "verify-all: lint\nother:\n\t@echo \\\n  ok\n", true},
-	{"other-conditional-recipe", "verify-all", "verify-all: lint\nifdef ALT\nother:\n\t@echo \\\n  ok\nendif\n", true},
 	{"inline-semicolon-recipe", "verify-all", "verify-all: ; @true\n", true},
-	{"recipe-after-ifdef-endif", "verify-all", "verify-all:\nifdef CI\nendif\n\t@true\n", true},
-	{"second-rule-adds-body", "verify-all", "verify-all:\nverify-all: lint\n", true},
 	{"crlf-recipe", "verify-all", "verify-all:\r\n\t@true\r\n", true},
 }
 
 var makefileTargetHasBodyNegativeCases = []makefileBodyCase{
+	{"prerequisites-only", "verify-all", "verify-all: lint\nlint:\n\t@true\n", false},
+	{"order-only-prerequisite", "verify-all", "verify-all: | out\nout:\n\t@true\n", false},
+	{"literal-before-wait", "verify-all", "verify-all: lint .WAIT\n", false},
+	{"prerequisite-with-variable-recipe", "verify-all", "verify-all: lint\n\t$(MAKE) lint\n", false},
+	{"other-continued-recipe", "verify-all", "verify-all: lint\nother:\n\t@echo \\\n  ok\n", false},
+	{"other-conditional-recipe", "verify-all", "verify-all: lint\nifdef ALT\nother:\n\t@echo \\\n  ok\nendif\n", false},
+	{"recipe-after-ifdef-endif", "verify-all", "verify-all:\nifdef CI\nendif\n\t@true\n", false},
+	{"second-rule-adds-body", "verify-all", "verify-all:\nverify-all: lint\n", false},
 	{"short-variable-prerequisite", "verify-all", "D :=\nverify-all: $D\n", false},
 	{"parenthesized-variable-prerequisite", "verify-all", "D := lint\nverify-all: $(D)\n", false},
 	{"braced-variable-prerequisite", "verify-all", "D := lint\nverify-all: ${D}\n", false},
@@ -1023,7 +1023,7 @@ func assertMakefileTargetHasBodyCases(t *testing.T, cases []makefileBodyCase) {
 	}
 }
 
-// TestMakefileTargetHasBodyPositive covers literal prerequisites and commands.
+// TestMakefileTargetHasBodyPositive covers literal commands.
 func TestMakefileTargetHasBodyPositive(t *testing.T) {
 	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyPositiveCases)
 }
@@ -1033,6 +1033,47 @@ func TestMakefileTargetHasBodyNegative(t *testing.T) {
 	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyNegativeCases)
 }
 
+// TestMakefileTargetWholeFile requires the complete file to qualify before reporting any evidence.
+func TestMakefileTargetWholeFile(t *testing.T) {
+	const rule = "check: ; @true\n"
+	for _, tc := range [...]struct {
+		name, file string
+		want       util.MakefileEvidence
+	}{
+		{"literal file", "# gates\nMODE := fast\n\tOPTS = -v\n\nall: check\ncheck: lint | out\n\t@true\n", util.MakefileTargetPresent},
+		{"replacement", rule + "check: ;\n", util.MakefileTargetUnproven},
+		{"duplicate without recipe", rule + "other check:\n", util.MakefileTargetUnproven},
+		{"equivalent target spelling", rule + "./check: ;\n", util.MakefileTargetUnproven},
+		{"prefix from include", "include settings.mk\ncheck:\n\tX := one\n", util.MakefileTargetUnproven},
+		{"late include", rule + "include settings.mk\n", util.MakefileTargetUnproven},
+		{"late optional include", rule + "-include settings.mk\n", util.MakefileTargetUnproven},
+		{"silent include", "sinclude settings.mk\n" + rule, util.MakefileTargetUnproven},
+		{"recipe prefix", rule + ".RECIPEPREFIX := >\n", util.MakefileTargetUnproven},
+		{"dot variable", rule + ".FLAGS = yes\n", util.MakefileTargetUnproven},
+		{"special variable", rule + "MAKEFILES = settings.mk\n", util.MakefileTargetUnproven},
+		{"define", rule + "define FLAGS\nx\nendef\n", util.MakefileTargetUnproven},
+		{"export", "export MODE = fast\n" + rule, util.MakefileTargetUnproven},
+		{"override", rule + "override MODE := fast\n", util.MakefileTargetUnproven},
+		{"vpath", rule + "vpath %.mk src\n", util.MakefileTargetUnproven},
+		{"BOM before conditional", "\ufeffifeq (a,b)\ncheck: dep\nendif\n", util.MakefileTargetUnproven},
+		{"conditional after literal recipe", rule + "ifdef MODE\nendif\n", util.MakefileTargetUnproven},
+		{"unexpected preamble", "\x01# header\n" + rule, util.MakefileTargetUnproven},
+		{"BOM before comment", "\ufeff# heading\n" + rule, util.MakefileTargetUnproven},
+		{"unrelated continuation", rule + "# continued \\\n# here\n", util.MakefileTargetUnproven},
+		{"unrelated computed rule", rule + "$(NAME): dep\n", util.MakefileTargetUnproven},
+		{"truncated tail", rule + strings.Repeat("#\n", util.MaxMakefileLines), util.MakefileTargetUnproven},
+		{"orphan tab rule", "\tcheck: ; @true\n", util.MakefileTargetUnproven},
+		{"unknown syntax without target", "-include settings.mk\n", util.MakefileTargetUnproven},
+		{"missing in literal file", "other: ; @true\n", util.MakefileTargetMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := util.MakefileTargetStatus(tc.file, "check"); got != tc.want {
+				t.Fatalf("MakefileTargetStatus = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestMakefileTargetHasBodyBoundary checks rule boundaries, quoted heads and the physical line limit.
 func TestMakefileTargetHasBodyBoundary(t *testing.T) {
 	prefix := strings.Repeat("V := a:b\n", util.MaxMakefileLines-1)
@@ -1040,7 +1081,7 @@ func TestMakefileTargetHasBodyBoundary(t *testing.T) {
 		{"ifeq-quoted-rule-leaves-verify-all-empty", "verify-all", "verify-all:\nifeq\"other\":\n\t@true\n", false},
 		{"ifeq-quoted-rule-is-nonliteral", "ifeq\"other\"", "verify-all:\nifeq\"other\":\n\t@true\n", false},
 		{"both-branches-replace-open-rule", "verify-all", "verify-all:\nifeq (a,b)\nother:\n\t@true\nelse\nanother:\n\t@true\nendif\n\t@echo tail\n", false},
-		{"rule-at-line-bound-with-prerequisite", "verify-all", prefix + "verify-all: dep\n", true},
+		{"rule-at-line-bound-with-prerequisite", "verify-all", prefix + "verify-all: dep ; @true\n", true},
 		{"recipe-past-line-bound", "verify-all", prefix + "verify-all:\n\t@true\n", false},
 		{"rule-past-line-bound", "verify-all", prefix + "V := c\nverify-all: dep\n", false},
 	})

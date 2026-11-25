@@ -61,6 +61,22 @@ type Report struct {
 	Problems []string `json:"problems,omitempty"`
 }
 
+// auditDiagnostics keeps local pointer causes available to errors.As while collecting report rows.
+type auditDiagnostics struct {
+	*Report
+	causes []error
+}
+
+// Error summarizes the invalid declarations in the audit.
+func (d *auditDiagnostics) Error() string {
+	return fmt.Sprintf("rules audit: %d invalid declaration(s)", len(d.Problems))
+}
+
+// Unwrap returns the underlying errors from resolving local pointers.
+func (d *auditDiagnostics) Unwrap() []error {
+	return d.causes
+}
+
 // Valid reports whether all declared entries and evidence pointers resolved.
 func (r *Report) Valid() bool { return r != nil && len(r.Problems) == 0 }
 
@@ -132,17 +148,17 @@ func AuditWithOptions(ctx context.Context, root string, opts AuditOptions) (*Rep
 	if err != nil {
 		return nil, err
 	}
-	report := &Report{}
-	entries := indexEntries(registry, known, report)
-	forgeStates := loadForgeStates(ctx, registry, opts, report)
+	report := &auditDiagnostics{Report: &Report{}}
+	entries := indexEntries(registry, known, report.Report)
+	forgeStates := loadForgeStates(ctx, registry, opts, report.Report)
 	for i := 0; i < len(known) && i < maxAuditRules; i++ {
 		row := auditRule(ctx, root, known[i], entries[known[i].ID], forgeStates, report)
 		report.Rows = append(report.Rows, row)
 	}
 	if report.Valid() {
-		return report, nil
+		return report.Report, nil
 	}
-	return report, fmt.Errorf("rules audit: %d invalid declaration(s)", len(report.Problems))
+	return report.Report, report
 }
 
 // indexEntries validates registry entries against known rules and returns them keyed by rule ID.
@@ -200,7 +216,7 @@ func auditRule(
 	rule Rule,
 	entry *Entry,
 	forgeStates map[ForgeSetting]ForgeState,
-	report *Report,
+	report *auditDiagnostics,
 ) Row {
 	if entry == nil {
 		return proseRow(rule, ClassGuidance)
@@ -258,7 +274,7 @@ type evidenceResolver struct {
 	ruleID      string
 	forgeStates map[ForgeSetting]ForgeState
 	row         *Row
-	report      *Report
+	report      *auditDiagnostics
 }
 
 // resolve checks every declared pointer of one rule and tallies local and forge outcomes.
@@ -277,6 +293,7 @@ func (r evidenceResolver) resolve(pointers []string) evidenceResolution {
 			}
 			result.localResolved = false
 			r.report.Problems = append(r.report.Problems, fmt.Sprintf("%s: %v", r.ruleID, err))
+			r.report.causes = append(r.report.causes, err)
 		}
 	}
 	return result
@@ -403,7 +420,7 @@ func resolveMake(ctx context.Context, root, target string) error {
 	}
 	data, err := readFile(ctx, root, "Makefile")
 	if err != nil {
-		return fmt.Errorf("read Makefile for make:%s: %w", target, err)
+		return fmt.Errorf("read Makefile for make:%s: not statically provable: %w", target, err)
 	}
 	switch util.MakefileTargetStatus(string(data), target) {
 	case util.MakefileTargetPresent:
@@ -425,14 +442,21 @@ func resolveWorkflow(ctx context.Context, root, value string) error {
 	if err != nil {
 		return fmt.Errorf("read workflow:%s: %w", value, err)
 	}
-	if _, err := ghworkflow.Parse(data); err != nil {
+	return checkWorkflowJob(data, value, job)
+}
+
+// checkWorkflowJob resolves the effective condition through the typed parser after verifying its path.
+func checkWorkflowJob(data []byte, value, job string) error {
+	spec, err := ghworkflow.Parse(data)
+	if err != nil {
 		return fmt.Errorf("workflow:%s: %w", value, err)
 	}
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
 		return fmt.Errorf("decode condition for workflow:%s: %w", value, err)
 	}
-	if !hasActiveWorkflowJob(&document, job) {
+	parsed, exists := spec.Jobs[job]
+	if !exists || !literalWorkflowJobPath(&document, job) || ghworkflow.NeverRuns(parsed.If) || strings.EqualFold(parsed.If, "false") {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
 	return nil
@@ -450,29 +474,25 @@ func readWorkflow(ctx context.Context, root, file string) (data []byte, err erro
 	return contextopt.ReadRootSnapshot(ctx, dir, file)
 }
 
-// hasActiveWorkflowJob reports whether the named job can run, following one YAML alias
-// level for the job mapping and its optional scalar condition.
-func hasActiveWorkflowJob(document *yaml.Node, job string) bool {
+// literalWorkflowJobPath verifies that the job is a mapping with an explicit path and that
+// no mapping supplying its condition inherits keys. Parse supplies the effective condition.
+func literalWorkflowJobPath(document *yaml.Node, job string) bool {
 	if len(document.Content) != 1 {
 		return false
 	}
-	jobNode := unwrapYAMLAlias(util.YAMLMappingValue(util.YAMLMappingValue(document.Content[0], "jobs"), job))
-	if jobNode == nil || jobNode.Kind != yaml.MappingNode {
-		return false
+	node := document.Content[0]
+	for _, key := range [...]string{"jobs", job, "if"} {
+		node = unwrapYAMLAlias(node)
+		if node == nil || node.Kind != yaml.MappingNode || util.YAMLMappingValue(node, "<<") != nil {
+			return false
+		}
+		node = util.YAMLMappingValue(node, key)
 	}
-	ifNode := util.YAMLMappingValue(jobNode, "if")
-	if ifNode == nil {
+	if node == nil {
 		return true
 	}
-	ifNode = unwrapYAMLAlias(ifNode)
-	if ifNode == nil || ifNode.Kind != yaml.ScalarNode {
-		return false
-	}
-	if ifNode.ShortTag() == "!!bool" {
-		var enabled bool
-		return ifNode.Decode(&enabled) == nil && enabled
-	}
-	return !ghworkflow.NeverRuns(ifNode.Value)
+	condition := unwrapYAMLAlias(node)
+	return condition != nil && condition.Kind == yaml.ScalarNode && condition.ShortTag() != "!!null"
 }
 
 // unwrapYAMLAlias follows one YAML alias level to its target node, returning nil for nil or a nil Alias target.
@@ -491,11 +511,14 @@ func resolveHook(ctx context.Context, root, value string) error {
 	}
 	files, err := hookFiles(ctx, root)
 	if err != nil {
-		return fmt.Errorf("unresolved evidence pointer %q", "hook:"+value)
+		return fmt.Errorf("resolve hook:%s: %w", value, err)
 	}
 	for i := 0; i < len(files) && i < 16; i++ {
 		data, readErr := readFile(ctx, root, files[i])
-		if readErr == nil && hasHookCommand(data, hook, command) {
+		if readErr != nil {
+			return fmt.Errorf("read %s for hook:%s: %w", files[i], value, readErr)
+		}
+		if hasHookCommand(data, hook, command) {
 			return nil
 		}
 	}

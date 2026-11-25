@@ -13,7 +13,7 @@ const (
 	MakefileTargetMissing MakefileEvidence = iota
 	// MakefileTargetUnproven means the reader could not establish a literal rule with a body.
 	MakefileTargetUnproven
-	// MakefileTargetPresent means a literal rule supplies a prerequisite or recipe.
+	// MakefileTargetPresent means a literal rule supplies a literal recipe.
 	MakefileTargetPresent
 )
 
@@ -22,89 +22,94 @@ func MakefileTargetHasBody(data, target string) bool {
 	return MakefileTargetStatus(data, target) == MakefileTargetPresent
 }
 
-// MakefileTargetStatus checks complete rules so a continued recipe can invalidate a literal head.
+// MakefileTargetStatus requires one declaration with a literal recipe in a fully understood file.
 func MakefileTargetStatus(data, target string) MakefileEvidence {
 	lines, whole := makefileTrackedLogicalLines(strings.TrimSuffix(data, "\n"), "")
-	if slices.ContainsFunc(lines, func(line makefileTrackedLine) bool { return makefileNamesRecipePrefix(line.text) }) {
+	if !whole {
 		return MakefileTargetUnproven
 	}
 	var reader makefileEvidenceReader
 	for i := 0; i < len(lines) && i < MaxMakefileLines; i++ {
-		kind := reader.scanner.next(lines[i].text)
-		if reader.scanner.lost {
+		line := lines[i]
+		if line.continued || strings.ContainsAny(line.text, "\x00\r\ufeff") || !reader.accept(line.text, target) {
 			return MakefileTargetUnproven
 		}
-		if reader.step(lines[i], kind, target) {
-			return MakefileTargetPresent
-		}
-	}
-	if !whole {
-		return MakefileTargetUnproven
-	}
-	if reader.body {
-		return MakefileTargetPresent
 	}
 	return reader.status
 }
 
-// makefileEvidenceReader keeps a pending rule until its last possible recipe line has been read.
+// makefileEvidenceReader tracks recipe ownership and the one declaration of the requested target.
 type makefileEvidenceReader struct {
-	scanner makefileScanner
-	status  MakefileEvidence
-	open    bool // An unconditional recipe line still belongs to this literal rule.
-	body    bool // A literal prerequisite or unconditional literal recipe has been seen.
+	status MakefileEvidence
+	inRule bool
+	wanted bool
 }
 
-// step consumes one classified line and reports a proven rule once its recipe has ended.
-func (r *makefileEvidenceReader) step(line makefileTrackedLine, kind int, target string) bool {
+// accept consumes one allowed physical line. Blank lines and comments preserve recipe ownership.
+func (r *makefileEvidenceReader) accept(line, target string) bool {
+	trimmed := strings.Trim(line, " \t")
 	switch {
-	case kind == makefileRecipeLine || kind == makefileUnsureLine:
-		r.recipe(line, kind)
-	case kind == makefileSyntaxLine && r.scanner.targetOpen:
-		// Blank lines, comments and conditional directives leave recipe ownership alone.
-	default:
-		if len(r.scanner.branches) == 0 && r.body {
-			return true
+	case trimmed == "" || strings.HasPrefix(trimmed, "#"):
+		return true
+	case strings.HasPrefix(line, "\t") && r.inRule:
+		if r.wanted && makefileLiteralCommand(line) {
+			r.status = MakefileTargetPresent
 		}
-		r.open = false
-		r.rule(line, target)
+		return true
 	}
-	return false
+	r.inRule, r.wanted = false, false
+	if makefileEvidenceDirective(trimmed) {
+		return false
+	}
+	return r.declaration(line, target)
 }
 
-// recipe vetoes continuations and counts literal commands whose ownership is certain.
-func (r *makefileEvidenceReader) recipe(line makefileTrackedLine, kind int) {
-	if line.continued && r.scanner.targetOpen {
-		r.open, r.body = false, false
-	} else if r.open && len(r.scanner.branches) == 0 && kind == makefileRecipeLine {
-		r.body = r.body || makefileLiteralCommand(line.text)
-	}
+// makefileEvidenceDirective identifies includes, conditionals, define blocks and variable modifiers.
+func makefileEvidenceDirective(line string) bool {
+	fields := strings.Fields(line)
+	return len(fields) == 0 || makefileDirectiveIndex(fields) != 0 ||
+		makefileDirectiveWords[fields[0]] || makefileConditionalWords[fields[0]]
 }
 
-// rule records possible nonliteral declarations and starts a proof only for a literal rule.
-func (r *makefileEvidenceReader) rule(line makefileTrackedLine, target string) {
-	colon := r.scanner.ruleColon
-	if colon < 0 {
-		return
+// declaration distinguishes simple assignments from literal rules by their first Make operator.
+func (r *makefileEvidenceReader) declaration(line, target string) bool {
+	assign, colon, _ := makefileSplit(line)
+	if assign >= 0 && (colon < 0 || assign < colon) {
+		name := strings.Trim(line[:assign], " \t")
+		return makefileMatchesIdentifier(name) && !makefileEvidenceDirective(name) && makefileAllowedAssignment(line, assign)
 	}
-	head := line.text[:colon]
-	if makefileDirectiveWords[makefileDirective(strings.Fields(line.text))] {
-		return
+	return colon > 0 && line[0] != '\t' && r.rule(line, colon, target)
+}
+
+// rule validates every rule and refuses a second declaration, including one in a target list.
+func (r *makefileEvidenceReader) rule(line string, colon int, target string) bool {
+	head := strings.Trim(line[:colon], " \t")
+	if head == "" || !makefileLiteralWords(head) || strings.Contains(line, "$") {
+		return false
 	}
-	if !makefileLiteralWords(head) {
+	literal, recipe := makefileLiteralRuleTail(line[colon+1:])
+	if !literal {
+		return false
+	}
+	names := strings.Fields(head)
+	r.inRule = true
+	r.wanted = slices.Contains(names, target)
+	// A different spelling of the same path can replace this target's recipe.
+	if slices.ContainsFunc(names, func(name string) bool {
+		return name != target && makefileNormalizeName(name) == target
+	}) {
+		return false
+	}
+	if r.wanted {
+		if r.status != MakefileTargetMissing {
+			return false
+		}
 		r.status = MakefileTargetUnproven
-		return
+		if recipe {
+			r.status = MakefileTargetPresent
+		}
 	}
-	if !slices.Contains(strings.Fields(head), target) {
-		return
-	}
-	r.status = MakefileTargetUnproven
-	if len(r.scanner.branches) > 0 || line.continued || strings.Contains(line.text, "$") {
-		return
-	}
-	r.open, r.body = makefileLiteralRuleTail(line.text[colon+1:])
-	// The scanner tracks possible owners across branches for the continuation veto.
-	r.scanner.targetOpen = r.open
+	return true
 }
 
 // makefileLiteralWords accepts only Make word bytes and the horizontal blanks that separate them.
@@ -118,18 +123,12 @@ func makefileLiteralWords(text string) bool {
 }
 
 // makefileLiteralRuleTail checks literal prerequisites on either side of the optional order-only
-// separator and an optional inline recipe. It returns whether the head qualifies and has a body.
-func makefileLiteralRuleTail(tail string) (literal, body bool) {
+// separator and reports whether the rule also has a literal inline command.
+func makefileLiteralRuleTail(tail string) (literal, recipe bool) {
 	code, _, _ := strings.Cut(tail, "#")
 	prerequisites, command, _ := strings.Cut(code, ";")
 	normal, orderOnly, _ := strings.Cut(prerequisites, "|")
-	if !makefileLiteralWords(normal) || !makefileLiteralWords(orderOnly) {
-		return false, false
-	}
-	words := strings.Fields(normal + " " + orderOnly)
-	// GNU Make's .WAIT separates groups of prerequisites without naming one itself.
-	hasPrerequisite := slices.ContainsFunc(words, func(word string) bool { return word != ".WAIT" })
-	return true, hasPrerequisite || makefileLiteralCommand(command)
+	return makefileLiteralWords(normal) && makefileLiteralWords(orderOnly), makefileLiteralCommand(command)
 }
 
 // makefileLiteralCommand requires command text after Make's recipe prefixes and before a comment.
