@@ -786,8 +786,7 @@ With `adoption.decline: [labels]` adoption writes none, and both audits pass wit
 `standardsctl rules audit` reads `.config/rules/enforcement.yaml`, which gives every HISS rule and
 every AGENTS.md operational rule an enforcement class (`ci-gate`, `hook`, `review-gate`,
 `guidance` or `staged`) and evidence pointers, and checks that each pointer resolves (`internal/ruleregistry/audit.go`): `test:` to a
-Go test function, `hook:` to a lefthook hook command, `make:` to a Makefile target that declares at
-least one prerequisite or non-empty recipe line (an empty `target:` rule fails resolution),
+Go test function, `hook:` to a lefthook hook command, `make:` to a literal Makefile rule as described below,
 `workflow:` to a workflow job whose `if:` condition is not literal `false` (`false` or
 `${{ false }}`, `ghworkflow.NeverRuns` in `internal/ghworkflow/ghworkflow.go`), `gate:` to a stage
 of `praetorctl gate run`, and `forge:` to a closed branch protection setting:
@@ -797,6 +796,16 @@ reads the same list the pipeline executes (`pipelineStages` in
 [`internal/gating/pipeline.go`](https://github.com/cordanaLLM/praetor/blob/main/internal/gating/pipeline.go)),
 so a stage the pipeline drops stops resolving and fails the audit
 (`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`).
+
+A `make:<target>` pointer reads `present` when an unconditional, single-colon rule names the
+target in plain literal words and supplies a literal prerequisite or a literal command. A command
+may follow `;` on the rule line or start on a tab-led recipe line. To count as evidence, the
+command must contain more than whitespace or a comment and be free of variable references. The
+rule line must be free of variable references, patterns, wildcards and quoted or escaped target
+names. A backslash continuation on the rule or any of its recipe
+lines prevents that rule from serving as evidence. The diagnostic for an unprovable rule is
+`not statically provable`. A missing target keeps the `unresolved evidence pointer` diagnostic.
+See `TestAudit_MakeTargetBodyShapes` in `internal/ruleregistry/registry_test.go`.
 
 Each text row shows the rule ID, class, status and evidence. A guidance rule appears as
 

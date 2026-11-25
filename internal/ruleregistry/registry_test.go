@@ -56,42 +56,57 @@ func TestAudit_EmptyMakeTargetFails(t *testing.T) {
 	}
 }
 
-// TestAudit_MakeTargetBodyShapes verifies empty Make shapes fail while prerequisite-only and inline recipes resolve.
+// TestAudit_MakeTargetBodyShapes checks literal evidence and the exact diagnostic for refusals.
 func TestAudit_MakeTargetBodyShapes(t *testing.T) {
-	tests := []struct {
-		name      string
-		makefile  string
-		wantError bool
-	}{
-		{"empty inline semicolon", "verify-all: ;\n", true},
-		{"comment only", "verify-all: # no body\n", true},
-		{"whitespace tab line", "verify-all:\n\t   \n", true},
-		{"prerequisite without recipe", "verify-all: lint\nlint:\n\t@true\n", false},
-		{"inline semicolon recipe", "verify-all: ; @true\n", false},
+	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:verify-all]\n"
+	const missing = `HISS-01: unresolved evidence pointer "make:verify-all"`
+	const unproven = missing + ": not statically provable"
+	tests := [...]struct{ name, makefile, problem string }{
+		{"short variable", "D :=\nverify-all: $D\n", unproven},
+		{"parenthesized variable", "D := lint\nverify-all: $(D)\n", unproven},
+		{"braced variable", "D := lint\nverify-all: ${D}\n", unproven},
+		{"static pattern", "verify-all: %:\n", unproven},
+		{"double colon", "verify-all::\n", unproven},
+		{"double colon with prerequisite", "verify-all:: lint\n", unproven},
+		{"conditional rule", "ifeq 'a' 'b'\nverify-all: lint\nendif\n", unproven},
+		{"continued rule", "verify-all: \\\n  lint\n", unproven},
+		{"continued recipe after literal body", "verify-all: lint\n\t@true\n\t@echo \\\n  ok\n", unproven},
+		{"recipe variable", "verify-all:\n\t$(MAKE) lint\n", unproven},
+		{"escaped blank in head", "release\\ verify-all: ; @true\n", unproven},
+		{"empty inline semicolon", "verify-all: ;\n", unproven},
+		{"comment only", "verify-all: # no body\n", unproven},
+		{"whitespace tab line", "verify-all:\n\t   \n", unproven},
+		{"tab comment", "verify-all:\n\t# explanatory note\n", unproven},
+		{"prerequisite without recipe", "verify-all: lint\n", ""},
+		{"inline semicolon recipe", "verify-all: ; @true\n", ""},
+		{"tab recipe", "verify-all:\n\t@true\n", ""},
+		{"missing target", "other: lint\n", missing},
 	}
-	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:verify-all]\n"
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			root := fixtureRoot(t, registry)
 			writeTestFile(t, root, "Makefile", tc.makefile)
 			report, err := Audit(t.Context(), root)
-			assertLocalEvidenceStatus(t, report, err, tc.wantError)
+			assertLocalEvidenceStatus(t, report, err, tc.problem != "")
+			if tc.problem != "" && !slices.Contains(report.Problems, tc.problem) {
+				t.Fatalf("problems = %v, want %q", report.Problems, tc.problem)
+			}
 		})
 	}
 }
 
-// TestAudit_MakeConditionalTargetBody verifies conditional Make recipes resolve while directive-only targets fail.
+// TestAudit_MakeConditionalTargetBody requires a recipe whose ownership is unconditional.
 func TestAudit_MakeConditionalTargetBody(t *testing.T) {
 	tests := []struct {
 		name      string
 		makefile  string
 		wantError bool
 	}{
-		{"recipe after ifeq and endif", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", false},
+		{"recipe inside ifeq", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", true},
 		{"recipe after closed ifdef endif", "verify-all:\nifdef CI\nendif\n\t@true\n", false},
 		{"directives without recipe", "verify-all:\nifeq (1,1)\nelse\nendif\n", true},
 		{"directives without recipe before other target", "verify-all:\nifneq (a,b)\nendif\nother:\n\t@true\n", true},
-		{"else branch recipe", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", false},
+		{"else branch recipe", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", true},
 	}
 	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:verify-all]\n"
 	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {
@@ -129,14 +144,14 @@ func TestAudit_MakeSharedParserRegressions(t *testing.T) {
 	}{
 		{"define endef decoy", "empty", "empty:\n\ndefine M\nempty: ; @true\nendef\n", true},
 		{"continued recipe decoy", "empty", "empty:\n\nother:\n\t@echo \\\nempty: ; @true\n", true},
-		{"variable expanded target", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", false},
+		{"variable expanded target", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", true},
 		{"escaped space in one target", "verify-all", "release\\ verify-all: ; @true\n", true},
 		{"unescaped space between targets", "verify-all", "release verify-all: ; @true\n", false},
 		{"escaped space in computed target", "verify-all", "PREFIX := release\n$(PREFIX)\\ verify-all: ; @true\n", true},
 		{"known empty prerequisites", "verify-all", "DEPS :=\nverify-all: $(DEPS)\n", true},
-		{"known nonempty prerequisites", "verify-all", "DEPS := lint\nverify-all: $(DEPS)\n", false},
+		{"known nonempty prerequisites", "verify-all", "DEPS := lint\nverify-all: $(DEPS)\n", true},
 		{"empty order-only prerequisites", "verify-all", "DEPS :=\nverify-all: | ${DEPS} ; # comment\n", true},
-		{"empty prerequisites with recipe", "verify-all", "DEPS :=\nverify-all: $(DEPS) ; @true\n", false},
+		{"empty prerequisites with recipe", "verify-all", "DEPS :=\nverify-all: $(DEPS) ; @true\n", true},
 		{"ifeq quoted rule target", "verify-all", "verify-all:\nifeq\"other\":\n\t@true\n", true},
 	}
 	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {

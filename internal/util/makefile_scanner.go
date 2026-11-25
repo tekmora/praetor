@@ -51,6 +51,8 @@ type makefileScanner struct {
 	depth    int
 	recipe   int
 	branches []makefileBranch
+	// ruleColon is the delimiter of the current rule or -1 on other lines.
+	ruleColon int
 	// scope is the recipe state when the outermost open conditional opened, and mixed whether the
 	// recipe state differed from it anywhere inside that conditional since.
 	scope int
@@ -76,6 +78,7 @@ type makefileBranch struct {
 // resolve (makefileMayBindRecipePrefix): which lines after it are recipe lines depends on the
 // value.
 func (s *makefileScanner) next(line string) int {
+	s.ruleColon = -1
 	if s.depth > 0 {
 		s.body(line)
 		return makefileDefineLine
@@ -156,10 +159,13 @@ func (s *makefileScanner) syntax(line string, fields []string) {
 		s.set(makefileRecipeClosed)
 	case makefileConditionalWords[fields[0]]:
 		s.conditional(fields)
-	case makefileTargetNames(line) != nil:
-		s.set(makefileRecipeOpen)
 	default:
-		s.set(makefileRecipeClosed)
+		s.ruleColon, _ = makefileRuleDelimiter(line)
+		if s.ruleColon >= 0 {
+			s.set(makefileRecipeOpen)
+		} else {
+			s.set(makefileRecipeClosed)
+		}
 	}
 }
 

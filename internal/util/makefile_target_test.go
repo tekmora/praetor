@@ -946,26 +946,46 @@ type makefileBodyCase struct {
 var makefileTargetHasBodyPositiveCases = []makefileBodyCase{
 	{"prerequisites-only", "verify-all", "verify-all: lint\nlint:\n\t@true\n", true},
 	{"order-only-prerequisite", "verify-all", "verify-all: | out\nout:\n\t@true\n", true},
-	{"colon-in-variable-reference-prerequisite", "verify-all", "verify-all: $(SRCS:.c=.o)\n", true},
 	{"recipe-only", "verify-all", "verify-all:\n\t@true\n", true},
+	{"literal-before-wait", "verify-all", "verify-all: lint .WAIT\n", true},
+	{"prerequisite-with-variable-recipe", "verify-all", "verify-all: lint\n\t$(MAKE) lint\n", true},
+	{"other-continued-recipe", "verify-all", "verify-all: lint\nother:\n\t@echo \\\n  ok\n", true},
+	{"other-conditional-recipe", "verify-all", "verify-all: lint\nifdef ALT\nother:\n\t@echo \\\n  ok\nendif\n", true},
 	{"inline-semicolon-recipe", "verify-all", "verify-all: ; @true\n", true},
-	{"literal-name-with-space", "release verify-all", "release\\ verify-all: ; @true\n", true},
-	{"literal-name-with-tab", "release\tverify-all", "release\\\tverify-all: ; @true\n", true},
-	{"even-backslashes-before-space", "verify-all", "release\\\\ verify-all: ; @true\n", true},
-	{"continued-prerequisite", "verify-all", "verify-all: \\\n  lint\n", true},
-	{"continued-recipe", "verify-all", "verify-all:\n\t@echo \\\n  ok\n", true},
-	{"continued-blank-then-recipe", "verify-all", "verify-all:\n\t\\\n\t@true\n", true},
-	{"variable-target-prerequisite", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", true},
-	{"variable-target-recipe", "verify-all", "GATE := verify\nNAME := $(GATE)-all\n$(NAME):\n\t@true\n", true},
-	{"recipe-in-ifeq", "verify-all", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", true},
 	{"recipe-after-ifdef-endif", "verify-all", "verify-all:\nifdef CI\nendif\n\t@true\n", true},
-	{"recipe-in-else", "verify-all", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", true},
-	{"else-recipe-after-if-other-rule", "verify-all", "verify-all:\nifeq (1,0)\nother:\n\t@false\nelse\n\t@true\nendif\n", true},
 	{"second-rule-adds-body", "verify-all", "verify-all:\nverify-all: lint\n", true},
 	{"crlf-recipe", "verify-all", "verify-all:\r\n\t@true\r\n", true},
 }
 
 var makefileTargetHasBodyNegativeCases = []makefileBodyCase{
+	{"short-variable-prerequisite", "verify-all", "D :=\nverify-all: $D\n", false},
+	{"parenthesized-variable-prerequisite", "verify-all", "D := lint\nverify-all: $(D)\n", false},
+	{"braced-variable-prerequisite", "verify-all", "D := lint\nverify-all: ${D}\n", false},
+	{"static-pattern", "verify-all", "verify-all: %:\n", false},
+	{"double-colon-empty", "verify-all", "verify-all::\n", false},
+	{"double-colon-recipe", "verify-all", "verify-all::\n\t@true\n", false},
+	{"conditional-head", "verify-all", "ifeq 'a' 'b'\nverify-all: lint\nendif\n", false},
+	{"variable-recipe", "verify-all", "verify-all:\n\t$(MAKE) lint\n", false},
+	{"comment-recipe", "verify-all", "verify-all:\n\t# explanatory note\n", false},
+	{"prefixed-comment-recipe", "verify-all", "verify-all:\n\t@# explanatory note\n", false},
+	{"continued-after-literal-body", "verify-all", "verify-all: lint\n\t@true\n\t@echo \\\n  ok\n", false},
+	{"possible-owner-after-endif", "verify-all", "verify-all: lint\nifdef ALT\nother:\nendif\n\t@echo \\\n  ok\n", false},
+	{"wildcard-prerequisite", "verify-all", "verify-all: *.go\n", false},
+	{"wildcard-target", "verify-all", "verify-* verify-all: lint\n", false},
+	{"quoted-blank-target", "verify-all", "\"release verify-all\": lint\n", false},
+	{"inline-variable-after-prerequisite", "verify-all", "verify-all: lint ; $(MAKE)\n", false},
+	{"colon-in-variable-reference-prerequisite", "verify-all", "verify-all: $(SRCS:.c=.o)\n", false},
+	{"literal-name-with-space", "release verify-all", "release\\ verify-all: ; @true\n", false},
+	{"literal-name-with-tab", "release\tverify-all", "release\\\tverify-all: ; @true\n", false},
+	{"even-backslashes-before-space", "verify-all", "release\\\\ verify-all: ; @true\n", false},
+	{"continued-prerequisite", "verify-all", "verify-all: \\\n  lint\n", false},
+	{"continued-recipe", "verify-all", "verify-all:\n\t@echo \\\n  ok\n", false},
+	{"continued-blank-then-recipe", "verify-all", "verify-all:\n\t\\\n\t@true\n", false},
+	{"variable-target-prerequisite", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", false},
+	{"variable-target-recipe", "verify-all", "GATE := verify\nNAME := $(GATE)-all\n$(NAME):\n\t@true\n", false},
+	{"recipe-in-ifeq", "verify-all", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", false},
+	{"recipe-in-else", "verify-all", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", false},
+	{"else-recipe-after-if-other-rule", "verify-all", "verify-all:\nifeq (1,0)\nother:\n\t@false\nelse\n\t@true\nendif\n", false},
 	{"absent-target", "verify-all", "build:\n\t@true\n", false},
 	{"suffix-after-quoted-tab", "verify-all", "release\\\tverify-all: ; @true\n", false},
 	{"empty-makefile", "verify-all", "", false},
@@ -974,6 +994,7 @@ var makefileTargetHasBodyNegativeCases = []makefileBodyCase{
 	{"empty-inline-semicolon", "verify-all", "verify-all: ;\n", false},
 	{"inline-semicolon-comment-only", "verify-all", "verify-all: ; # note\n", false},
 	{"comment-only", "verify-all", "verify-all: # no body\n", false},
+	{"wait-without-prerequisites", "verify-all", "verify-all: .WAIT | .WAIT\n", false},
 	{"empty-order-only-pipe", "verify-all", "verify-all: |\n", false},
 	{"whitespace-tab-line", "verify-all", "verify-all:\n\t   \n", false},
 	{"continued-blank-recipe", "verify-all", "verify-all:\n\t\\\n\t   \n", false},
@@ -989,6 +1010,7 @@ var makefileTargetHasBodyNegativeCases = []makefileBodyCase{
 	{"recipe-prefix-mentioned", "verify-all", ".RECIPEPREFIX = >\nverify-all:\n> @true\n", false},
 }
 
+// assertMakefileTargetHasBodyCases checks literal body evidence for each fixture.
 func assertMakefileTargetHasBodyCases(t *testing.T, cases []makefileBodyCase) {
 	t.Helper()
 	for i := 0; i < len(cases) && i < util.MaxMakefileLines; i++ {
@@ -1001,22 +1023,22 @@ func assertMakefileTargetHasBodyCases(t *testing.T, cases []makefileBodyCase) {
 	}
 }
 
+// TestMakefileTargetHasBodyPositive covers literal prerequisites and commands.
 func TestMakefileTargetHasBodyPositive(t *testing.T) {
 	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyPositiveCases)
 }
 
+// TestMakefileTargetHasBodyNegative covers empty, computed and conditional rules.
 func TestMakefileTargetHasBodyNegative(t *testing.T) {
 	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyNegativeCases)
 }
 
-// Boundary: "ifeq\"other\":" is a rule head with a colon, not an ifeq directive, so it closes the
-// open verify-all rule and keeps verify-all empty while owning its own recipe; line bounds and
-// branch replacements stop or close the rule where Make does.
+// TestMakefileTargetHasBodyBoundary checks rule boundaries, quoted heads and the physical line limit.
 func TestMakefileTargetHasBodyBoundary(t *testing.T) {
 	prefix := strings.Repeat("V := a:b\n", util.MaxMakefileLines-1)
 	assertMakefileTargetHasBodyCases(t, []makefileBodyCase{
 		{"ifeq-quoted-rule-leaves-verify-all-empty", "verify-all", "verify-all:\nifeq\"other\":\n\t@true\n", false},
-		{"ifeq-quoted-rule-owns-its-recipe", "ifeq\"other\"", "verify-all:\nifeq\"other\":\n\t@true\n", true},
+		{"ifeq-quoted-rule-is-nonliteral", "ifeq\"other\"", "verify-all:\nifeq\"other\":\n\t@true\n", false},
 		{"both-branches-replace-open-rule", "verify-all", "verify-all:\nifeq (a,b)\nother:\n\t@true\nelse\nanother:\n\t@true\nendif\n\t@echo tail\n", false},
 		{"rule-at-line-bound-with-prerequisite", "verify-all", prefix + "verify-all: dep\n", true},
 		{"recipe-past-line-bound", "verify-all", prefix + "verify-all:\n\t@true\n", false},

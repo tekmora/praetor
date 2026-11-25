@@ -396,17 +396,20 @@ func resolve(ctx context.Context, root, pointer string) error {
 	return fmt.Errorf("unresolved evidence pointer %q", pointer)
 }
 
-// resolveMake checks that Makefile declares target with at least one prerequisite or non-empty recipe line.
+// resolveMake checks for a literal rule and distinguishes an unprovable body from a missing target.
 func resolveMake(ctx context.Context, root, target string) error {
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(target) {
-		return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
+		return fmt.Errorf("unresolved evidence pointer %q: not statically provable", "make:"+target)
 	}
 	data, err := readFile(ctx, root, "Makefile")
 	if err != nil {
 		return fmt.Errorf("read Makefile for make:%s: %w", target, err)
 	}
-	if util.MakefileTargetHasBody(string(data), target) {
+	switch util.MakefileTargetStatus(string(data), target) {
+	case util.MakefileTargetPresent:
 		return nil
+	case util.MakefileTargetUnproven:
+		return fmt.Errorf("unresolved evidence pointer %q: not statically provable", "make:"+target)
 	}
 	return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
 }
