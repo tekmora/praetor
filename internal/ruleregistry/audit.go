@@ -435,8 +435,8 @@ func resolveWorkflow(ctx context.Context, root, value string) error {
 	return nil
 }
 
-// hasActiveWorkflowJob reports whether data defines jobs.<job> as a mapping (directly or via a
-// one-level YAML alias) whose if: condition is not literal false.
+// hasActiveWorkflowJob reports whether the named job can run, following one YAML alias
+// level for the job mapping and its optional scalar condition.
 func hasActiveWorkflowJob(data []byte, job string) bool {
 	var document yaml.Node
 	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {
@@ -450,7 +450,8 @@ func hasActiveWorkflowJob(data []byte, job string) bool {
 	if ifNode == nil {
 		return true
 	}
-	return ifNode.Kind == yaml.ScalarNode && !ghworkflow.NeverRuns(ifNode.Value)
+	ifNode = unwrapYAMLAlias(ifNode)
+	return ifNode != nil && ifNode.Kind == yaml.ScalarNode && !ghworkflow.NeverRuns(ifNode.Value)
 }
 
 // unwrapYAMLAlias follows one YAML alias level to its target node, returning nil for nil or a nil Alias target.

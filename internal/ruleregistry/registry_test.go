@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestAudit_EvidenceResolution verifies local structural resolution sets status present without Enforced.
@@ -182,7 +184,7 @@ func TestAudit_ConditionalWorkflowJobResolvesAsPresent(t *testing.T) {
 	}
 }
 
-// TestAudit_WorkflowJobAlias verifies aliased active workflow jobs resolve while aliases of disabled jobs fail.
+// TestAudit_WorkflowJobAlias checks evidence resolution for aliases of jobs and their conditions.
 func TestAudit_WorkflowJobAlias(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -193,6 +195,9 @@ func TestAudit_WorkflowJobAlias(t *testing.T) {
 		{"aliased conditional active job", "jobs:\n  base: &base\n    if: github.event_name == 'push'\n    runs-on: ubuntu-latest\n  verify: *base\n", false},
 		{"alias of literal false job", "jobs:\n  disabled: &disabled\n    if: false\n    runs-on: ubuntu-latest\n  verify: *disabled\n", true},
 		{"alias of expression false job", "jobs:\n  disabled: &disabled\n    if: ${{ false }}\n    runs-on: ubuntu-latest\n  verify: *disabled\n", true},
+		{"aliased active condition", "jobs:\n  base:\n    if: &condition github.event_name == 'push'\n  verify:\n    if: *condition\n", false},
+		{"aliased false condition", "jobs:\n  base:\n    if: &condition false\n  verify:\n    if: *condition\n", true},
+		{"condition alias without anchor", "jobs:\n  verify:\n    if: *missing\n", true},
 	}
 	registry := "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [workflow:ci.yml#verify]\n"
 	for i := 0; i < len(tests) && i < maxEvidencePointers; i++ {
@@ -203,6 +208,13 @@ func TestAudit_WorkflowJobAlias(t *testing.T) {
 			report, err := Audit(t.Context(), root)
 			assertMakeShapeResult(t, report, err, tc.wantError)
 		})
+	}
+}
+
+// TestUnwrapYAMLAliasNilTarget covers an incomplete alias node directly.
+func TestUnwrapYAMLAliasNilTarget(t *testing.T) {
+	if got := unwrapYAMLAlias(&yaml.Node{Kind: yaml.AliasNode}); got != nil {
+		t.Fatalf("unwrapYAMLAlias(alias without target) = %v, want nil", got)
 	}
 }
 
