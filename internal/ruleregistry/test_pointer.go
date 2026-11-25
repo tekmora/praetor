@@ -13,20 +13,33 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
-var testName = regexp.MustCompile(`^Test[A-Z0-9_][A-Za-z0-9_]*$`)
+// isTestName applies cmd/go's Test prefix rule to a Go identifier.
+func isTestName(name string) bool {
+	suffix, ok := strings.CutPrefix(name, "Test")
+	if !ok || !token.IsIdentifier(name) {
+		return false
+	}
+	if suffix == "" {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(suffix)
+	return !unicode.IsLower(first)
+}
 
 // resolveTest checks for a named test declaration in the indicated package directory.
 func resolveTest(ctx context.Context, root, value string) (err error) {
 	index := strings.LastIndexByte(value, '.')
-	if index < 1 || !safeRelative(value[:index]) || !testName.MatchString(value[index+1:]) {
+	if index < 1 || !safeRelative(value[:index]) || !isTestName(value[index+1:]) {
 		return fmt.Errorf("unresolved evidence pointer %q", "test:"+value)
 	}
 	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
@@ -87,7 +100,7 @@ func packageTestFiles(ctx context.Context, dir *os.Root) (names []string, err er
 		}
 	}
 	if len(names) > maxTestFiles {
-		return nil, fmt.Errorf("package exceeds %d test files", maxTestFiles)
+		return nil, fmt.Errorf("package exceeds %d test files (found %d)", maxTestFiles, len(names))
 	}
 	slices.Sort(names)
 	return names, ctx.Err()
@@ -109,14 +122,15 @@ func fileHasTest(ctx context.Context, dir *os.Root, file, name string) (bool, er
 	if err != nil {
 		return false, fmt.Errorf("parse %s: %w", file, err)
 	}
+	imports := hiss.FileImports(parsed)
 	return slices.ContainsFunc(parsed.Decls, func(decl ast.Decl) bool {
 		fn, ok := decl.(*ast.FuncDecl)
-		return ok && fn.Recv == nil && fn.Name.Name == name && hasTestSignature(fn.Type)
+		return ok && fn.Recv == nil && fn.Name.Name == name && hasTestSignature(fn.Type, imports)
 	}), nil
 }
 
-// hasTestSignature follows cmd/go's syntactic test for a single *T or *pkg.T parameter.
-func hasTestSignature(signature *ast.FuncType) bool {
+// hasTestSignature checks for a single *testing.T parameter using the file's import bindings.
+func hasTestSignature(signature *ast.FuncType, imports hiss.GoImports) bool {
 	if signature.TypeParams != nil || signature.Results.NumFields() != 0 || signature.Params.NumFields() != 1 {
 		return false
 	}
@@ -126,9 +140,10 @@ func hasTestSignature(signature *ast.FuncType) bool {
 	}
 	switch typ := ptr.X.(type) {
 	case *ast.Ident:
-		return typ.Name == "T"
+		return typ.Name == "T" && imports.DotImports("testing")
 	case *ast.SelectorExpr:
-		return typ.Sel.Name == "T"
+		pkg, ok := typ.X.(*ast.Ident)
+		return ok && typ.Sel.Name == "T" && imports.Binds(pkg.Name, "testing")
 	default:
 		return false
 	}

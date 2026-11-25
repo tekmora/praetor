@@ -798,7 +798,15 @@ reads the same list the pipeline executes (`pipelineStages` in
 so a stage the pipeline drops stops resolving and fails the audit
 (`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`).
 
-Each rule row in text and `standardsctl rules audit --json` carries a `status` alongside `enforced`:
+Each text row shows the rule ID, class, status and evidence. A guidance rule appears as
+
+```text
+HISS-01 guidance status=guidance prose-only
+```
+
+The text summary counts rules by class and status and gives separate totals for enforced and
+unenforced rules. In `standardsctl rules audit --json`, each rule carries both `status` and
+`enforced` as shown below.
 
 | Status | `enforced` | Meaning |
 | :--- | :--- | :--- |

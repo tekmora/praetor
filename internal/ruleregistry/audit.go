@@ -2,12 +2,14 @@ package ruleregistry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/gating"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 	"github.com/cordanaLLM/praetor/internal/util"
@@ -400,7 +402,10 @@ func resolveMake(ctx context.Context, root, target string) error {
 		return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
 	}
 	data, err := readFile(ctx, root, "Makefile")
-	if err == nil && util.MakefileTargetHasBody(string(data), target) {
+	if err != nil {
+		return fmt.Errorf("read Makefile for make:%s: %w", target, err)
+	}
+	if util.MakefileTargetHasBody(string(data), target) {
 		return nil
 	}
 	return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
@@ -413,18 +418,39 @@ func resolveWorkflow(ctx context.Context, root, value string) error {
 	if !ok || !safeRelative(file) || !ghworkflow.IsWorkflowPath(path) || !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(job) {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
-	data, err := readFile(ctx, root, path)
-	if err != nil || !hasActiveWorkflowJob(data, job) {
+	data, err := readWorkflow(ctx, root, file)
+	if err != nil {
+		return fmt.Errorf("read workflow:%s: %w", value, err)
+	}
+	if _, err := ghworkflow.Parse(data); err != nil {
+		return fmt.Errorf("workflow:%s: %w", value, err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("decode condition for workflow:%s: %w", value, err)
+	}
+	if !hasActiveWorkflowJob(&document, job) {
 		return fmt.Errorf("unresolved evidence pointer %q", "workflow:"+value)
 	}
 	return nil
 }
 
+// readWorkflow reads a flat workflow filename from the pinned repository workflow directory.
+func readWorkflow(ctx context.Context, root, file string) (data []byte, err error) {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
+	dir, err := contextopt.OpenDirectoryIn(ctx, root, ghworkflow.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	return contextopt.ReadRootSnapshot(ctx, dir, file)
+}
+
 // hasActiveWorkflowJob reports whether the named job can run, following one YAML alias
 // level for the job mapping and its optional scalar condition.
-func hasActiveWorkflowJob(data []byte, job string) bool {
-	var document yaml.Node
-	if yaml.Unmarshal(data, &document) != nil || len(document.Content) != 1 {
+func hasActiveWorkflowJob(document *yaml.Node, job string) bool {
+	if len(document.Content) != 1 {
 		return false
 	}
 	jobNode := unwrapYAMLAlias(util.YAMLMappingValue(util.YAMLMappingValue(document.Content[0], "jobs"), job))

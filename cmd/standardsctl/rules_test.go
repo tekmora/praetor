@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/forge"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // TestRulesAuditCLI_ReportsProseOnlyWithoutFailing verifies guidance status, enforced explanation, and JSON output.
@@ -21,7 +24,14 @@ func TestRulesAuditCLI_ReportsProseOnlyWithoutFailing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules audit error = %v", err)
 	}
-	mustContain(t, out, "HISS-01 guidance status=guidance prose-only",
+	const guidanceRow = "\nHISS-01 guidance status=guidance prose-only\n"
+	guide, err := contextopt.ReadSnapshot(t.Context(), filepath.Join("..", "..", "docs", "guides", "adoption-verification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guideText, _ := util.NormalizeLineEndings(string(guide))
+	mustContain(t, guideText, guidanceRow)
+	mustContain(t, out, guidanceRow,
 		"AGENTS-OP-1 guidance status=guidance prose-only",
 		"statuses: present=0, forge-observed=0, forge-pending=0, unresolved=0, guidance=22",
 		"enforced: 0 (live forge read-back matched with no pending forge setting; local pointer presence is status=present, not enforced)",
@@ -32,6 +42,7 @@ func TestRulesAuditCLI_ReportsProseOnlyWithoutFailing(t *testing.T) {
 	if err != nil || !strings.Contains(jsonOut, "\"status\": \"guidance\"") || !strings.Contains(jsonOut, "\"prose_only\": true") {
 		t.Fatalf("rules audit JSON = (%q, %v)", jsonOut, err)
 	}
+	mustContain(t, jsonOut, `"enforced": false`)
 	helpOut, helpErr := captureStdout(t, func() error {
 		return dispatchCommand("rules", []string{"--help"})
 	})

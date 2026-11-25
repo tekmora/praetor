@@ -191,6 +191,14 @@ func TestAudit_ConditionalWorkflowJobResolvesAsPresent(t *testing.T) {
 	}
 }
 
+// TestAudit_WorkflowDuplicateCondition preserves the parser diagnostic for an invalid job.
+func TestAudit_WorkflowDuplicateCondition(t *testing.T) {
+	const pointer = "workflow:ci.yml#verify"
+	root := pointerFixtureRoot(t, pointer)
+	writeTestFile(t, root, ".github/workflows/ci.yml", "jobs:\n  verify:\n    if: true\n    if: false\n")
+	assertPointerProblem(t, root, pointer, `mapping key "if" already defined`)
+}
+
 // TestAudit_WorkflowDirectory resolves a workflow pointer only in the directory GitHub runs workflows from.
 func TestAudit_WorkflowDirectory(t *testing.T) {
 	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [workflow:"
@@ -200,6 +208,28 @@ func TestAudit_WorkflowDirectory(t *testing.T) {
 			writeTestFile(t, root, ".github/workflows/archive/ci.yml", "jobs:\n  verify:\n    runs-on: ubuntu-latest\n")
 			report, err := Audit(t.Context(), root)
 			assertLocalEvidenceStatus(t, report, err, file != "ci.yml")
+		})
+	}
+}
+
+// TestAudit_LinkedEvidenceDirectory refuses a pointer redirected to another directory inside the repository.
+func TestAudit_LinkedEvidenceDirectory(t *testing.T) {
+	tests := [...]struct{ pointer, dir string }{
+		{"workflow:ci.yml#verify", ".github"},
+		{"workflow:ci.yml#verify", ".github/workflows"},
+		{"test:internal/check.TestEnforced", "internal/check"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dir, func(t *testing.T) {
+			root := pointerFixtureRoot(t, tc.pointer)
+			dir := filepath.Join(root, tc.dir)
+			if err := os.Rename(dir, filepath.Join(filepath.Dir(dir), "archive")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("archive", dir); err != nil {
+				t.Skipf("cannot create directory symlink: %v", err)
+			}
+			assertPointerProblem(t, root, tc.pointer, "path component must be a directory, never a symlink")
 		})
 	}
 }
@@ -281,6 +311,68 @@ func TestAudit_TestDeclaration(t *testing.T) {
 	}
 }
 
+// TestAudit_TestNames checks cmd/go's prefix boundary against parsed declarations.
+func TestAudit_TestNames(t *testing.T) {
+	tests := [...]struct {
+		name      string
+		wantError bool
+	}{
+		{"Test", false},
+		{"TestÉ", false},
+		{"Testé", true},
+		{"Testcase", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, root, "check/names_test.go", "package check\nimport \"testing\"\nfunc "+tc.name+"(*testing.T) {}\n")
+			err := resolve(t.Context(), root, "test:check."+tc.name)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("resolve(%s) error = %v, wantError = %t", tc.name, err, tc.wantError)
+			}
+		})
+	}
+}
+
+// TestAudit_TestParameterImport checks the type binding in the file that declares the test.
+func TestAudit_TestParameterImport(t *testing.T) {
+	tests := [...]struct {
+		name, preamble, parameter string
+		wantError                 bool
+	}{
+		{"local type", "type T struct{}", "*T", true},
+		{"missing import", "", "*testing.T", true},
+		{"other import", `import testing "example.com/other"`, "*testing.T", true},
+		{"blank import", `import _ "testing"` + "\ntype T struct{}", "*T", true},
+		{"renamed import", `import check "testing"`, "*check.T", false},
+		{"dot import", `import . "testing"`, "*T", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := pointerFixtureRoot(t, "test:internal/check.TestGhost")
+			source := "package check\n" + tc.preamble + "\nfunc TestGhost(" + tc.parameter + ") {}\n"
+			writeTestFile(t, root, "internal/check/ghost_test.go", source)
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, tc.wantError)
+		})
+	}
+}
+
+// TestAudit_TestFileBound resolves a test at the 256-file limit and reports the first excess file count.
+func TestAudit_TestFileBound(t *testing.T) {
+	const pointer = "test:internal/check.TestEnforced"
+	root := pointerFixtureRoot(t, pointer)
+	const pkg = "internal/check/"
+	for i := 1; i < 256; i++ {
+		writeTestFile(t, root, pkg+"extra"+strconv.Itoa(i)+"_test.go", "package check\n")
+	}
+	report, err := Audit(t.Context(), root)
+	assertLocalEvidenceStatus(t, report, err, false)
+
+	writeTestFile(t, root, pkg+"overflow_test.go", "package check\n")
+	assertPointerProblem(t, root, pointer, "package exceeds 256 test files (found 257)")
+}
+
 // TestAudit_TestFileErrors surfaces a test file's parse and read errors instead of skipping the file.
 func TestAudit_TestFileErrors(t *testing.T) {
 	tests := [...]struct{ name, source, diagnostic string }{
@@ -310,6 +402,21 @@ func TestAudit_MissingTestFails(t *testing.T) {
 	row := findRow(t, report, "HISS-01")
 	if row.Status != StatusUnresolved || row.Enforced || row.Evidence != "unresolved: test:internal/check.TestMissing" {
 		t.Fatalf("HISS-01 = %#v", row)
+	}
+}
+
+// TestAudit_PointerReadErrors distinguishes unreadable inputs from missing targets and jobs.
+func TestAudit_PointerReadErrors(t *testing.T) {
+	tests := [...]struct{ pointer, path string }{
+		{"make:verify-all", "Makefile"},
+		{"workflow:ci.yml#verify", ".github/workflows/ci.yml"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.pointer, func(t *testing.T) {
+			root := pointerFixtureRoot(t, tc.pointer)
+			writeTestFile(t, root, tc.path, "\xff")
+			assertPointerProblem(t, root, tc.pointer, "source must be UTF-8 text")
+		})
 	}
 }
 
@@ -559,13 +666,31 @@ func TestProhibited_AllowList(t *testing.T) {
 	}
 }
 
+// pointerFixtureRoot declares one local evidence pointer for HISS-01 in a fixture repository.
+func pointerFixtureRoot(t *testing.T, pointer string) string {
+	t.Helper()
+	return fixtureRoot(t, "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: ["+pointer+"]\n")
+}
+
+// assertPointerProblem requires an unresolved row and a problem identifying the pointer and its cause.
+func assertPointerProblem(t *testing.T, root, pointer, cause string) {
+	t.Helper()
+	report, err := Audit(t.Context(), root)
+	assertLocalEvidenceStatus(t, report, err, true)
+	if !slices.ContainsFunc(report.Problems, func(problem string) bool {
+		return strings.Contains(problem, pointer) && strings.Contains(problem, cause)
+	}) {
+		t.Fatalf("problems = %v, want %s and %q", report.Problems, pointer, cause)
+	}
+}
+
 // fixtureRoot creates a temporary repository tree populated with standard rule evidence targets.
 func fixtureRoot(t *testing.T, registry string) string {
 	t.Helper()
 	root := t.TempDir()
 	writeTestFile(t, root, "AGENTS.md", fixtureAgents(t))
 	writeTestFile(t, root, File, registry)
-	writeTestFile(t, root, "internal/check/check_test.go", "package check\nfunc TestEnforced(t *testing.T) {}\n")
+	writeTestFile(t, root, "internal/check/check_test.go", "package check\nimport \"testing\"\nfunc TestEnforced(t *testing.T) {}\n")
 	writeTestFile(t, root, "lefthook.yml", "commit-msg:\n  commands:\n    message-policy:\n      run: test\n")
 	maxTarget := strings.Repeat("a", maxPointerLength-len("make:"))
 	writeTestFile(t, root, "Makefile", "verify-all:\n\t@true\n"+maxTarget+":\n\t@true\n")
