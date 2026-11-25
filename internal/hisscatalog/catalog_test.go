@@ -244,36 +244,38 @@ func TestSplitInvariantRow_Boundary_EscapedPipes(t *testing.T) {
 	}
 }
 
-// maxHISSSourceFiles bounds the files read when deriving emitted rule IDs from internal/hiss.
-const maxHISSSourceFiles = 256
+// maxHISSDirEntries bounds the entire directory inventory, including test files.
+const maxHISSDirEntries = 256
 
-// emittedScannerRuleIDs parses the production Go sources of internal/hiss and returns the sorted
+// emittedScannerRuleIDs parses the production Go sources in dir and returns the sorted
 // HISS rule IDs passed directly to recordViolation or goScanner.record.
-func emittedScannerRuleIDs(t *testing.T) []string {
-	t.Helper()
-	dir := filepath.Join("..", "hiss")
+func emittedScannerRuleIDs(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	if len(entries) > maxHISSDirEntries {
+		return nil, fmt.Errorf("%s contains %d directory entries, limit %d", dir, len(entries), maxHISSDirEntries)
 	}
 	set := make(map[string]struct{})
-	for i := 0; i < len(entries) && i < maxHISSSourceFiles; i++ {
+	for i := 0; i < len(entries) && i < maxHISSDirEntries; i++ {
 		name := entries[i].Name()
 		if entries[i].IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		collectEmittedFileRules(t, filepath.Join(dir, name), set)
+		if err := collectEmittedFileRules(filepath.Join(dir, name), set); err != nil {
+			return nil, err
+		}
 	}
-	return slices.Sorted(maps.Keys(set))
+	return slices.Sorted(maps.Keys(set)), nil
 }
 
 // collectEmittedFileRules records every HISS rule literal emitted as a violation in path.
-func collectEmittedFileRules(t *testing.T, path string, set map[string]struct{}) {
-	t.Helper()
+func collectEmittedFileRules(path string, set map[string]struct{}) error {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -285,6 +287,7 @@ func collectEmittedFileRules(t *testing.T, path string, set map[string]struct{})
 		}
 		return true
 	})
+	return nil
 }
 
 // emittedCallRuleID extracts the HISS rule ID literal from a recordViolation or .record call.
@@ -319,13 +322,44 @@ func callRuleArgIndex(fun ast.Expr) int {
 // TestScannerRuleIDs_MatchesEmittedScannerRules verifies that the catalog's typed scanner
 // ownership equals the set of rule IDs internal/hiss can emit as violations.
 func TestScannerRuleIDs_MatchesEmittedScannerRules(t *testing.T) {
-	want := emittedScannerRuleIDs(t)
+	want, err := emittedScannerRuleIDs(filepath.Join("..", "hiss"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(want) == 0 {
 		t.Fatal("no emitted rule IDs discovered in internal/hiss")
 	}
 	got := ScannerRuleIDs()
 	if !slices.Equal(got, want) {
 		t.Fatalf("ScannerRuleIDs() = %v, want %v", got, want)
+	}
+}
+
+// TestEmittedScannerRuleIDs_InventoryBound puts the only rule in the last directory entry,
+// then shifts it past the bound by adding a test file that counts toward the inventory.
+func TestEmittedScannerRuleIDs_InventoryBound(t *testing.T) {
+	dir := t.TempDir()
+	for i := 1; i < maxHISSDirEntries; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("f%03d_test.go", i))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := "package p\nfunc f() { recordViolation(rep, \"HISS-99\") }\n"
+	if err := os.WriteFile(filepath.Join(dir, "z.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := emittedScannerRuleIDs(dir)
+	if err != nil || !slices.Equal(ids, []string{"HISS-99"}) {
+		t.Fatalf("at inventory limit: got %v, %v, want HISS-99", ids, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "extra_test.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = emittedScannerRuleIDs(dir)
+	want := fmt.Sprintf("%d directory entries, limit %d", maxHISSDirEntries+1, maxHISSDirEntries)
+	if err == nil || !strings.Contains(err.Error(), want) || len(ids) != 0 {
+		t.Errorf("past inventory limit: got %v, %v, want no inventory and %q", ids, err, want)
 	}
 }
 

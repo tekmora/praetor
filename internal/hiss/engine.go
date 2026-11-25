@@ -109,7 +109,7 @@ func isScannableExt(ext string) bool {
 }
 
 // ContentCandidateLanguage names the first content scanner that would inspect rel, or "".
-// Manifest validation can use this before a scan. Only claimingScanner decides ownership.
+// Manifest validation uses this before a scan. Audits use ClaimedContentLanguage after it.
 func ContentCandidateLanguage(rel string) string {
 	slashRel := filepath.ToSlash(rel)
 	ext := strings.ToLower(filepath.Ext(rel))
@@ -121,7 +121,7 @@ func ContentCandidateLanguage(rel string) string {
 	return ""
 }
 
-// ClaimedContentLanguage returns the language that claimed rel during this scan, or "".
+// ClaimedContentLanguage returns the content scanner's language if it examined rel, or "".
 // rel is a slash-separated repository path.
 func (r *ScanReport) ClaimedContentLanguage(rel string) string {
 	return r.contentClaims[rel]
@@ -162,7 +162,8 @@ func fileLanguage(s languageScanner, rel string) string {
 func (w *scanWalker) scanFile(path, rel string) error {
 	ext := strings.ToLower(filepath.Ext(rel))
 	idx := scannerIndex(ext)
-	if idx < 0 && ContentCandidateLanguage(rel) == "" {
+	byContent := idx < 0
+	if byContent && ContentCandidateLanguage(rel) == "" {
 		w.rep.Coverage.recordUnscanned(rel)
 		return nil
 	}
@@ -171,26 +172,33 @@ func (w *scanWalker) scanFile(path, rel string) error {
 		return w.readFailed(rel, idx, err)
 	}
 	src := sourceFile{rel: rel, data: data}
-	if idx < 0 {
+	if byContent {
 		if idx = claimingScanner(src, ext); idx < 0 {
 			w.rep.Coverage.recordUnscanned(rel)
 			return nil
 		}
+	}
+	if examined := w.scanSource(idx, path, src); byContent && examined {
 		w.rep.contentClaims[filepath.ToSlash(rel)] = languageScanners[idx].name()
 	}
+	return nil
+}
+
+// scanSource applies the scanner's admission bound and records whether it examined src.
+func (w *scanWalker) scanSource(idx int, path string, src sourceFile) bool {
 	scanner := languageScanners[idx]
 	if !w.admit(idx) || !w.scanAnchored(scanner, src) {
 		// A declined file, or one past its scanner's file bound, is source of the scanner's
 		// language that no rule examined.
-		w.rep.Coverage.recordUnscannedAs(rel, fileLanguage(scanner, rel))
-		return nil
+		w.rep.Coverage.recordUnscannedAs(src.rel, fileLanguage(scanner, src.rel))
+		return false
 	}
-	w.rep.Coverage.recordRead(fileLanguage(scanner, rel))
+	w.rep.Coverage.recordRead(fileLanguage(scanner, src.rel))
 	// Remember the file for its package pass, which runs once every file has been read.
 	if _, ok := scanner.(packageScanner); ok && len(w.packages[idx]) < maxCallGraphFiles {
 		w.packages[idx] = append(w.packages[idx], path)
 	}
-	return nil
+	return true
 }
 
 // admit counts one more file for the scanner at idx and reports whether it is within that
