@@ -49,12 +49,23 @@ func TestInstalledPRTemplatePassesDefaultMarkdownlint(t *testing.T) {
 	if findings := forge.BodyHardWrapFindings(doc); len(findings) != 0 {
 		t.Errorf("installed template contains hard-wrapped prose: %v", findings)
 	}
-	if strings.Count(doc, "markdownlint-") != 2 || !strings.Contains(doc, prTemplateMarkerBlock) {
+	if strings.Count(doc, "markdownlint-") != 3 || !strings.Contains(doc, prTemplateMarkerBlock) {
 		t.Fatal("expected MD013 directives around only the description marker")
 	}
 	unscoped := strings.Replace(doc, prTemplateMarkerBlock, prTemplateOpsMarker, 1)
 	if findings := testsupport.MarkdownFindings(unscoped); len(findings) != 1 || !strings.Contains(findings[0], "MD013") {
 		t.Errorf("without the marker exception got %v, want one MD013 finding", findings)
+	}
+}
+
+// TestInstalledPRTemplateRestoresMD013 checks a long paragraph after the scoped marker under both rule settings.
+func TestInstalledPRTemplateRestoresMD013(t *testing.T) {
+	doc := installedPRTemplate(t, t.TempDir(), nil) + "\n" + strings.Repeat("long paragraph ", 7) + "ends here.\n"
+	if findings := testsupport.MarkdownFindings(doc); len(findings) != 1 || !strings.Contains(findings[0], "MD013") {
+		t.Errorf("installed template with a long paragraph: got %v, want one MD013 finding", findings)
+	}
+	if findings := testsupport.MarkdownFindingsWith(doc, "MD013"); len(findings) != 0 {
+		t.Errorf("installed template with MD013 disabled: got %v, want no findings", findings)
 	}
 }
 

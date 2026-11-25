@@ -56,6 +56,11 @@ func TestAdoptHarnessesStateEveryComplexityOverride(t *testing.T) {
 			if !strings.Contains(rules, "- HISS-04: "+tc.want+"\n") {
 				t.Fatalf("rules.md lacks the HISS-04 row %q:\n%s", tc.want, rules)
 			}
+			template := repoText(t, repo, prTemplateFile)
+			const policyItem = "- [ ] **HISS-04** Meet the effective complexity limits from `.standards.yaml`.\n"
+			if !strings.Contains(template, policyItem) || strings.Contains(template, "McCabe 10") || strings.Contains(template, `$\le 60$ LOC`) {
+				t.Errorf("PR checklist must refer to repository policy for limits %q:\n%s", tc.want, template)
+			}
 			assertCLIHarnessMatches(t, repo)
 		})
 	}

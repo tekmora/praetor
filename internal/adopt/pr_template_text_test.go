@@ -22,7 +22,7 @@ const prTemplateFixtures = "testdata/pr-template"
 const prTemplateOpsMarker = "<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->"
 
 // prTemplateMarkerBlock limits the width exception to the ops marker.
-const prTemplateMarkerBlock = "<!-- markdownlint-disable MD013 -->\n" + prTemplateOpsMarker + "\n<!-- markdownlint-enable MD013 -->"
+const prTemplateMarkerBlock = "<!-- markdownlint-capture -->\n<!-- markdownlint-disable MD013 -->\n" + prTemplateOpsMarker + "\n<!-- markdownlint-restore -->"
 
 // priorPRTemplateFiles lists the recorded renderings in filename order.
 var priorPRTemplateFiles = [...]string{
@@ -30,6 +30,7 @@ var priorPRTemplateFiles = [...]string{
 	"hiss-16.md.prior",
 	"hiss.md.prior",
 	"preset.md.prior",
+	"scoped-marker.md.prior",
 	"unwrapped.md.prior",
 	"wrapped.md.prior",
 }
@@ -102,6 +103,30 @@ func TestPRTemplatesRequestActualTestResult(t *testing.T) {
 		hasPrompt := strings.Contains(tc.body, prompt) && !strings.Contains(tc.body, "(PASS)")
 		if hasPrompt != tc.wantPrompt {
 			t.Errorf("%s: unchecked command and outcome prompt without a prefilled result = %t, want %t", tc.name, hasPrompt, tc.wantPrompt)
+		}
+	}
+}
+
+// TestPRTemplateReceiptInstructions covers a Python-only adopter and the engine's signed receipt.
+func TestPRTemplateReceiptInstructions(t *testing.T) {
+	root, plan := verificationFixture(t, map[string]string{"pyproject.toml": "[tool.pytest.ini_options]\n"})
+	if !slices.Equal(plan.Runtimes, []string{"python"}) {
+		t.Fatalf("expected Python-only fixture, got runtimes %q", plan.Runtimes)
+	}
+	for _, tc := range [...]struct{ name, body string }{
+		{"Python-only adopter", installedPRTemplate(t, root, plan)},
+		{"engine", repoText(t, sourceCheckout, prTemplateFile)},
+	} {
+		for _, want := range [...]string{
+			"If the gate signs a receipt for this head, paste its JSON in the fence below.",
+			"Otherwise, record which verification ran and the reason the gate reported.",
+			"`.standards-receipt.json`",
+			"If pre-push kept a copy",
+			"\n```receipt\n```\n",
+		} {
+			if !strings.Contains(tc.body, want) {
+				t.Errorf("%s template lacks %q", tc.name, want)
+			}
 		}
 	}
 }

@@ -2,14 +2,15 @@
 
 ## Description
 
+<!-- markdownlint-capture -->
 <!-- markdownlint-disable MD013 -->
 <!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->
-<!-- markdownlint-enable MD013 -->
+<!-- markdownlint-restore -->
 
 ## Pre-Merge Verification Checklist
 
 - [ ] Local verification passed: `make verify-all`
-- [ ] No new HISS / NASA Power-of-10 infractions (functions $\le 60$ LOC)
+- [ ] No new HISS / NASA Power-of-10 infractions
 - [ ] 3D Tests included (Positive, Negative, Boundary) for public APIs
 - [ ] Agent contexts in sync: `standardsctl compile-context --verify`
 - [ ] Commit messages adhere to Conventional Commits format
@@ -24,7 +25,7 @@ All PRs must strictly adhere to the declared HISS invariants before merging:
 - [ ] **HISS-02** Every loop has a compile-time scalar upper bound.
 - [ ] **HISS-02** All network and disk I/O uses explicit context timeouts.
 - [ ] **HISS-03** Hot-path loops allocate zero heap bytes per tick.
-- [ ] **HISS-04** Limits: McCabe 10, cognitive 15, lines 60, statements 50.
+- [ ] **HISS-04** Meet the effective complexity limits from `.standards.yaml`.
 
 #### Memory & Error Integrity
 
@@ -62,16 +63,17 @@ Cover every public method and changed component with automated tests.
 
 ### 4. Ed25519 Exit-0 Verification Receipt
 
-Paste the signed JSON for this PR's head commit in the `receipt` fence.
+If the gate signs a receipt for this head, paste its JSON in the fence below.
 
-`praetorctl gate run` writes `.standards-receipt.json`.
+Otherwise, record which verification ran and the reason the gate reported.
 
-Pre-push saves a copy at `.git/praetor-receipts/<sha>.json`.
+`praetorctl gate run` writes signed receipts to `.standards-receipt.json`.
+
+If pre-push kept a copy, find it at `.git/praetor-receipts/<sha>.json`.
 
 Run the gate again after a rebase.
 
 ```receipt
-<!-- Paste the signed receipt JSON here. -->
 ```
 
 - [ ] Record the test command you ran and its outcome.
