@@ -12,8 +12,8 @@ import (
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 )
 
-// TestScaffoldedGovernanceDocumentsPassMarkdownlint checks default rules for prose documents.
-// Forge text uses the shipped Markdown profile's MD013 setting to keep each item on one line.
+// TestScaffoldedGovernanceDocumentsPassMarkdownlint checks default rules on governance prose.
+// TestPRTemplateChecklistLayout checks the exact ops marker before its replacement.
 func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 	documents := map[string]string{
 		contributingFile: buildContributingGuide("acme-widgets"),
@@ -23,19 +23,27 @@ func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 		adrTemplateFile:  buildADRTemplate(),
 	}
 	for name, doc := range documents {
-		var off []string
 		if name == prTemplateFile {
-			off = []string{"MD013"}
 			if findings := forge.BodyHardWrapFindings(doc); len(findings) != 0 {
 				t.Errorf("%s contains hard-wrapped prose: %v", name, findings)
 			}
+			doc = strings.Replace(doc, prTemplateOpsMarker, "A change to verify.", 1)
 		}
-		if findings := testsupport.MarkdownFindingsWith(doc, off...); len(findings) != 0 {
+		if findings := testsupport.MarkdownFindings(doc); len(findings) != 0 {
 			t.Errorf("%s breaks markdownlint rules: %v\n%s", name, findings, doc)
 		}
 		if strings.Contains(doc, "markdownlint-disable") {
 			t.Errorf("%s disables a lint rule it should satisfy", name)
 		}
+	}
+}
+
+// TestPriorPresetChecklistExceedsDefaultWidth demonstrates MD013 on the previous checklist.
+func TestPriorPresetChecklistExceedsDefaultWidth(t *testing.T) {
+	prior := mustRead(t, filepath.Join(prTemplateFixtures, "preset.md.prior"))
+	body := strings.Replace(prior, prTemplateOpsMarker, "A change to verify.", 1)
+	if !strings.Contains(strings.Join(testsupport.MarkdownFindings(body), "\n"), "MD013") {
+		t.Fatal("expected the previous checklist to exceed the default width")
 	}
 }
 

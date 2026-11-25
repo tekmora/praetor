@@ -19,7 +19,12 @@ type ReplaceOptions struct {
 	Mode     os.FileMode
 	// ExpectedLimit raises only the prior snapshot read bound for a bounded recovery.
 	ExpectedLimit int64
+	// AcceptCurrent lets a refresh succeed if a competing writer already published its exact bytes.
+	AcceptCurrent bool
 }
+
+// errSnapshotChanged identifies a readable file whose bytes differ from the expected snapshot.
+var errSnapshotChanged = errors.New("snapshot changed before replacement")
 
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
 // Cooperative writers serialize on that directory (LockDirectory: the writers of one process
@@ -80,6 +85,9 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
 	mode, err := verifyReplacement(ctx, root, name, options)
+	if options.AcceptCurrent && errors.Is(err, errSnapshotChanged) {
+		return confirmConcurrentReplacement(ctx, root, name, data, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -94,6 +102,18 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 		return fmt.Errorf("publish snapshot (inspect %s): %w", stagedPath(root, stage), err)
 	}
 	return SyncDirectory(ctx, root)
+}
+
+// confirmConcurrentReplacement rechecks the winner through the same pinned and locked parent.
+func confirmConcurrentReplacement(ctx context.Context, root *os.Root, name string, data []byte, conflict error) error {
+	current, exists, err := ObserveRootSnapshot(ctx, root, name)
+	if err != nil {
+		return errors.Join(conflict, err)
+	}
+	if exists && bytes.Equal(current, data) {
+		return nil
+	}
+	return conflict
 }
 
 // stagedPath names the staging entry the way the operator has to look for it. Every
@@ -197,7 +217,7 @@ func verifyReplacement(ctx context.Context, root *os.Root, name string, options 
 		return 0, err
 	}
 	if !bytes.Equal(current.Bytes(), options.Expected) {
-		return 0, fmt.Errorf("snapshot changed before replacement: %s", name)
+		return 0, fmt.Errorf("%w: %s", errSnapshotChanged, name)
 	}
 	return options.Mode & info.Mode().Perm(), nil
 }

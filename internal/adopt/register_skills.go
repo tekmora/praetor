@@ -42,6 +42,7 @@ var priorSkillDigests = map[string]map[string]string{
 		"5f142b7db4b084bd6168bcad862e7860688b4b8e43f3ed997dd5ed0cc77b05f2": "inline credit, no repository path an adopter lacks (#850)",
 		"fe90eab731a01498ea5e18e8af0af6c935e780bd11567c2a54d3db96b72d954b": "line breaks and lists in forge text (#1099)",
 		"6e07a86ad75526dcba168c3ff18a5d90eb2ca0da2cda41ca5d543acf36dead4d": "passes markdownlint's default rules: 80 columns, blank lines around blocks (#70)",
+		"66ef24147fdb073c2bfd3ffacf29c90e2720f4710d276fc9df6392513c62bc9b": "PR prose belongs under the shared Description heading (#2063)",
 	},
 	compiler.CanonicalSkillRel("caveman"): {
 		"c0ab6d15d42d9dab2640eb53abf7865495ab99979931cd463540646974d59b49": "first shipped, REUSE header and upstream credit (#235)",

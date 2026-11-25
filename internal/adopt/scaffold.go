@@ -267,7 +267,7 @@ const snapshotModeBits os.FileMode = 0o644
 // the interceptor, is written the way it is created and replaced under --force (writeRepoFile),
 // without that binding: the snapshot writers set no execute bit.
 func (s *adoptSession) publishPriorRefresh(ctx context.Context, full string, actual, content []byte, sc scaffold) error {
-	options := contextopt.ReplaceOptions{Expected: actual, Exists: true, Mode: sc.perm}
+	options := contextopt.ReplaceOptions{Expected: actual, Exists: true, Mode: sc.perm, AcceptCurrent: true}
 	switch {
 	case sc.confined:
 		return contextopt.ReplaceSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), content, options)

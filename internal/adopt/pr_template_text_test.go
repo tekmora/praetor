@@ -4,18 +4,86 @@
 package adopt
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"maps"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 const prTemplateFixtures = "testdata/pr-template"
 
+// prTemplateOpsMarker is replaced verbatim when ops fills the PR description.
+const prTemplateOpsMarker = "<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->"
+
+// priorPRTemplateFiles lists the recorded renderings in filename order.
+var priorPRTemplateFiles = [...]string{
+	"hiss-16.md.prior",
+	"hiss.md.prior",
+	"preset.md.prior",
+	"unwrapped.md.prior",
+	"wrapped.md.prior",
+}
+
+// checkPRTemplateFixtures reads at most one entry beyond the recorded inventory.
+func checkPRTemplateFixtures(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	names, readErr := f.Readdirnames(len(priorPRTemplateFiles) + 1)
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if err := errors.Join(readErr, f.Close()); err != nil {
+		return err
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, priorPRTemplateFiles[:]) {
+		return fmt.Errorf("prior PR template fixtures: found %v, want %v", names, priorPRTemplateFiles)
+	}
+	return nil
+}
+
+// TestPriorPRTemplateFixtureInventory rejects missing, substituted and extra entries.
+func TestPriorPRTemplateFixtureInventory(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range priorPRTemplateFiles[1:] {
+		mustWrite(t, filepath.Join(dir, name), "fixture\n")
+	}
+	if err := checkPRTemplateFixtures(dir); err == nil {
+		t.Fatal("accepted a missing fixture")
+	}
+	mustWrite(t, filepath.Join(dir, "unknown"), "fixture\n")
+	if err := checkPRTemplateFixtures(dir); err == nil {
+		t.Fatal("accepted an unknown name in place of the missing fixture")
+	}
+	mustWrite(t, filepath.Join(dir, priorPRTemplateFiles[0]), "fixture\n")
+	if err := checkPRTemplateFixtures(dir); err == nil {
+		t.Fatal("accepted an extra fixture")
+	}
+}
+
 // TestPRTemplateMatchesScaffold guards the engine's copy byte for byte.
 func TestPRTemplateMatchesScaffold(t *testing.T) {
 	if got := repoText(t, sourceCheckout, prTemplateFile); got != buildPullRequestTemplate() {
 		t.Fatalf("%s differs from buildPullRequestTemplate()", prTemplateFile)
+	}
+}
+
+// TestPRTemplateSocialTextHeading ties the writing instructions to the preset heading.
+func TestPRTemplateSocialTextHeading(t *testing.T) {
+	want := "prose under `" + prDescriptionHeading + "`"
+	if !strings.Contains(sourceSkillText(t, "social-text"), want) {
+		t.Fatalf("social-text must direct authors to %s", prDescriptionHeading)
+	}
+	previous := filepath.Join(priorSkillFixtures, "social-text", "ship-70.SKILL.md.prior")
+	if strings.Contains(mustRead(t, previous), want) {
+		t.Fatal("the prior skill unexpectedly satisfies the updated heading check")
 	}
 }
 
@@ -55,8 +123,7 @@ func TestPRTemplatePresetHeadings(t *testing.T) {
 func TestPRTemplateChecklistLayout(t *testing.T) {
 	body := buildPullRequestTemplate()
 	description, checklist, ok := strings.Cut(body, "\n"+prChecklistHeading+"\n")
-	const placeholder = "<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->"
-	if !ok || description != "# Pull Request\n\n"+prDescriptionHeading+"\n\n"+placeholder+"\n" {
+	if !ok || description != "# Pull Request\n\n"+prDescriptionHeading+"\n\n"+prTemplateOpsMarker+"\n" {
 		t.Fatal("expected the title and description placeholder immediately before the checklist")
 	}
 	intro, _, _ := strings.Cut(checklist, "\n### ")
@@ -80,14 +147,27 @@ func TestPriorPRTemplateDigests(t *testing.T) {
 	}
 	older := maps.Clone(priorPRTemplateDigests)
 	delete(older, current)
-	assertPriorDigestsReproduced(t, prTemplateFixtures, older)
+	for _, name := range priorPRTemplateFiles {
+		data := mustRead(t, filepath.Join(prTemplateFixtures, name))
+		digest := fixtureDigest(t, name, []byte(data))
+		if _, ok := older[digest]; !ok {
+			t.Fatalf("%s has an unknown or duplicate digest %s", name, digest)
+		}
+		delete(older, digest)
+	}
+	if len(older) != 0 {
+		t.Fatalf("prior renderings without a fixture: %v", older)
+	}
 }
 
 // TestForgeText_PriorTemplate verifies readoption of every shipped version in an adopter's checkout.
 func TestForgeText_PriorTemplate(t *testing.T) {
 	current := buildPullRequestTemplate()
-	for name, data := range readFixtureDir(t, prTemplateFixtures) {
-		prior := string(data)
+	if err := checkPRTemplateFixtures(prTemplateFixtures); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range priorPRTemplateFiles {
+		prior := mustRead(t, filepath.Join(prTemplateFixtures, name))
 		edited := prior + "Custom paragraph.\n"
 		for _, tc := range []struct {
 			name, before, want string
