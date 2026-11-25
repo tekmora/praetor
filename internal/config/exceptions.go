@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	slashpath "path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
 	"github.com/cordanaLLM/praetor/internal/util"
 	"github.com/cordanaLLM/praetor/tools/secrets/rules"
@@ -494,8 +496,8 @@ func (e Exception) Problem(today time.Time) string {
 
 // AppliesToHISSScanner reports whether e is routed to the internal/hiss invariant scanner: its
 // entry sets no delegating tool and names a target in a rule/language cell the scanner decides.
-func (e Exception) AppliesToHISSScanner() bool {
-	return e.Tool == "" && hisscatalog.ScannerDecides(e.Rule, e.Target())
+func (e Exception) AppliesToHISSScanner(contentLanguage func(string) string) bool {
+	return e.Tool == "" && hisscatalog.ScannerDecides(e.Rule, e.Target(), contentLanguage)
 }
 
 // functionProblem validates optional function scoping on HISS scanner exceptions.
@@ -503,7 +505,7 @@ func (e Exception) functionProblem() string {
 	if e.Function == "" {
 		return ""
 	}
-	if !e.AppliesToHISSScanner() {
+	if !e.AppliesToHISSScanner(hiss.ContentCandidateLanguage) {
 		return e.nonScannerFunctionProblem()
 	}
 	if e.Path == "" || e.Glob != "" {
@@ -617,7 +619,7 @@ func (e Exception) declaredLintersTargetProblem() string {
 // pathOrGlobTargetProblem checks that path and glob are mutually exclusive and well-formed,
 // enforcing single-file path targets on HISS scanner entries and HISS-11 supply-chain entries.
 func (e Exception) pathOrGlobTargetProblem() string {
-	if (e.AppliesToHISSScanner() || e.Rule == ExceptionRuleSupplyChain) && (e.Path == "" || e.Glob != "") {
+	if e.Rule == ExceptionRuleSupplyChain && (e.Path == "" || e.Glob != "") {
 		return fmt.Sprintf("rule %s must name one file by path, not a glob", e.Rule)
 	}
 	if (e.Path == "") == (e.Glob == "") {
@@ -633,7 +635,34 @@ func (e Exception) pathOrGlobTargetProblem() string {
 	if problem := StyleExclusionProblem(e.Glob); problem != "" {
 		return fmt.Sprintf("glob %q %s", e.Glob, problem)
 	}
+	return e.scannerGlobProblem()
+}
+
+// scannerGlobProblem requires an exact path when an undelegated glob could cover a scanner
+// cell. A wildcard in the extension (or in a basename without one) cannot fix a language.
+func (e Exception) scannerGlobProblem() string {
+	if e.Tool != "" || !hisscatalog.IsScannerRule(e.Rule) {
+		return ""
+	}
+	dir, name := slashpath.Split(e.Glob)
+	suffix := slashpath.Ext(name)
+	if suffix == "" {
+		suffix = name
+	}
+	if strings.ContainsAny(suffix, globCharacters) {
+		return fmt.Sprintf("rule %s glob %q has an ambiguous language: name one file by path or delegate with tool", e.Rule, e.Glob)
+	}
+	if e.AppliesToHISSScanner(hiss.ContentCandidateLanguage) || e.globCoversWorkflowCell(dir, name) {
+		return fmt.Sprintf("rule %s must name one file by path, not a glob", e.Rule)
+	}
 	return ""
+}
+
+// globCoversWorkflowCell checks the workflow scanner when a directory pattern can reach it.
+func (e Exception) globCoversWorkflowCell(dir, name string) bool {
+	return ghworkflow.IsYAMLName(name) &&
+		util.MatchGlobSegments(strings.Split(strings.TrimSuffix(dir, "/"), "/"), strings.Split(ghworkflow.Dir, "/")) &&
+		hisscatalog.ScannerDecides(e.Rule, ghworkflow.Dir+"/"+name, hiss.ContentCandidateLanguage)
 }
 
 // rootLicenseTargetProblem requires a root-license-notice or reuse-annotation-order entry to name

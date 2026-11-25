@@ -74,7 +74,7 @@ func (c violationClass) lines(limit int) []string {
 	out := make([]string, 0, shown+1)
 	for i := 0; i < shown; i++ {
 		v := c.items[i]
-		out = append(out, fmt.Sprintf("  [%s] %s:%d - %s (%s)", v.RuleID, v.FilePath, v.LineNumber, v.Message, c.tagOf(i)))
+		out = append(out, fmt.Sprintf("  [%s] %s:%d - %s (%s)", v.RuleID, NormalizePath(v.FilePath), v.LineNumber, v.Message, c.tagOf(i)))
 	}
 	hidden := len(c.items) - shown
 	if hidden == 0 {

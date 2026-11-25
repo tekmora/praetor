@@ -108,23 +108,30 @@ func isScannableExt(ext string) bool {
 	return scannerIndex(ext) >= 0
 }
 
-// isContentCandidate reports whether a content scanner may claim rel, a path whose lower-cased
-// extension is ext, once its bytes are read.
-func isContentCandidate(rel, ext string) bool {
+// ContentCandidateLanguage names the first content scanner that would inspect rel, or "".
+// Manifest validation can use this before a scan. Only claimingScanner decides ownership.
+func ContentCandidateLanguage(rel string) string {
 	slashRel := filepath.ToSlash(rel)
+	ext := strings.ToLower(filepath.Ext(rel))
 	for i := 0; i < len(languageScanners); i++ {
 		if c, ok := languageScanners[i].(contentScanner); ok && c.candidate(slashRel, ext) {
-			return true
+			return c.name()
 		}
 	}
-	return false
+	return ""
+}
+
+// ClaimedContentLanguage returns the language that claimed rel during this scan, or "".
+// rel is a slash-separated repository path.
+func (r *ScanReport) ClaimedContentLanguage(rel string) string {
+	return r.contentClaims[rel]
 }
 
 // mayScan reports whether rel, by its path alone, is a file some language scanner may read: an
 // extension a scanner owns, or a path a content scanner may claim from its bytes.
 func mayScan(rel string) bool {
 	ext := strings.ToLower(filepath.Ext(rel))
-	return isScannableExt(ext) || isContentCandidate(rel, ext)
+	return isScannableExt(ext) || ContentCandidateLanguage(rel) != ""
 }
 
 // claimingScanner returns the index of the content scanner that claims src, a file whose
@@ -155,7 +162,7 @@ func fileLanguage(s languageScanner, rel string) string {
 func (w *scanWalker) scanFile(path, rel string) error {
 	ext := strings.ToLower(filepath.Ext(rel))
 	idx := scannerIndex(ext)
-	if idx < 0 && !isContentCandidate(rel, ext) {
+	if idx < 0 && ContentCandidateLanguage(rel) == "" {
 		w.rep.Coverage.recordUnscanned(rel)
 		return nil
 	}
@@ -169,6 +176,7 @@ func (w *scanWalker) scanFile(path, rel string) error {
 			w.rep.Coverage.recordUnscanned(rel)
 			return nil
 		}
+		w.rep.contentClaims[filepath.ToSlash(rel)] = languageScanners[idx].name()
 	}
 	scanner := languageScanners[idx]
 	if !w.admit(idx) || !w.scanAnchored(scanner, src) {

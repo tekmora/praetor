@@ -6,9 +6,7 @@ package hisscatalog
 
 import (
 	slashpath "path"
-	"strings"
 
-	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -46,51 +44,34 @@ const (
 	scanCode   = ScanGo | ScanC | ScanRust | ScanPython | scanScript | ScanShell | ScanGitHubActions
 )
 
-// sourceLanguageBits maps util.SourceLanguage names to their ScannerLanguage bit.
+// sourceLanguageBits maps source and content scanner language names to catalog bits.
 var sourceLanguageBits = map[string]ScannerLanguage{
-	"go":         ScanGo,
-	"rust":       ScanRust,
-	"python":     ScanPython,
-	"javascript": ScanJavaScript,
-	"typescript": ScanTypeScript,
-	"svelte":     ScanSvelte,
-	"shell":      ScanShell,
+	"go":             ScanGo,
+	"rust":           ScanRust,
+	"python":         ScanPython,
+	"javascript":     ScanJavaScript,
+	"typescript":     ScanTypeScript,
+	"svelte":         ScanSvelte,
+	"shell":          ScanShell,
+	"github-actions": ScanGitHubActions,
+	"systemd":        ScanSystemd,
+	"ansible":        ScanAnsible,
 }
 
-// ScannerLanguageForPath maps a repository-relative path or glob target to the language scanner
-// internal/hiss dispatches for it, or 0 when no HISS language scanner owns it.
-func ScannerLanguageForPath(rel string) ScannerLanguage {
-	slashRel := strings.TrimSpace(util.NormalizeSlashes(rel))
-	if slashRel == "" {
+// ScannerLanguageForPath resolves a target using its extension or the supplied content
+// scanner decision. Validation supplies candidates and an audit supplies the scan's claims.
+func ScannerLanguageForPath(rel string, contentLanguage func(string) string) ScannerLanguage {
+	rel = util.NormalizeSlashes(rel)
+	if rel == "" {
 		return 0
 	}
-	if ghworkflow.IsWorkflowPath(slashRel) {
-		return ScanGitHubActions
-	}
-	_, name := slashpath.Split(slashRel)
-	ext := strings.ToLower(slashpath.Ext(name))
-	if hiss.IsNativeExtension(ext) {
+	if hiss.IsNativeExtension(slashpath.Ext(rel)) {
 		return ScanC
 	}
-	if lang, ok := specialScannerLanguage(name, ext); ok {
+	if lang := sourceLanguageBits[util.SourceLanguage(rel)]; lang != 0 {
 		return lang
 	}
-	return sourceLanguageBits[util.SourceLanguage(name)]
-}
-
-// specialScannerLanguage classifies content-claimed extensions and extensionless shell targets.
-func specialScannerLanguage(name, ext string) (ScannerLanguage, bool) {
-	switch ext {
-	case ".service", ".socket":
-		return ScanSystemd, true
-	case ".yml", ".yaml":
-		return ScanAnsible, true
-	case "":
-		if name != "" && !strings.ContainsAny(name, "*?[") {
-			return ScanShell, true
-		}
-	}
-	return 0, false
+	return sourceLanguageBits[contentLanguage(rel)]
 }
 
 // ScannerDecidesLanguage reports whether the internal/hiss scanner decides r for lang.
@@ -99,15 +80,15 @@ func (r Rule) ScannerDecidesLanguage(lang ScannerLanguage) bool {
 }
 
 // ScannerDecidesPath reports whether the internal/hiss scanner decides r for rel.
-func (r Rule) ScannerDecidesPath(rel string) bool {
-	return r.ScannerDecidesLanguage(ScannerLanguageForPath(rel))
+func (r Rule) ScannerDecidesPath(rel string, contentLanguage func(string) string) bool {
+	return r.ScannerDecidesLanguage(ScannerLanguageForPath(rel, contentLanguage))
 }
 
 // ScannerDecides reports whether id is a catalog invariant whose internal/hiss scanner cell
 // covers rel.
-func ScannerDecides(id, rel string) bool {
+func ScannerDecides(id, rel string, contentLanguage func(string) string) bool {
 	rule, ok := LookupRule(id)
-	return ok && rule.ScannerDecidesPath(rel)
+	return ok && rule.ScannerDecidesPath(rel, contentLanguage)
 }
 
 // IsScannerRule reports whether the internal/hiss scanner decides id in at least one language.

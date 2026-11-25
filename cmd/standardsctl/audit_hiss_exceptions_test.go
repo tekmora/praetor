@@ -56,7 +56,7 @@ func TestApplyHISSExceptions_HISS04FunctionScopeOnlyExcusesTarget(t *testing.T) 
 	var remaining []hiss.InvariantViolation
 	out, err := captureStdout(t, func() error {
 		var applyErr error
-		remaining, applyErr = applyHISSExceptions(violations, entries, scannerExceptionsToday)
+		remaining, applyErr = applyHISSExceptions(&hiss.ScanReport{Violations: violations}, entries, scannerExceptionsToday)
 		return applyErr
 	})
 	if err != nil {
@@ -81,14 +81,14 @@ func TestApplyHISSExceptions_RustHISS07TargetAndFunctionScope(t *testing.T) {
 	var byPath, byFunc []hiss.InvariantViolation
 	if _, err := captureStdout(t, func() error {
 		var applyErr error
-		byPath, applyErr = applyHISSExceptions(rep.Violations, []config.Exception{scannerTestEntry("HISS-07", "src/lib.rs", "", "2026-11-20")}, scannerExceptionsToday)
+		byPath, applyErr = applyHISSExceptions(rep, []config.Exception{scannerTestEntry("HISS-07", "src/lib.rs", "", "2026-11-20")}, scannerExceptionsToday)
 		return applyErr
 	}); err != nil || len(byPath) != 1 || filepath.ToSlash(byPath[0].FilePath) != "src/other.rs" {
 		t.Fatalf("file-scoped Rust HISS-07: err=%v remaining=%+v", err, byPath)
 	}
 	if _, err := captureStdout(t, func() error {
 		var applyErr error
-		byFunc, applyErr = applyHISSExceptions(rep.Violations, []config.Exception{scannerTestEntry("HISS-07", "src/lib.rs", "parse_header", "2026-11-20")}, scannerExceptionsToday)
+		byFunc, applyErr = applyHISSExceptions(rep, []config.Exception{scannerTestEntry("HISS-07", "src/lib.rs", "parse_header", "2026-11-20")}, scannerExceptionsToday)
 		return applyErr
 	}); err != nil || len(byFunc) != 2 {
 		t.Fatalf("function-scoped Rust HISS-07: err=%v remaining=%+v", err, byFunc)
@@ -98,10 +98,10 @@ func TestApplyHISSExceptions_RustHISS07TargetAndFunctionScope(t *testing.T) {
 // TestApplyHISSExceptions_ExpiredAndUnusedScannerEntriesFail verifies that unused HISS-04 and Rust
 // HISS-07 entries fail as stale, while expired entries leave violations unexcused and fail expiry.
 func TestApplyHISSExceptions_ExpiredAndUnusedScannerEntriesFail(t *testing.T) {
-	_, err := applyHISSExceptions(nil, []config.Exception{scannerTestEntry("HISS-04", "sizer.go", "Gone", "2026-11-20")}, scannerExceptionsToday)
+	_, err := applyHISSExceptions(&hiss.ScanReport{}, []config.Exception{scannerTestEntry("HISS-04", "sizer.go", "Gone", "2026-11-20")}, scannerExceptionsToday)
 	mustErrContain(t, err, "HISS exception (rule HISS-04, sizer.go) is unused")
 
-	_, err = applyHISSExceptions(nil, []config.Exception{scannerTestEntry("HISS-07", "src/clean.rs", "", "2026-11-20")}, scannerExceptionsToday)
+	_, err = applyHISSExceptions(&hiss.ScanReport{}, []config.Exception{scannerTestEntry("HISS-07", "src/clean.rs", "", "2026-11-20")}, scannerExceptionsToday)
 	mustErrContain(t, err, "HISS exception (rule HISS-07, src/clean.rs) is unused")
 
 	violations := []hiss.InvariantViolation{
@@ -112,7 +112,7 @@ func TestApplyHISSExceptions_ExpiredAndUnusedScannerEntriesFail(t *testing.T) {
 		{Rule: "HISS-04", Path: "sizer.go", Function: "Oversized", Category: "C", Entered: "2026-10-25", Expires: "2026-11-04", Reason: "expired HISS-04"},
 		{Rule: "HISS-07", Path: "src/lib.rs", Category: "C", Entered: "2026-10-25", Expires: "2026-11-04", Reason: "expired Rust HISS-07"},
 	}
-	remaining, err := applyHISSExceptions(violations, expired, scannerExceptionsToday)
+	remaining, err := applyHISSExceptions(&hiss.ScanReport{Violations: violations}, expired, scannerExceptionsToday)
 	if err != nil || len(remaining) != 2 {
 		t.Fatalf("expired entries must mark used without excusing findings: err=%v remaining=%+v", err, remaining)
 	}
@@ -121,7 +121,7 @@ func TestApplyHISSExceptions_ExpiredAndUnusedScannerEntriesFail(t *testing.T) {
 	live := []config.Exception{scannerTestEntry("HISS-04", "sizer.go", "Oversized", "2026-11-20"), scannerTestEntry("HISS-07", "src/lib.rs", "", "2026-11-20")}
 	if _, err := captureStdout(t, func() error {
 		var applyErr error
-		remaining, applyErr = applyHISSExceptions(violations, live, scannerExceptionsToday)
+		remaining, applyErr = applyHISSExceptions(&hiss.ScanReport{Violations: violations}, live, scannerExceptionsToday)
 		return applyErr
 	}); err != nil || len(remaining) != 0 {
 		t.Fatalf("renewed entries must excuse both findings: err=%v remaining=%+v", err, remaining)
@@ -145,11 +145,11 @@ func TestApplyHISSExceptions_DelegatedEntriesSkipScannerRoute(t *testing.T) {
 	if err := config.ValidateExceptions(entries, scannerExceptionsToday); err != nil {
 		t.Fatalf("delegated entries failed validation: %v", err)
 	}
-	if remaining, err := applyHISSExceptions(nil, entries, scannerExceptionsToday); err != nil || len(remaining) != 0 {
+	if remaining, err := applyHISSExceptions(&hiss.ScanReport{}, entries, scannerExceptionsToday); err != nil || len(remaining) != 0 {
 		t.Fatalf("delegated entries judged by scanner route: err=%v remaining=%+v", err, remaining)
 	}
 	violations := []hiss.InvariantViolation{{RuleID: "HISS-04", FilePath: "sizer.go", LineNumber: 3, Symbol: "Oversized", Anchor: "fn:Oversized"}}
-	remaining, err := applyHISSExceptions(violations, entries, scannerExceptionsToday)
+	remaining, err := applyHISSExceptions(&hiss.ScanReport{Violations: violations}, entries, scannerExceptionsToday)
 	if err != nil || len(remaining) != 1 {
 		t.Fatalf("tool-delegated HISS-04 entry must not excuse HISS scanner LOC finding: err=%v remaining=%+v", err, remaining)
 	}
@@ -204,7 +204,7 @@ func TestApplyHISSExceptions_Control_HISS02AndWorkflowRule(t *testing.T) {
 	var remaining []hiss.InvariantViolation
 	_, err := captureStdout(t, func() error {
 		var applyErr error
-		remaining, applyErr = applyHISSExceptions(violations, entries, scannerExceptionsToday)
+		remaining, applyErr = applyHISSExceptions(&hiss.ScanReport{Violations: violations}, entries, scannerExceptionsToday)
 		return applyErr
 	})
 	if err != nil || len(remaining) != 1 || remaining[0].Symbol != "Other" {

@@ -178,3 +178,33 @@ func TestValidateExceptions_Control_HISS02FunctionScope(t *testing.T) {
 		t.Fatal("control HISS-10 function-scoped exception accepted")
 	}
 }
+
+// TestValidateExceptions_AmbiguousScannerGlob checks mixed-language globs, explicit
+// delegation, fixed-language targets and directory patterns that reach workflow YAML.
+func TestValidateExceptions_AmbiguousScannerGlob(t *testing.T) {
+	cases := []struct {
+		rule, path, glob, tool, problem string
+	}{
+		{"HISS-04", "", "src/*", "", `rule HISS-04 glob "src/*" has an ambiguous language`},
+		{"HISS-09", "", "src/*", "", "delegate with tool"},
+		{"HISS-04", "", "src/*.[gr]*", "", "delegate with tool"},
+		{"HISS-04", "", "src/*", "golangci-lint", ""},
+		{"HISS-04", "src/main.go", "", "", ""},
+		{"HISS-04", "", "src/*.java", "", ""},
+		{"HISS-08", "", "src/**/*.rs", "", ""},
+		{"HISS-04", "", "**/*.yaml", "", "must name one file by path"},
+		{"HISS-04", "", "src/**/*.yaml", "", ""},
+	}
+	for _, tc := range cases {
+		entry := buildScannerCellEntry(tc.rule, tc.path, tc.glob, "")
+		entry.Tool = tc.tool
+		err := config.ValidateExceptions([]config.Exception{entry}, scannerRoutingToday)
+		if tc.problem == "" {
+			if err != nil {
+				t.Errorf("%s %s (tool %q): %v", tc.rule, entry.Target(), tc.tool, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), tc.problem) {
+			t.Errorf("%s %s: got %v, want %q", tc.rule, tc.glob, err, tc.problem)
+		}
+	}
+}
