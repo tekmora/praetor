@@ -85,11 +85,11 @@ func (r *makefileEvidenceReader) declaration(line, target string) bool {
 func (r *makefileEvidenceReader) rule(line string, colon int, target string) bool {
 	head := strings.Trim(line[:colon], " \t")
 	names := strings.Fields(head)
-	if len(names) == 0 || !makefileLiteralWords(head) || strings.Contains(line, "$") {
+	if strings.Contains(line, "$") || !makefileLiteralWords(head) || !makefileAllowedRule(line, colon, makefileNames) {
 		return false
 	}
 	literal, recipe := makefileLiteralRuleTail(line[colon+1:])
-	if !literal || makefileRuleCanReplace(names, target) {
+	if !literal || makefileEvidenceRefusesSpelling(names, target) {
 		return false
 	}
 	r.inRule = true
@@ -106,11 +106,10 @@ func (r *makefileEvidenceReader) rule(line string, colon int, target string) boo
 	return true
 }
 
-// makefileRuleCanReplace reports whether a rule can remake the makefile or replace the requested recipe under another spelling.
-func makefileRuleCanReplace(names []string, target string) bool {
+// makefileEvidenceRefusesSpelling reports a forbidden dot target or an alternate spelling of the requested target.
+func makefileEvidenceRefusesSpelling(names []string, target string) bool {
 	return slices.ContainsFunc(names, func(name string) bool {
-		normalized := makefileNormalizeName(name)
-		return makefileIsMakefileName(normalized) || (name != target && normalized == target)
+		return makefileForbiddenDotTarget(name) || (name != target && makefileNormalizeName(name) == target)
 	})
 }
 

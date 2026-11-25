@@ -100,11 +100,29 @@ func TestAudit_MakeTargetBodyShapes(t *testing.T) {
 // TestAudit_MakeWholeFile verifies that an unsupported file defeats even a matching forge assertion.
 func TestAudit_MakeWholeFile(t *testing.T) {
 	const rule = "check: ; @true\n"
-	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: [make:check, forge:required_signatures]\n"
+	const registry = "version: 1\nrules:\n  - id: HISS-01\n    class: ci-gate\n    evidence: "
+	t.Run("phony literal rule", func(t *testing.T) {
+		root := fixtureRoot(t, registry+"[make:check]\n")
+		writeTestFile(t, root, "Makefile", ".PHONY: check\n"+rule)
+		report, err := Audit(t.Context(), root)
+		assertLocalEvidenceStatus(t, report, err, false)
+	})
 	opts := forgeOptions(ForgeRequiredSignatures, forgeState("required", "required", true, true), nil)
 	for _, tc := range [...]struct{ name, makefile string }{
 		{"later empty recipe", rule + "check: ;\n"},
 		{"later rule without recipe", rule + "other check: dep\n"},
+		{"suffix remake", rule + ".SUFFIXES: .next\n.next: ; cp Makefile.next Makefile\n"},
+		{"suffix list alone", rule + ".SUFFIXES: .next\n"},
+		{"single suffix", rule + ".next: ; @true\n"},
+		{"double suffix", rule + ".next.mk: ; @true\n"},
+		{"dot target in list", rule + "other .DEFAULT: ; @true\n"},
+		{"dot-prefixed path", rule + "./other: ; @true\n"},
+		{"implicit source prerequisite", rule + "other: Makefile.c\n"},
+		{"pattern rule", rule + "%: %.next\n"},
+		{"pattern prerequisite", rule + "other: | %.next\n"},
+		{"static pattern rule", rule + "other: %: %.next\n"},
+		{"VPATH assignment", rule + "VPATH := src\n"},
+		{"vpath directive", rule + "vpath %.mk src\n"},
 		{"remade Makefile", rule + "Makefile: next.mk ; cp next.mk Makefile\n"},
 		{"included recipe prefix", "include settings.mk\ncheck:\n\tX := one\n"},
 		{"optional include", rule + "-include settings.mk\n"},
@@ -114,7 +132,7 @@ func TestAudit_MakeWholeFile(t *testing.T) {
 		{"BOM hides conditional", "\ufeffifeq (a,b)\ncheck: dep\nendif\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := fixtureRoot(t, registry)
+			root := fixtureRoot(t, registry+"[make:check, forge:required_signatures]\n")
 			writeTestFile(t, root, "settings.mk", ".RECIPEPREFIX := >\n")
 			writeTestFile(t, root, "Makefile", tc.makefile)
 			report, err := AuditWithOptions(t.Context(), root, opts)

@@ -88,10 +88,14 @@ func makefileIsCLIVariableLine(line string) bool {
 	return MakefileIsCLIVariableLine(line)
 }
 
+// makefileNames contains the makefiles protected from explicit and implicit remake rules.
+var makefileNames = map[string]struct{}{"Makefile": {}, "makefile": {}, "GNUmakefile": {}}
+
 // makefileIsMakefileName reports whether name is one of the names Make treats as its makefile.
 // Make remakes its own makefile and re-execs, so a rule for any of these names can rewrite an include.
 func makefileIsMakefileName(name string) bool {
-	return name == "Makefile" || name == "makefile" || name == "GNUmakefile"
+	_, ok := makefileNames[name]
+	return ok
 }
 
 // makefileTrackedLiteralShapes reports whether every non-recipe line in lines is an allowed shape
@@ -275,6 +279,9 @@ func makefileAllowedPrerequisites(line string, colon int, operands map[string]st
 	return true
 }
 
+// makefileAllowedTargets reports whether every target in a rule head is a literal name the audit can prove:
+// no forbidden syntax, no followed operand or makefile name, no special dot target other than .PHONY, and
+// no implicit-rule target or prerequisite.
 func makefileAllowedTargets(head string, operands map[string]struct{}) bool {
 	fields := strings.Fields(head)
 	if len(fields) == 0 {
@@ -288,7 +295,7 @@ func makefileAllowedTargets(head string, operands map[string]struct{}) bool {
 		if _, followed := operands[name]; followed || makefileIsMakefileName(name) {
 			return false
 		}
-		if strings.HasPrefix(name, ".") && name != ".PHONY" {
+		if makefileForbiddenDotTarget(name) {
 			return false
 		}
 		if makefileImplicitRuleTargetOrPrereq(name, operands) {
@@ -296,6 +303,11 @@ func makefileAllowedTargets(head string, operands map[string]struct{}) bool {
 		}
 	}
 	return true
+}
+
+// makefileForbiddenDotTarget reports whether a dot target falls outside the special-target allow-list.
+func makefileForbiddenDotTarget(name string) bool {
+	return strings.HasPrefix(name, ".") && !makefileSpecialTargets[name]
 }
 
 func makefileImplicitRuleTargetOrPrereq(norm string, operands map[string]struct{}) bool {
@@ -503,6 +515,8 @@ func makefilePrerequisiteShape(rest string, operands map[string]struct{}) string
 	return ""
 }
 
+// makefileRuleTargetShape names why one rule target is not statically provable (computed, pattern, grouped,
+// unsupported syntax, a rule that remakes a makefile or operand, or a special dot target), or returns "".
 func makefileRuleTargetShape(field string, operands map[string]struct{}) string {
 	if strings.Contains(field, "$") {
 		return "computed target"
@@ -523,7 +537,7 @@ func makefileRuleTargetShape(field string, operands map[string]struct{}) string 
 	if makefileIsMakefileName(name) {
 		return "rule remakes " + name
 	}
-	if strings.HasPrefix(name, ".") && !makefileSpecialTargets[name] {
+	if makefileForbiddenDotTarget(name) {
 		return makefileSpecialDotTargetShape(name)
 	}
 	if makefileImplicitRuleTargetOrPrereq(name, operands) {
