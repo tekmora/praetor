@@ -25,7 +25,9 @@ All PRs must strictly adhere to the declared HISS invariants before merging:
 - [ ] **HISS-02** Every loop has a compile-time scalar upper bound.
 - [ ] **HISS-02** All network and disk I/O uses explicit context timeouts.
 - [ ] **HISS-03** Hot-path loops allocate zero heap bytes per tick.
-- [ ] **HISS-04** Meet the effective complexity limits from `.standards.yaml`.
+- [ ] **HISS-04** Meet the effective per-function limits from `.standards.yaml`.
+  - Function LOC <= 60 and statements <= 50.
+  - McCabe cyclomatic <= 10 and cognitive <= 15.
 
 #### Memory & Error Integrity
 

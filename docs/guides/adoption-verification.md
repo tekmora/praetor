@@ -2943,11 +2943,19 @@ never rewrites an existing `CONTRIBUTING.md`, `SECURITY.md` or
 `docs/adr/`: those belong to the repository once written (`internal/adopt/governance.go`),
 so delete their disable line by hand and wrap the lines it covered.
 
+The HISS-04 checklist in the pull request template gives four limits per function from the
+resolved `.standards.yaml` policy. For example, a repository that tightens McCabe cyclomatic
+complexity to 8 sees 8 alongside its effective cognitive complexity, function LOC and statement
+limits. Adoption uses the audit policy that `reconcilePolicyCatalog` loads, including the
+audit ceiling on function LOC. A dry run without the pinned policy reports why it skipped the
+template.
+
 An unedited pull request template matching a prior digest is refreshed automatically,
 including a CRLF checkout. The current template keeps each paragraph and list item on
 one physical line. Edited copies are preserved. `priorPRTemplateDigests` in
-`internal/adopt/governance.go` records the earlier text, replayed from
-`internal/adopt/testdata/pr-template/wrapped.md.prior`. `TestForgeText_PriorTemplate`
+`internal/adopt/governance.go` records the earlier renderings. The
+`internal/adopt/testdata/pr-template/policy-reference.md.prior` fixture covers the version
+that named the policy without stating its values. `TestForgeText_PriorTemplate`
 covers refresh, line endings and preservation. The [forge text policy](git-hooks.md#forge-text-policy)
 explains body wrapping and foreign references.
 

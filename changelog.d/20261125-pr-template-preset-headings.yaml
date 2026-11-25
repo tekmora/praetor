@@ -1,7 +1,8 @@
 type: fixed
 title: >-
   Align PR templates with the review preset and restore the repository's line-length rule after
-  the description marker. The checklist refers to the repository's complexity limits and asks
-  for actual test results. Authors paste a signed receipt when the gate issues one or record
+  the description marker. The checklist states the repository's effective numeric limits for
+  function length, cyclomatic and cognitive complexity, and statement count. It asks for actual
+  test results. Authors paste a signed receipt when the gate issues one or record
   which verification ran and why the gate issued no receipt. Readoption refreshes unedited
   templates and respects the requested permission ceiling when another writer finishes first.

@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/config"
 )
 
 const prTemplateFixtures = "testdata/pr-template"
@@ -29,6 +31,7 @@ var priorPRTemplateFiles = [...]string{
 	"concise.md.prior",
 	"hiss-16.md.prior",
 	"hiss.md.prior",
+	"policy-reference.md.prior",
 	"preset.md.prior",
 	"scoped-marker.md.prior",
 	"unwrapped.md.prior",
@@ -74,11 +77,37 @@ func TestPriorPRTemplateFixtureInventory(t *testing.T) {
 	}
 }
 
-// TestPRTemplateMatchesScaffold guards the engine's copy byte for byte.
+// TestPRTemplateMatchesScaffold compares the engine's copy with adoption under its pinned policy.
 func TestPRTemplateMatchesScaffold(t *testing.T) {
-	if got := repoText(t, sourceCheckout, prTemplateFile); got != buildPullRequestTemplate() {
-		t.Fatalf("%s differs from buildPullRequestTemplate()", prTemplateFile)
+	policy, err := config.LoadEffectivePolicyContext(t.Context(), config.EffectiveOptions{Root: sourceCheckout, Audit: true})
+	if err != nil {
+		t.Fatal(err)
 	}
+	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}, policy: policy}
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if repoText(t, sourceCheckout, prTemplateFile) != repoText(t, s.repoPath, prTemplateFile) {
+		t.Fatalf("%s differs from adoption under the engine's audit policy", prTemplateFile)
+	}
+}
+
+// TestPRTemplateUnresolvedPolicy refuses a live write and identifies the omitted dry-run preview.
+func TestPRTemplateUnresolvedPolicy(t *testing.T) {
+	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}}
+	if err := reconcilePullRequestTemplate(t.Context(), s); err == nil || !strings.Contains(err.Error(), "effective audit policy is unresolved") {
+		t.Fatalf("unresolved policy: got %v, want a named policy error", err)
+	}
+	assertAbsent(t, s.repoPath, prTemplateFile)
+	s.opts.DryRun = true
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	action := findLastAction(s.report.ActionDetails, prTemplateFile)
+	if action == nil || action.Action != actionSkip || !strings.Contains(action.Details, "requires the resolved audit policy") {
+		t.Errorf("unresolved preview: got %+v, want a skipped template with the policy reason", action)
+	}
+	assertAbsent(t, s.repoPath, prTemplateFile)
 }
 
 // TestPRTemplatesRequestActualTestResult checks both copies and replays the prefilled template.
@@ -156,7 +185,7 @@ func missingPresetHeading(body string) string {
 
 // TestPRTemplatePresetHeadings requires both headings, even if a missing one is quoted in a fence.
 func TestPRTemplatePresetHeadings(t *testing.T) {
-	body := buildPullRequestTemplate()
+	body := installedPRTemplate(t, t.TempDir(), nil)
 	for name, template := range map[string]string{
 		"scaffold":     body,
 		prTemplateFile: repoText(t, sourceCheckout, prTemplateFile),
@@ -177,7 +206,7 @@ func TestPRTemplatePresetHeadings(t *testing.T) {
 
 // TestPRTemplateChecklistLayout protects the ops replacement marker and the checklist hierarchy.
 func TestPRTemplateChecklistLayout(t *testing.T) {
-	body := buildPullRequestTemplate()
+	body := installedPRTemplate(t, t.TempDir(), nil)
 	description, checklist, ok := strings.Cut(body, "\n"+prChecklistHeading+"\n")
 	if !ok || description != "# Pull Request\n\n"+prDescriptionHeading+"\n\n"+prTemplateMarkerBlock+"\n" {
 		t.Fatal("expected the title and description placeholder immediately before the checklist")
@@ -195,9 +224,26 @@ func TestPRTemplateChecklistLayout(t *testing.T) {
 	}
 }
 
+// TestPRTemplateDefaultLimits checks a pinned catalog that declares no complexity limits.
+func TestPRTemplateDefaultLimits(t *testing.T) {
+	s, _ := catalogSession(t)
+	if err := reconcilePolicyCatalog(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	defaults := config.DefaultPolicy().Complexity
+	want := fmt.Sprintf("  - Function LOC <= %d and statements <= %d.\n  - McCabe cyclomatic <= %d and cognitive <= %d.\n",
+		defaults.MaxFuncLOC, defaults.MaxStatements, defaults.MaxCyclomatic, defaults.MaxCognitive)
+	if !strings.Contains(repoText(t, s.repoPath, prTemplateFile), want) {
+		t.Errorf("default checklist lacks %q", want)
+	}
+}
+
 // TestPriorPRTemplateDigests records the current rendering and replays each older fixture.
 func TestPriorPRTemplateDigests(t *testing.T) {
-	current := fixtureDigest(t, prTemplateFile, []byte(buildPullRequestTemplate()))
+	current := fixtureDigest(t, prTemplateFile, []byte(repoText(t, sourceCheckout, prTemplateFile)))
 	if _, ok := priorPRTemplateDigests[current]; !ok {
 		t.Fatalf("current scaffold digest %s is missing from priorPRTemplateDigests", current)
 	}
@@ -218,7 +264,7 @@ func TestPriorPRTemplateDigests(t *testing.T) {
 
 // TestForgeText_PriorTemplate verifies readoption of every shipped version in an adopter's checkout.
 func TestForgeText_PriorTemplate(t *testing.T) {
-	current := buildPullRequestTemplate()
+	current := installedPRTemplate(t, t.TempDir(), nil)
 	if err := checkPRTemplateFixtures(prTemplateFixtures); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +283,7 @@ func TestForgeText_PriorTemplate(t *testing.T) {
 				root := t.TempDir()
 				path := filepath.Join(root, prTemplateFile)
 				mustWrite(t, path, tc.before)
-				s := &adoptSession{repoPath: root, report: &AdoptReport{}}
+				s := ceilingPRTemplateSession(root)
 				if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
 					t.Fatal(err)
 				}

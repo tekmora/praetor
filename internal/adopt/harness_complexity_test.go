@@ -32,14 +32,17 @@ func complexityOverrideManifest(complexity string) string {
 func TestAdoptHarnessesStateEveryComplexityOverride(t *testing.T) {
 	facets := []string{"security:high", "api:public-contract", "docs:seo-portal", "agent:sandboxed", "custom:facet"}
 	cases := map[string]struct {
-		override, want string
+		override, want, checklist string
 	}{
 		"stricter override": {"    max_cyclomatic: 8\n    max_cognitive: 12\n    max_func_loc: 45\n    max_statements: 40\n",
-			"McCabe cyclomatic <= 8, cognitive <= 12, statements <= 40; func LOC <= 45"},
+			"McCabe cyclomatic <= 8, cognitive <= 12, statements <= 40; func LOC <= 45",
+			"  - Function LOC <= 45 and statements <= 40.\n  - McCabe cyclomatic <= 8 and cognitive <= 12."},
 		"looser cyclomatic": {"    max_cyclomatic: 20\n",
-			"McCabe cyclomatic <= 10, cognitive <= 15, statements <= 50; func LOC <= 60 (audit ceiling)"},
+			"McCabe cyclomatic <= 10, cognitive <= 15, statements <= 50; func LOC <= 60 (audit ceiling)",
+			"  - Function LOC <= 60 and statements <= 50.\n  - McCabe cyclomatic <= 10 and cognitive <= 15."},
 		"statements only": {"    max_statements: 49\n",
-			"McCabe cyclomatic <= 10, cognitive <= 15, statements <= 49; func LOC <= 60 (audit ceiling)"},
+			"McCabe cyclomatic <= 10, cognitive <= 15, statements <= 49; func LOC <= 60 (audit ceiling)",
+			"  - Function LOC <= 60 and statements <= 49.\n  - McCabe cyclomatic <= 10 and cognitive <= 15."},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -57,9 +60,9 @@ func TestAdoptHarnessesStateEveryComplexityOverride(t *testing.T) {
 				t.Fatalf("rules.md lacks the HISS-04 row %q:\n%s", tc.want, rules)
 			}
 			template := repoText(t, repo, prTemplateFile)
-			const policyItem = "- [ ] **HISS-04** Meet the effective complexity limits from `.standards.yaml`.\n"
-			if !strings.Contains(template, policyItem) || strings.Contains(template, "McCabe 10") || strings.Contains(template, `$\le 60$ LOC`) {
-				t.Errorf("PR checklist must refer to repository policy for limits %q:\n%s", tc.want, template)
+			const item = "- [ ] **HISS-04** Meet the effective per-function limits from `.standards.yaml`.\n"
+			if !strings.Contains(template, item+tc.checklist+"\n\n") || strings.Count(template, "McCabe") != 1 {
+				t.Errorf("PR checklist must state exactly the resolved limits %q:\n%s", tc.checklist, template)
 			}
 			assertCLIHarnessMatches(t, repo)
 		})

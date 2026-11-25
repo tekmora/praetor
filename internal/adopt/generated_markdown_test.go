@@ -30,10 +30,18 @@ func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 	}
 }
 
+// ceilingPRTemplateSession supplies the audit ceilings to an isolated template step.
+func ceilingPRTemplateSession(root string) *adoptSession {
+	return &adoptSession{repoPath: root, report: &AdoptReport{}, policy: &config.EffectivePolicy{
+		Policy: config.ResolvedPolicy{Complexity: config.HISSComplexityCeiling()},
+	}}
+}
+
 // installedPRTemplate runs fresh template adoption and reads the file it wrote.
 func installedPRTemplate(t *testing.T, root string, plan *VerificationPlan) string {
 	t.Helper()
-	s := &adoptSession{repoPath: root, report: &AdoptReport{}, verification: plan}
+	s := ceilingPRTemplateSession(root)
+	s.verification = plan
 	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
 		t.Fatal(err)
 	}

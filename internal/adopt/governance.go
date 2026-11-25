@@ -380,10 +380,17 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 	if fileExists(upper) {
 		rel = prTemplateUpper
 	}
+	if s.policy == nil {
+		if s.opts.DryRun {
+			s.report.recordSkipped(rel, "PR template preview requires the resolved audit policy")
+			return nil
+		}
+		return errors.New("render pull request template: the effective audit policy is unresolved")
+	}
 	_, err = s.scaffoldFile(ctx, scaffold{
 		rel:       rel,
 		perm:      filePerm,
-		content:   []byte(buildPullRequestTemplate()),
+		content:   []byte(buildPullRequestTemplate(s.policy.Policy.Complexity)),
 		prior:     priorPRTemplateDigests,
 		refreshed: "Refreshed the unedited pull request template to the current verification checklist",
 		created:   "Scaffolded pull request template with HISS verification checklist",
@@ -597,8 +604,8 @@ const (
 	prChecklistHeading   = "## Pre-Merge Verification Checklist"
 )
 
-// prTemplateLines is the shared layout for the engine and its adopters.
-var prTemplateLines = []string{
+// prTemplateIntro introduces the checklist and its effective HISS-04 limits.
+var prTemplateIntro = []string{
 	"# Pull Request",
 	"",
 	prDescriptionHeading,
@@ -626,7 +633,11 @@ var prTemplateLines = []string{
 	"- [ ] **HISS-02** Every loop has a compile-time scalar upper bound.",
 	"- [ ] **HISS-02** All network and disk I/O uses explicit context timeouts.",
 	"- [ ] **HISS-03** Hot-path loops allocate zero heap bytes per tick.",
-	"- [ ] **HISS-04** Meet the effective complexity limits from `.standards.yaml`.",
+	"- [ ] **HISS-04** Meet the effective per-function limits from `.standards.yaml`.",
+}
+
+// prTemplateVerification continues the checklist after the repository-specific HISS-04 limits.
+var prTemplateVerification = []string{
 	"",
 	"#### Memory & Error Integrity",
 	"",
@@ -681,8 +692,11 @@ var prTemplateLines = []string{
 }
 
 // buildPullRequestTemplate renders the pull request template for both adoption and the engine.
-func buildPullRequestTemplate() string {
-	return markdownDocument(prTemplateLines...)
+func buildPullRequestTemplate(limits config.ComplexityPolicy) string {
+	return markdownDocument(prTemplateIntro...) + markdownDocument(
+		fmt.Sprintf("  - Function LOC <= %d and statements <= %d.", limits.MaxFuncLOC, limits.MaxStatements),
+		fmt.Sprintf("  - McCabe cyclomatic <= %d and cognitive <= %d.", limits.MaxCyclomatic, limits.MaxCognitive),
+	) + markdownDocument(prTemplateVerification...)
 }
 
 func buildSecurityPolicy() string {
@@ -745,7 +759,7 @@ Describe the decision taken and the architectural rationale.
 `
 }
 
-// priorPRTemplateDigests records each scaffold, including the current text for the next readoption.
+// priorPRTemplateDigests records the shipped scaffolds, including the current engine rendering.
 var priorPRTemplateDigests = map[string]string{
 	"68ab0cf67859f207428dea6901db7121ad32f943838b65f1fe36bf965a7770a2": "wrapped scaffold checklist (#477)",
 	"8430a36f64a0164981b3e95d22182fe8201af21d3d8f061935fe1d46a3a4c566": "initial HISS-16 checklist (#14)",
@@ -755,4 +769,5 @@ var priorPRTemplateDigests = map[string]string{
 	"feac202b5f9ffb025be8af0848b1ba4f72b6f8439866b344dd2a8edca39ac4c7": "concise checklist for the default Markdown width (#2063)",
 	"f8208c878433aa167841408a5e19ac07e17c3e5ef602c025123567b912b5737d": "scoped description marker and author-supplied test result (#2063)",
 	"ff2d340d908204fc04649b5437f37b1150ea0ba0023f04611933a7c510efac81": "restored lint settings and policy-aware verification checklist (#2063)",
+	"f7bc6f14ae6db6538510fcc4640200188fbcd6f33e7c8c91c056b97f810c7603": "effective per-function limits under the engine framework policy (#2063)",
 }
