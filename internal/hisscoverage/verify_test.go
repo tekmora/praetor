@@ -217,6 +217,35 @@ func TestValidateRefusesDuplicateAndEmpty(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesUnsafeLanguage checks the diagnostic for malformed claim directories.
+func TestValidateRefusesUnsafeLanguage(t *testing.T) {
+	const rule = "HISS-01"
+	languages := [...]string{
+		"../x", "a/b", "..", ".", "", " ", "/x", `a\b`, "a\x00b", strings.Repeat("a", 256),
+	}
+	for i := 0; i < len(languages); i++ {
+		language := languages[i]
+		t.Run(fmt.Sprintf("%q", language), func(t *testing.T) {
+			err := catalogFor(rule, language, StateManual).Validate()
+			if !errors.Is(err, ErrInvalidCatalog) {
+				t.Fatalf("language %q: expected ErrInvalidCatalog, got %v", language, err)
+			}
+			message := err.Error()
+			if !strings.Contains(message, rule) || !strings.Contains(message, fmt.Sprintf("%q", language)) ||
+				!strings.Contains(message, "escapes") {
+				t.Errorf("expected rule, quoted language and escape diagnostic, got %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsMaxLengthLanguage pins the inclusive byte limit.
+func TestValidateAcceptsMaxLengthLanguage(t *testing.T) {
+	if err := catalogFor("HISS-01", strings.Repeat("a", 255), StateManual).Validate(); err != nil {
+		t.Fatalf("a 255-byte language must be accepted: %v", err)
+	}
+}
+
 // TestLoadCatalogAbsent is the boundary dimension for a repository that declares nothing:
 // absence is reported as its own condition rather than as an empty, passing catalog.
 func TestLoadCatalogAbsent(t *testing.T) {
