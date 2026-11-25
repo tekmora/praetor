@@ -809,11 +809,14 @@ conditional, continuation, byte-order mark, special variable assignment or secon
 the requested target makes the pointer unresolved with `not statically provable`. A rule that
 targets `GNUmakefile`, `makefile` or `Makefile` has the same effect on every pointer in the
 file because Make can replace and re-read its rules before running the requested target.
+The audit checks the first existing file in the order `GNUmakefile`, `makefile`, `Makefile` and
+leaves every pointer for it unresolved if Make could rebuild it from a sibling such as `Makefile.sh`,
+`s.Makefile` or an `RCS` directory, or if the audit cannot read the directory within its 4096-entry limit.
 Every pointer is also unresolved for a dot target other than `.PHONY` (including `.SUFFIXES` and
 single- or double-suffix rules), a `%` in a target or prerequisite (including static pattern
 rules), a `vpath` directive or a `VPATH` assignment. A missing target in a fully recognized file
 reports `unresolved evidence pointer`.
-See `TestAudit_MakeWholeFile` and `TestAudit_MakeTargetBodyShapes` in
+See `TestAudit_MakeWholeFile`, `TestAudit_MakeImplicitSource` and `TestAudit_MakeTargetBodyShapes` in
 `internal/ruleregistry/registry_test.go`.
 
 A `test:<directory>.<name>` pointer needs a top-level test function in a visible `_test.go`

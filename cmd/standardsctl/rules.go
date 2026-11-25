@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -203,66 +204,65 @@ func printRulesReport(report *ruleregistry.Report, jsonOutput bool) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	fmt.Println("=== Rule enforcement audit ===")
+	var text bytes.Buffer
+	text.WriteString("=== Rule enforcement audit ===\n")
 	for i := 0; i < len(report.Rows) && i < maxReportRules; i++ {
 		row := report.Rows[i]
-		fmt.Printf("%s %s status=%s %s\n", row.ID, row.Class, row.Status, row.Evidence)
+		fmt.Fprintf(&text, "%s %s status=%s %s\n", row.ID, row.Class, row.Status, row.Evidence)
 	}
-	printForgeComparisons(report)
-	printInstructionOnly(report)
-	printRulesSummary(report)
-	return nil
+	printForgeComparisons(&text, report)
+	printInstructionOnly(&text, report)
+	printRulesSummary(&text, report)
+	_, err := text.WriteTo(os.Stdout)
+	return err
 }
 
 // printForgeComparisons writes offline assertions and live read-back comparisons for forge pointers.
-func printForgeComparisons(report *ruleregistry.Report) {
-	printedRemote, printedOffline := false, false
+func printForgeComparisons(text *bytes.Buffer, report *ruleregistry.Report) {
+	printed := map[string]bool{}
 	for i := 0; i < len(report.Rows) && i < maxReportRules; i++ {
 		for j := 0; j < len(report.Rows[i].Forge) && j < maxRuleForgeComparisons; j++ {
 			comparison := report.Rows[i].Forge[j]
-			if !comparison.ReadBack {
-				if !printedOffline {
-					fmt.Println("asserted, not read back:")
-					printedOffline = true
-				}
-				fmt.Printf("  %s forge:%s asserted %s\n", report.Rows[i].ID, comparison.Setting, comparison.Asserted)
-				continue
+			heading := "asserted, not read back:\n"
+			detail := ""
+			if comparison.ReadBack {
+				heading = "forge comparisons:\n"
+				detail = fmt.Sprintf(", observed %s, match=%t", comparison.Observed, comparison.Match)
 			}
-			if !printedRemote {
-				fmt.Println("forge comparisons:")
-				printedRemote = true
+			if !printed[heading] {
+				text.WriteString(heading)
+				printed[heading] = true
 			}
-			fmt.Printf("  %s forge:%s asserted %s, observed %s, match=%t\n", report.Rows[i].ID,
-				comparison.Setting, comparison.Asserted, comparison.Observed, comparison.Match)
+			fmt.Fprintf(text, "  %s forge:%s asserted %s%s\n", report.Rows[i].ID, comparison.Setting, comparison.Asserted, detail)
 		}
 	}
 }
 
 // printInstructionOnly lists prose-only rules containing prohibition wording.
-func printInstructionOnly(report *ruleregistry.Report) {
+func printInstructionOnly(text *bytes.Buffer, report *ruleregistry.Report) {
 	printed := false
 	for i := 0; i < len(report.Rows) && i < maxReportRules; i++ {
 		if !report.Rows[i].Candidate {
 			continue
 		}
 		if !printed {
-			fmt.Println("instruction-only prohibitions:")
+			text.WriteString("instruction-only prohibitions:\n")
 			printed = true
 		}
-		fmt.Printf("  %s\n", report.Rows[i].ID)
+		fmt.Fprintf(text, "  %s\n", report.Rows[i].ID)
 	}
 }
 
 // printRulesSummary writes class counts, status counts, enforced/unenforced totals, and invalid declarations.
-func printRulesSummary(report *ruleregistry.Report) {
-	fmt.Printf("classes: %s\n", formatRuleClassCounts(report.Counts()))
-	fmt.Printf("statuses: %s\n", formatRuleStatusCounts(report.StatusCounts()))
+func printRulesSummary(text *bytes.Buffer, report *ruleregistry.Report) {
+	fmt.Fprintf(text, "classes: %s\n", formatRuleClassCounts(report.Counts()))
+	fmt.Fprintf(text, "statuses: %s\n", formatRuleStatusCounts(report.StatusCounts()))
 	unenforced := len(report.UnenforcedIDs())
 	enforced := max(0, min(len(report.Rows), maxReportRules)-unenforced)
-	fmt.Printf("enforced: %d (live forge read-back matched with no pending forge setting; local pointer presence is status=present, not enforced)\n", enforced)
-	fmt.Printf("unenforced: %d\n", unenforced)
+	fmt.Fprintf(text, "enforced: %d (live forge read-back matched with no pending forge setting; local pointer presence is status=present, not enforced)\n", enforced)
+	fmt.Fprintf(text, "unenforced: %d\n", unenforced)
 	for i := 0; i < len(report.Problems) && i < maxReportProblems; i++ {
-		fmt.Printf("invalid: %s\n", report.Problems[i])
+		fmt.Fprintf(text, "invalid: %s\n", report.Problems[i])
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -51,6 +52,30 @@ func TestRulesAuditCLI_ReportsProseOnlyWithoutFailing(t *testing.T) {
 	}
 	if err := dispatchCommand("rules", []string{"unknown"}); err == nil {
 		t.Fatal("unknown rules subcommand succeeded")
+	}
+}
+
+// TestRulesAuditCLI_TextWriteError requires the command to return the stdout write failure.
+func TestRulesAuditCLI_TextWriteError(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "AGENTS.md", "## Operational Rules\n\n1. Check.\n\n## Text Register\n")
+	writeFixtureFile(t, root, ".config/rules/enforcement.yaml", "version: 1\nrules: []\n")
+	out, err := os.Open(filepath.Join(root, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = out
+	t.Cleanup(func() {
+		os.Stdout = stdout
+		if err := out.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	err = dispatchCommand("rules", []string{"audit", "--root", root})
+	var writeErr *os.PathError
+	if !errors.As(err, &writeErr) || writeErr.Op != "write" || writeErr.Path != out.Name() {
+		t.Fatalf("rules audit error = %v, want write error for %s", err, out.Name())
 	}
 }
 

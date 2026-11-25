@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -418,9 +419,9 @@ func resolveMake(ctx context.Context, root, target string) error {
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(target) {
 		return fmt.Errorf("unresolved evidence pointer %q: not statically provable", "make:"+target)
 	}
-	data, err := readFile(ctx, root, "Makefile")
+	data, err := readAuditMakefile(ctx, root)
 	if err != nil {
-		return fmt.Errorf("read Makefile for make:%s: not statically provable: %w", target, err)
+		return fmt.Errorf("unresolved evidence pointer %q: not statically provable: %w", "make:"+target, err)
 	}
 	switch util.MakefileTargetStatus(string(data), target) {
 	case util.MakefileTargetPresent:
@@ -429,6 +430,27 @@ func resolveMake(ctx context.Context, root, target string) error {
 		return fmt.Errorf("unresolved evidence pointer %q: not statically provable", "make:"+target)
 	}
 	return fmt.Errorf("unresolved evidence pointer %q", "make:"+target)
+}
+
+// readAuditMakefile selects GNU Make's first default file and checks its pinned directory for remake sources.
+func readAuditMakefile(ctx context.Context, root string) (data []byte, err error) {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
+	dir, err := contextopt.OpenDirectoryIn(ctx, root, ".")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	for _, name := range util.DefaultMakefileNames() {
+		data, exists, err := contextopt.ObserveRootSnapshot(ctx, dir, name)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", name, err)
+		}
+		if exists {
+			return data, util.MakefileImplicitSourceNear(ctx, dir, name)
+		}
+	}
+	return nil, fmt.Errorf("no default makefile: %w", os.ErrNotExist)
 }
 
 // resolveWorkflow checks that .github/workflows/<file> defines job and its if: condition is not literal false.

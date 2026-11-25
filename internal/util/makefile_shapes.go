@@ -89,7 +89,18 @@ func makefileIsCLIVariableLine(line string) bool {
 }
 
 // makefileNames contains the makefiles protected from explicit and implicit remake rules.
-var makefileNames = map[string]struct{}{"Makefile": {}, "makefile": {}, "GNUmakefile": {}}
+var makefileNames = func() map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, name := range DefaultMakefileNames() {
+		names[name] = struct{}{}
+	}
+	return names
+}()
+
+// DefaultMakefileNames returns the filenames in GNU Make's default search order.
+func DefaultMakefileNames() [3]string {
+	return [3]string{"GNUmakefile", "makefile", "Makefile"}
+}
 
 // makefileIsMakefileName reports whether name is one of the names Make treats as its makefile.
 // Make remakes its own makefile and re-execs, so a rule for any of these names can rewrite an include.

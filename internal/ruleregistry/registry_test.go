@@ -144,6 +144,75 @@ func TestAudit_MakeWholeFile(t *testing.T) {
 	}
 }
 
+// TestAudit_MakeImplicitSource checks the selected makefile and its directory before claiming a recipe.
+func TestAudit_MakeImplicitSource(t *testing.T) {
+	for _, tc := range [...]struct {
+		file, sibling string
+		unproven      bool
+	}{
+		{"Makefile", "Makefile.sh", true},
+		{"Makefile", "Makefile.c", true},
+		{"Makefile", "Makefile.o", true},
+		{"Makefile", "Makefile,v", true},
+		{"Makefile", "RCS/unrelated", true},
+		{"Makefile", "s.Makefile", true},
+		{"Makefile", "SCCS/s.Makefile", true},
+		{"Makefile", "s.Makefile.sh", true},
+		{"Makefile", "", false},
+		{"Makefile", "README.md", false},
+		{"GNUmakefile", "GNUmakefile.sh", true},
+		{"GNUmakefile", "Makefile.sh", false},
+		{"makefile", "makefile.sh", true},
+		{"makefile", "README.md", false},
+	} {
+		t.Run(tc.file+"/"+tc.sibling, func(t *testing.T) {
+			root := pointerFixtureRoot(t, "make:check")
+			writeTestFile(t, root, tc.file, "check: ; @true\n")
+			old := time.Unix(1_000_000, 0)
+			if err := os.Chtimes(filepath.Join(root, tc.file), old, old); err != nil {
+				t.Fatal(err)
+			}
+			if tc.sibling != "" {
+				writeTestFile(t, root, tc.sibling, "check: ;\n")
+			}
+			report, err := Audit(t.Context(), root)
+			assertLocalEvidenceStatus(t, report, err, tc.unproven)
+			if tc.unproven && !strings.Contains(strings.Join(report.Problems, "\n"), "not statically provable") {
+				t.Fatalf("problems = %v", report.Problems)
+			}
+		})
+	}
+}
+
+// TestAudit_MakeImplicitSourceWithForge checks that a matching forge assertion cannot rescue either recipe.
+func TestAudit_MakeImplicitSourceWithForge(t *testing.T) {
+	root := pointerFixtureRoot(t, "make:check, make:second, forge:required_signatures")
+	writeTestFile(t, root, "Makefile", "check: ; @true\nsecond: ; @true\n")
+	writeTestFile(t, root, "Makefile.sh", "check: ;\nsecond: ;\n")
+	opts := forgeOptions(ForgeRequiredSignatures, forgeState("required", "required", true, true), nil)
+	report, err := AuditWithOptions(t.Context(), root, opts)
+	assertLocalEvidenceStatus(t, report, err, true)
+	for _, pointer := range [...]string{"make:check", "make:second"} {
+		if !slices.ContainsFunc(report.Problems, func(problem string) bool {
+			return strings.Contains(problem, pointer) && strings.Contains(problem, "not statically provable")
+		}) {
+			t.Fatalf("problems = %v, want sibling-source refusal for %s", report.Problems, pointer)
+		}
+	}
+}
+
+// TestAudit_MakeImplicitSourceCase checks sibling lookup against the fixture filesystem's case behavior.
+func TestAudit_MakeImplicitSourceCase(t *testing.T) {
+	root := pointerFixtureRoot(t, "make:verify-all")
+	writeTestFile(t, root, "MAKEFILE.SH", "verify-all: ;\n")
+	_, lookupErr := os.Stat(filepath.Join(root, "Makefile.sh"))
+	if lookupErr != nil && !errors.Is(lookupErr, os.ErrNotExist) {
+		t.Fatal(lookupErr)
+	}
+	report, err := Audit(t.Context(), root)
+	assertLocalEvidenceStatus(t, report, err, lookupErr == nil)
+}
+
 // TestAudit_MakeConditionalTargetBody requires a recipe whose ownership is unconditional.
 func TestAudit_MakeConditionalTargetBody(t *testing.T) {
 	tests := []struct {

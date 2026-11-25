@@ -6,6 +6,7 @@ title: >-
   Use `--remote` to check `enforced`, which requires all pointers to resolve and live forge read-back to match.
   Any unprovable Makefile line leaves every `make:` declaration for that file unresolved, even with `--remote`.
   This includes dot targets other than `.PHONY` (such as `.SUFFIXES` and single- or double-suffix rules), `%` in targets or prerequisites (including static pattern rules), `vpath` directives and `VPATH` assignments.
+  Every `make:` pointer is unresolved when the selected makefile has a possible built-in remake source beside it or its directory cannot be read within the 4096-entry limit.
   The computed assignment at `Makefile:8` affects all seven declarations in this repository, including `make:secrets`.
   Migrate affected rules by pointing them at independently verifiable evidence.
 issue: "#1134"
