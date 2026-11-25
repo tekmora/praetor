@@ -19,9 +19,17 @@ type ReplaceOptions struct {
 	Mode     os.FileMode
 	// ExpectedLimit raises only the prior snapshot read bound for a bounded recovery.
 	ExpectedLimit int64
-	// scaffoldMode publishes the exact mode validated by ReplaceScaffoldIn.
-	scaffoldMode bool
 }
+
+// snapshotPolicy distinguishes strict snapshot writes from idempotent scaffold publication.
+type snapshotPolicy int
+
+const (
+	strictSnapshot snapshotPolicy = iota
+	observedSnapshot
+	scaffoldCeiling
+	scaffoldExact
+)
 
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
 // Cooperative writers serialize on that directory (LockDirectory: the writers of one process
@@ -33,7 +41,7 @@ type ReplaceOptions struct {
 // private .pending name the error reports, so the partial write can be found and
 // recovered; only a decided publish drops them.
 func ReplaceSnapshot(ctx context.Context, path string, data []byte, options ReplaceOptions) (err error) {
-	if err := validateReplacement(ctx, data, options); err != nil {
+	if err := validateReplacement(ctx, data, options, strictSnapshot); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
@@ -50,7 +58,7 @@ func ReplaceSnapshot(ctx context.Context, path string, data []byte, options Repl
 		return err
 	}
 	defer func() { err = errors.Join(err, root.Close()) }()
-	return replaceInRoot(ctx, root, filepath.Base(abs), data, options)
+	return replaceInRoot(ctx, root, filepath.Base(abs), data, options, strictSnapshot)
 }
 
 // ReplaceRootSnapshot is ReplaceSnapshot for a flat name inside an already pinned
@@ -58,31 +66,37 @@ func ReplaceSnapshot(ctx context.Context, path string, data []byte, options Repl
 // confined below a repository root can pin the directory through that root first and
 // still publish through the one locked compare-and-swap implementation.
 func ReplaceRootSnapshot(ctx context.Context, root *os.Root, name string, data []byte, options ReplaceOptions) error {
-	if root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
-		return errors.New("snapshot replacement requires a pinned directory and a flat filename")
-	}
-	if err := validatePath(name); err != nil {
+	if err := validateSnapshotName(root, name); err != nil {
 		return err
 	}
-	if err := validateReplacement(ctx, data, options); err != nil {
+	if err := validateReplacement(ctx, data, options, strictSnapshot); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	return replaceInRoot(ctx, root, name, data, options)
+	return replaceInRoot(ctx, root, name, data, options, strictSnapshot)
+}
+
+// validateSnapshotName requires a single file in the pinned directory.
+func validateSnapshotName(root *os.Root, name string) error {
+	if root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+		return errors.New("snapshot replacement requires a pinned directory and a flat filename")
+	}
+	return validatePath(name)
 }
 
 // replaceInRoot is the locked compare-and-swap publish shared by ReplaceSnapshot and
 // ReplaceRootSnapshot: it serializes on root, re-checks the prior snapshot, stages the
 // replacement and publishes it.
-func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte, options ReplaceOptions) (err error) {
+func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte, options ReplaceOptions, policy snapshotPolicy) (err error) {
 	unlock, err := LockDirectory(ctx, root)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
-	mode, err := verifyReplacement(ctx, root, name, options)
-	if err != nil {
+	request := replacementRequest{ReplaceOptions: options, data: data, policy: policy}
+	mode, satisfied, err := request.verify(ctx, root, name)
+	if err != nil || satisfied {
 		return err
 	}
 	stage := ".praetor-" + rand.Text() + ".pending"
@@ -114,13 +128,10 @@ func stagedPath(root *os.Root, stage string) string {
 // another creator is not an error, because the file that won is the file this call would
 // have written. An existing name is left byte-for-byte alone.
 func CreateRootSnapshot(ctx context.Context, root *os.Root, name string, data []byte, mode os.FileMode) (created bool, err error) {
-	if err := validateReplacement(ctx, data, ReplaceOptions{Mode: mode}); err != nil {
+	if err := validateReplacement(ctx, data, ReplaceOptions{Mode: mode}, strictSnapshot); err != nil {
 		return false, err
 	}
-	if root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
-		return false, errors.New("snapshot creation requires a pinned directory and a flat filename")
-	}
-	if err := validatePath(name); err != nil {
+	if err := validateSnapshotName(root, name); err != nil {
 		return false, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
@@ -131,7 +142,7 @@ func CreateRootSnapshot(ctx context.Context, root *os.Root, name string, data []
 		return false, fmt.Errorf("stage snapshot %s (inspect %s): %w", name, stagedPath(root, stage), err)
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
-	if err := sealStage(ctx, file, mode); err != nil {
+	if err := syncFileMode(ctx, file, mode); err != nil {
 		return false, fmt.Errorf("publish snapshot %s (inspect %s): %w", name, stagedPath(root, stage), err)
 	}
 	created, err = linkStagedSnapshot(root, name, stage)
@@ -142,7 +153,7 @@ func CreateRootSnapshot(ctx context.Context, root *os.Root, name string, data []
 }
 
 // validateReplacement bounds both the new text and the recovery snapshot expectation.
-func validateReplacement(ctx context.Context, data []byte, options ReplaceOptions) error {
+func validateReplacement(ctx context.Context, data []byte, options ReplaceOptions, policy snapshotPolicy) error {
 	if ctx == nil {
 		return errors.New("snapshot replacement requires a context")
 	}
@@ -153,13 +164,27 @@ func validateReplacement(ctx context.Context, data []byte, options ReplaceOption
 		return err
 	}
 
-	if !options.scaffoldMode && (options.Mode == 0 || options.Mode&^0o644 != 0) {
-		return errors.New("snapshot mode must be nonzero owner read/write and optional group/other read bits")
+	if err := policy.validateMode(options.Mode); err != nil {
+		return err
 	}
 	if !options.Exists && len(options.Expected) != 0 {
 		return errors.New("absent snapshot cannot have expected content")
 	}
 	return errors.Join(validateText(data), validateText(options.Expected))
+}
+
+// validateMode restricts exact distribution modes to the scaffold publisher.
+func (p snapshotPolicy) validateMode(mode os.FileMode) error {
+	if p == scaffoldExact {
+		if mode != 0o644 && mode != 0o755 {
+			return errors.New("scaffold mode must be 0644 or 0755")
+		}
+		return nil
+	}
+	if mode == 0 || mode&^0o644 != 0 {
+		return errors.New("snapshot mode must be nonzero owner read/write and optional group/other read bits")
+	}
+	return nil
 }
 
 // validateReplacementLimits bounds new bytes independently from the prior recovery snapshot.
@@ -181,30 +206,83 @@ func replacementReadLimit(options ReplaceOptions) int64 {
 	return options.ExpectedLimit
 }
 
-// verifyReplacement checks identity and expected bytes through the shared snapshot copy.
-func verifyReplacement(ctx context.Context, root *os.Root, name string, options ReplaceOptions) (os.FileMode, error) {
-	info, err := root.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) && !options.Exists {
-		return options.Mode, nil
+// replacementRequest carries the candidate bytes and private publication policy with the
+// caller's snapshot. A strict verification needs only ReplaceOptions.
+type replacementRequest struct {
+	ReplaceOptions
+	data   []byte
+	policy snapshotPolicy
+}
+
+// isScaffold reports whether a concurrent publication can satisfy this request.
+func (r replacementRequest) isScaffold() bool {
+	return r.policy == scaffoldExact || r.policy == scaffoldCeiling
+}
+
+// verify determines the publication mode from one pinned snapshot. It returns satisfied
+// when the requested scaffold is already installed or only needed a mode repair.
+func (r replacementRequest) verify(ctx context.Context, root *os.Root, name string) (mode os.FileMode, satisfied bool, err error) {
+	_, err = root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) && !r.Exists {
+		return r.Mode, false, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if !options.Exists {
-		return 0, fmt.Errorf("snapshot already exists: %s", name)
+	if !r.Exists && !r.isScaffold() {
+		return 0, false, fmt.Errorf("snapshot already exists: %s", name)
+	}
+	limit := replacementReadLimit(r.ReplaceOptions)
+	if r.isScaffold() {
+		// The winning publication can be larger than the bounded prior snapshot.
+		limit = max(limit, int64(len(r.data)))
 	}
 	var current bytes.Buffer
-	_, err = snapshotRootCopy(ctx, root, name, &current, replacementReadLimit(options))
-	if err != nil {
-		return 0, err
+	_, err = inspectSnapshot(ctx, root, name, &current, limit, func(file *os.File, info os.FileInfo) error {
+		var checkErr error
+		mode, satisfied, checkErr = r.checkFile(ctx, file, info, current.Bytes())
+		return checkErr
+	})
+	return mode, satisfied, err
+}
+
+// checkFile accepts the expected snapshot or, for an idempotent scaffold, its desired result.
+func (r replacementRequest) checkFile(ctx context.Context, file *os.File, info os.FileInfo, current []byte) (os.FileMode, bool, error) {
+	mode := r.Mode
+	if r.Exists && r.policy != scaffoldExact {
+		mode &= info.Mode().Perm()
 	}
-	if !bytes.Equal(current.Bytes(), options.Expected) {
-		return 0, fmt.Errorf("snapshot changed before replacement: %s", name)
+	matches := r.Exists && bytes.Equal(current, r.Expected)
+	if r.isScaffold() && bytes.Equal(current, r.data) {
+		if scaffoldModeMatches(info.Mode(), mode) {
+			return mode, true, nil
+		}
+		if matches && r.policy == scaffoldExact {
+			return mode, true, repairScaffoldMode(ctx, file, info, mode)
+		}
 	}
-	if options.scaffoldMode {
-		return options.Mode, nil
+	if !matches {
+		return 0, false, fmt.Errorf("snapshot changed before replacement: %s", info.Name())
 	}
-	return options.Mode & info.Mode().Perm(), nil
+	return mode, false, nil
+}
+
+// repairScaffoldMode changes only the verified descriptor and refuses to change another
+// name's permissions when the inode has multiple links.
+func repairScaffoldMode(ctx context.Context, file *os.File, info os.FileInfo, mode os.FileMode) error {
+	if !singleLink(info) {
+		return fmt.Errorf("refusing to change mode of shared or unverified inode: %s", info.Name())
+	}
+	return syncFileMode(ctx, file, mode)
+}
+
+// scaffoldModeMatches compares the whole regular-file mode on POSIX. Windows exposes
+// the read-only attribute through the owner write bit.
+func scaffoldModeMatches(actual, want os.FileMode) bool {
+	if runtime.GOOS == "windows" {
+		return actual&0o200 == want&0o200
+	}
+	return actual == want
 }
 
 func stageSnapshot(ctx context.Context, root *os.Root, name string, data []byte) (*os.File, error) {
@@ -223,10 +301,11 @@ func stageSnapshot(ctx context.Context, root *os.Root, name string, data []byte)
 }
 
 func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, file *os.File, mode os.FileMode, options ReplaceOptions) error {
-	if _, err := verifyReplacement(ctx, root, name, options); err != nil {
+	request := replacementRequest{ReplaceOptions: options}
+	if _, _, err := request.verify(ctx, root, name); err != nil {
 		return err
 	}
-	if err := sealStage(ctx, file, mode); err != nil {
+	if err := syncFileMode(ctx, file, mode); err != nil {
 		return err
 	}
 	if options.Exists {
@@ -242,10 +321,15 @@ func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, fil
 	return nil
 }
 
-// sealStage makes the staged bytes and their published mode durable while the file still
-// has no name a reader can reach, so every publish links a file that is already complete.
-func sealStage(ctx context.Context, file *os.File, mode os.FileMode) error {
-	return errors.Join(ctx.Err(), file.Chmod(mode), file.Sync())
+// syncFileMode sets the open file's mode and persists it before publication or return.
+func syncFileMode(ctx context.Context, file *os.File, mode os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := file.Chmod(mode); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 // linkStagedSnapshot publishes the staged entry under name with an exclusive hard link.

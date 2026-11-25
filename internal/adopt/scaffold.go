@@ -134,10 +134,9 @@ type scaffold struct {
 	auditLocked bool
 	created     string // action detail when the file is (or would be) written
 	verified    string // action detail when an existing file matches content
-	// confined writes through contextopt.WriteSnapshotIn, the writer compile-context uses, which
-	// follows no symlink below the repository, and refreshes an earlier text through
-	// contextopt.ReplaceSnapshotIn. It is set for the files compile-context also reads (the
-	// canonical personas). Bundle sources use ReplaceScaffoldIn for their distribution modes.
+	// confined creates even an absent text file through a pinned repository directory.
+	// It is set for files compile-context also reads. Bundle sources always use a pinned
+	// directory and take their distribution mode.
 	confined bool
 	// prior holds the digest (priorRendering) of every text a Praetor release wrote at rel,
 	// keyed to what produced it. An existing file holding one of them, in one consistent
@@ -268,36 +267,36 @@ func (s *adoptSession) refreshScaffold(ctx context.Context, full string, actual,
 const snapshotModeBits os.FileMode = 0o644
 
 // publishPriorRefresh writes content over actual at full. A text scaffold is replaced bound to
-// actual, so a file edited in between is not overwritten; a confined one goes through the
-// root-pinned writer compile-context uses (contextopt.ReplaceSnapshotIn), so a symlink at or
-// below the repository is refused rather than written through. Bundle sources use that same
-// check with their distribution mode. The standalone interceptor uses writeRepoFile.
+// actual through a pinned parent. A concurrent publication of the same bytes and mode
+// satisfies the refresh. Text scaffolds keep their permission ceiling and bundle sources
+// take their distribution mode. The standalone interceptor uses writeRepoFile.
 func (s *adoptSession) publishPriorRefresh(ctx context.Context, full string, actual, content []byte, sc scaffold) error {
 	options := contextopt.ReplaceOptions{Expected: actual, Exists: true, Mode: sc.perm}
-	switch {
-	case sc.sourceMode:
-		return contextopt.ReplaceScaffoldIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), content, options)
-	case sc.confined:
-		return contextopt.ReplaceSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), content, options)
-	case sc.perm&^snapshotModeBits != 0:
+	if !sc.sourceMode && !sc.confined && sc.perm&^snapshotModeBits != 0 {
 		return writeRepoFile(full, content, sc.perm)
 	}
-	return contextopt.ReplaceSnapshot(ctx, full, content, options)
+	return s.publishConfinedScaffold(ctx, sc, content, options)
 }
 
 // writeScaffold persists sc at full unless the session is a dry run, through the root-pinned
 // writer when sc is confined.
 func (s *adoptSession) writeScaffold(ctx context.Context, full string, sc scaffold) error {
-	if sc.sourceMode && !s.opts.DryRun {
-		return contextopt.ReplaceScaffoldIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), sc.content, contextopt.ReplaceOptions{Mode: sc.perm})
-	}
-	if !sc.confined || s.opts.DryRun {
+	if s.opts.DryRun || (!sc.sourceMode && !sc.confined) {
 		return s.write(full, sc.content, sc.perm)
 	}
-	if err := contextopt.WriteSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), sc.content, sc.perm); err != nil {
+	if err := s.publishConfinedScaffold(ctx, sc, sc.content, contextopt.ReplaceOptions{Mode: sc.perm}); err != nil {
 		return fmt.Errorf("write %s: %w", sc.rel, err)
 	}
 	return nil
+}
+
+// publishConfinedScaffold binds creation or refresh to the observation in options.
+func (s *adoptSession) publishConfinedScaffold(ctx context.Context, sc scaffold, content []byte, options contextopt.ReplaceOptions) error {
+	rel := filepath.FromSlash(sc.rel)
+	if sc.sourceMode {
+		return contextopt.ReplaceScaffoldIn(ctx, s.repoPath, rel, content, options)
+	}
+	return contextopt.ReplaceScaffoldTextIn(ctx, s.repoPath, rel, content, options)
 }
 
 // recordExistingScaffold classifies an existing file against its scaffold and records the
@@ -339,7 +338,7 @@ func (s *adoptSession) verifyScaffoldMode(ctx context.Context, full string, sc s
 		if err != nil {
 			return 0, fmt.Errorf("inspect mode of %s: %w", sc.rel, err)
 		}
-		if info.Mode().Perm() != sc.perm {
+		if info.Mode() != sc.perm {
 			detail := fmt.Sprintf("Restored file mode to %04o", sc.perm)
 			return scaffoldWritten, s.refreshScaffold(ctx, full, actual, actual, sc, detail)
 		}
@@ -349,11 +348,11 @@ func (s *adoptSession) verifyScaffoldMode(ctx context.Context, full string, sc s
 }
 
 // replaceScaffold overwrites the drifted file at full, which held actual, with sc.content under
-// --force, through the writer that creates the scaffold.
+// --force, using the same observed bytes as the backup and refresh.
 func (s *adoptSession) replaceScaffold(ctx context.Context, full string, sc scaffold, actual []byte) (scaffoldState, error) {
 	err := s.replaceExisting(ctx, replacement{
 		rel: sc.rel, before: actual, after: sc.content, detail: sc.created,
-		publish: func(ctx context.Context) error { return s.writeScaffold(ctx, full, sc) },
+		publish: func(ctx context.Context) error { return s.publishPriorRefresh(ctx, full, actual, sc.content, sc) },
 	})
 	if err != nil {
 		return 0, err

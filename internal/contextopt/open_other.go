@@ -19,3 +19,8 @@ func openSource(root *os.Root, name string) (*os.File, error) {
 	}
 	return root.Open(name)
 }
+
+// singleLink refuses in-place POSIX mode repairs on hosts without Unix link counts.
+func singleLink(os.FileInfo) bool {
+	return false
+}

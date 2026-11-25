@@ -11,7 +11,7 @@ import (
 // parents without following symlinks. Use ReplaceSnapshot when the caller must
 // bind publication to an earlier reviewed snapshot instead of the current file.
 func WriteSnapshot(ctx context.Context, path string, data []byte, mode os.FileMode) error {
-	if err := validateReplacement(ctx, data, ReplaceOptions{Mode: mode}); err != nil {
+	if err := validateReplacement(ctx, data, ReplaceOptions{Mode: mode}, strictSnapshot); err != nil {
 		return err
 	}
 	if err := EnsureDirectory(ctx, filepath.Dir(path), 0o755); err != nil {
@@ -27,11 +27,11 @@ func WriteSnapshot(ctx context.Context, path string, data []byte, mode os.FileMo
 // WriteSnapshotIn is WriteSnapshot for rel below root, with root as the confinement boundary.
 // root must exist; its ancestry is resolved once. Every directory component of rel, existing
 // or created, is walked without following a symlink (ensureDirectoryIn), and the file is
-// observed and replaced through that pinned parent (ReplaceRootSnapshot), so a symlinked
+// observed and replaced through that pinned parent, so a symlinked
 // directory or file inside the governed tree is refused rather than written through.
 // WriteSnapshot resolves the ancestry that already exists and would follow it.
 func WriteSnapshotIn(ctx context.Context, root, rel string, data []byte, mode os.FileMode) error {
-	return replaceSnapshotIn(ctx, root, rel, data, ReplaceOptions{Mode: mode}, true)
+	return replaceSnapshotIn(ctx, root, rel, data, ReplaceOptions{Mode: mode}, observedSnapshot)
 }
 
 // ReplaceSnapshotIn is ReplaceSnapshot for rel below root, confined as WriteSnapshotIn is: it
@@ -39,24 +39,31 @@ func WriteSnapshotIn(ctx context.Context, root, rel string, data []byte, mode os
 // options.Exists is false. A caller that planned the content from an earlier read binds the
 // write to that read, so a concurrent edit fails the publish instead of being overwritten.
 func ReplaceSnapshotIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions) error {
-	return replaceSnapshotIn(ctx, root, rel, data, options, false)
+	return replaceSnapshotIn(ctx, root, rel, data, options, strictSnapshot)
 }
 
 // ReplaceScaffoldIn publishes an adopted bundle file with its exact distribution mode.
-// It binds both the bytes and the mode to the observed file or absence through ReplaceSnapshotIn.
+// If another adopter has already published the requested bytes and mode, it succeeds.
+// A POSIX mode-only repair changes the verified open file to 0644 or 0755 in place.
+// It keeps the bytes, inode, owner, ordinary extended attributes and modification time.
+// Chmod can update the ACL mask and change time. Reading may update access time.
+// A mode-only repair requires a verified single link. Windows compares the read-only bit.
 func ReplaceScaffoldIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions) error {
-	if options.Mode != 0o644 && options.Mode != 0o755 {
-		return errors.New("scaffold mode must be 0644 or 0755")
-	}
-	options.scaffoldMode = true
-	return ReplaceSnapshotIn(ctx, root, rel, data, options)
+	return replaceSnapshotIn(ctx, root, rel, data, options, scaffoldExact)
+}
+
+// ReplaceScaffoldTextIn creates a text scaffold at the requested mode or refreshes an
+// existing one under the ordinary snapshot permission ceiling. A concurrent adopter's
+// matching bytes and mode satisfy either operation. Other changes fail the compare-and-swap.
+func ReplaceScaffoldTextIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions) error {
+	return replaceSnapshotIn(ctx, root, rel, data, options, scaffoldCeiling)
 }
 
 // replaceSnapshotIn pins the parent of rel below root, creating absent directories without
-// following a symlink, and publishes through ReplaceRootSnapshot. observe binds the publish to
+// following a symlink, and publishes under the snapshot lock. observedSnapshot binds the publish to
 // the current file instead of options.Expected and options.Exists.
-func replaceSnapshotIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions, observe bool) (err error) {
-	if err := validateReplacement(ctx, data, options); err != nil {
+func replaceSnapshotIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions, policy snapshotPolicy) (err error) {
+	if err := validateReplacement(ctx, data, options, policy); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
@@ -67,11 +74,14 @@ func replaceSnapshotIn(ctx context.Context, root, rel string, data []byte, optio
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
 	name := filepath.Base(rel)
-	if observe {
+	if err := validateSnapshotName(dir, name); err != nil {
+		return err
+	}
+	if policy == observedSnapshot {
 		options.Expected, options.Exists, err = ObserveRootSnapshot(ctx, dir, name)
 		if err != nil {
 			return err
 		}
 	}
-	return ReplaceRootSnapshot(ctx, dir, name, data, options)
+	return replaceInRoot(ctx, dir, name, data, options, policy)
 }

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 )
@@ -29,7 +30,7 @@ func assertCheckpointFile(t *testing.T, root, rel, content string, mode os.FileM
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != mode {
+	if got := info.Mode(); got != mode {
 		t.Errorf("%s mode = %04o, want %04o", rel, got, mode)
 	}
 }
@@ -105,6 +106,59 @@ func TestCheckpointSourceModeRefresh(t *testing.T) {
 			assertCheckpointFile(t, s.repoPath, checkpointScript, tc.want, tc.wantMode)
 		})
 	}
+}
+
+// TestCheckpointModeRepairKeepsFile checks the inode and mtime across a mode-only
+// repair of a CRLF checkout. Special bits are planted independently of group write.
+func TestCheckpointModeRepairKeepsFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX execute or special mode bits")
+	}
+	for _, tc := range [...]struct {
+		rel    string
+		before os.FileMode
+		want   os.FileMode
+	}{
+		{checkpointScript, filePerm, execPerm},
+		{checkpointScript, 0o775, execPerm},
+		{checkpointScript, os.ModeSetuid | execPerm, execPerm},
+		{checkpointCommon, 0o666, filePerm},
+		{checkpointCommon, os.ModeSetgid | os.ModeSticky | filePerm, filePerm},
+	} {
+		t.Run(tc.rel+"/"+tc.before.String(), func(t *testing.T) {
+			s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}}
+			text := crlfText(checkpointFixtureTexts[tc.rel])
+			path := filepath.Join(s.repoPath, filepath.FromSlash(tc.rel))
+			mustWrite(t, path, text)
+			before := plantCheckpointMode(t, path, tc.before)
+			source := checkpointSource{tc.rel, []byte(checkpointFixtureTexts[tc.rel])}
+			if err := installCheckpointSource(t.Context(), s, source, false); err != nil {
+				t.Fatal(err)
+			}
+			assertCheckpointFile(t, s.repoPath, tc.rel, text, tc.want)
+			after, err := os.Stat(path)
+			if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+				t.Fatalf("repair of %s at %v changed inode or mtime: %v, %v", tc.rel, tc.before, after, err)
+			}
+		})
+	}
+}
+
+// plantCheckpointMode sets a distinct mtime and verifies the starting mode, including special bits.
+func plantCheckpointMode(t *testing.T, path string, mode os.FileMode) os.FileInfo {
+	t.Helper()
+	stamp := time.Unix(1000000000, 0)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode() != mode {
+		t.Fatalf("plant %v on %s: stat %v, error %v", mode, path, info, err)
+	}
+	return info
 }
 
 // TestCheckpointSourceModeFollowsContent changes which bundle path starts with a shebang.

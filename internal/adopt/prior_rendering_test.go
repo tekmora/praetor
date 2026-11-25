@@ -64,6 +64,35 @@ func priorDigestSet(t *testing.T, text string) map[string]string {
 	return map[string]string{fixtureDigest(t, "recorded text", []byte(text)): "fixture"}
 }
 
+// TestConcurrentPriorScaffoldRefresh replays the same observed CRLF template in two
+// sessions. A matching refresh succeeds twice and a subsequent local edit survives.
+func TestConcurrentPriorScaffoldRefresh(t *testing.T) {
+	root := t.TempDir()
+	sc := scaffold{rel: "template.md", content: []byte("updated\n"), perm: filePerm}
+	path := filepath.Join(root, sc.rel)
+	prior := []byte("prior\r\n")
+	mustWrite(t, path, string(prior))
+	refresh := func() error {
+		s := &adoptSession{repoPath: root, report: &AdoptReport{}}
+		return s.replacePriorText(t.Context(), path, prior, true, sc, "Updated template")
+	}
+	for range 2 {
+		if err := refresh(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mustRead(t, path); got != "updated\r\n" {
+		t.Fatalf("refreshed template = %q", got)
+	}
+	mustWrite(t, path, "local edit\n")
+	if err := refresh(); err == nil {
+		t.Fatal("accepted stale refresh after local edit")
+	}
+	if got := mustRead(t, path); got != "local edit\n" {
+		t.Fatalf("stale refresh changed local edit to %q", got)
+	}
+}
+
 // Positive: the recorded LF text and its CRLF checkout (core.autocrlf on Windows) are both
 // recognised, and the CRLF one is reported as such so a refresh can keep its style (HISS-21).
 func TestIsPriorRendering_Positive_EitherConsistentLineEndingStyle(t *testing.T) {

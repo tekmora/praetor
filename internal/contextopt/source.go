@@ -266,7 +266,13 @@ func snapshotRootBytes(ctx context.Context, root *os.Root, name string) ([]byte,
 // directory into dst, rejecting symlinks, non-regular files and any change to the
 // file's identity, size or modification time during the copy. dst may hold a partial
 // copy when an error is returned; callers discard it.
-func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64) (size int64, err error) {
+func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64) (int64, error) {
+	return inspectSnapshot(ctx, root, name, dst, limit, nil)
+}
+
+// inspectSnapshot copies the bounded snapshot and optionally inspects its still-open
+// descriptor after verifying that the name continues to refer to it.
+func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64, inspect func(*os.File, os.FileInfo) error) (size int64, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -292,6 +298,9 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 	linked, err := root.Lstat(name)
 	if err != nil || !os.SameFile(before, linked) {
 		return 0, errors.Join(fmt.Errorf("source replaced during snapshot"), err)
+	}
+	if inspect != nil {
+		return size, inspect(file, linked)
 	}
 	return size, nil
 }
