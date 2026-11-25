@@ -122,7 +122,9 @@ type ScanReport struct {
 	// toward TotalInfractions, Breakdown, the debt baseline or any gate verdict.
 	Complexity ComplexityReport `json:"complexity"`
 
-	capLimit int
+	// contentClaims records successful content dispatches during the bounded file walk.
+	contentClaims map[string]string
+	capLimit      int
 	// functions are the functions the scanner located in the file being read (noteFunction);
 	// the walk anchors that file's findings to them and starts the next file empty.
 	functions []funcSpan
@@ -221,11 +223,12 @@ func scanContext(ctx context.Context, timeout time.Duration) (context.Context, c
 
 func newScanReport(capLimit int) *ScanReport {
 	return &ScanReport{
-		Breakdown:  make(map[string]int),
-		Violations: make([]InvariantViolation, 0),
-		Coverage:   &ScanCoverage{UnscannedByExtension: make(map[string]int)},
-		Complexity: ComplexityReport{Measurements: make([]Measurement, 0)},
-		capLimit:   capLimit,
+		Breakdown:     make(map[string]int),
+		Violations:    make([]InvariantViolation, 0),
+		Coverage:      &ScanCoverage{UnscannedByExtension: make(map[string]int)},
+		Complexity:    ComplexityReport{Measurements: make([]Measurement, 0)},
+		contentClaims: make(map[string]string),
+		capLimit:      capLimit,
 	}
 }
 
@@ -439,7 +442,7 @@ func (w *scanWalker) skipFile(rel string, info os.FileInfo) bool {
 // candidate that is a symlink, a special file or oversize included, is counted as unscanned and
 // never opened, exactly as before content scanners existed.
 func (w *scanWalker) skipCandidate(rel string, info os.FileInfo) bool {
-	if isContentCandidate(rel, strings.ToLower(filepath.Ext(rel))) &&
+	if ContentCandidateLanguage(rel) != "" &&
 		info.Mode().IsRegular() && info.Size() <= MaxScanFileSize {
 		return false
 	}

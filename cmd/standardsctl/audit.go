@@ -327,7 +327,7 @@ func auditedInfractions(scanRep *hiss.ScanReport, opts *auditOptions) ([]baselin
 	if opts.effective != nil && opts.effective.Manifest != nil {
 		exceptions = opts.effective.Manifest.Exceptions
 	}
-	violations, err := applyHISSExceptions(scanRep.Violations, exceptions, config.ExceptionDay(time.Now()))
+	violations, err := applyHISSExceptions(scanRep, exceptions, config.ExceptionDay(time.Now()))
 	if err != nil {
 		return nil, err
 	}

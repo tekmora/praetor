@@ -14,43 +14,55 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/adopt"
+	"github.com/cordanaLLM/praetor/internal/baseline"
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/generated"
 	"github.com/cordanaLLM/praetor/internal/hiss"
-	"github.com/cordanaLLM/praetor/internal/hisscatalog"
 )
 
 // exceptionsGate names the step on every line it prints.
 const exceptionsGate = "Exceptions"
 
-// applyHISSExceptions removes only live, matching scanner findings and reports declarations
-// that match no finding as stale. Other HISS gates keep judging their own declarations.
-func applyHISSExceptions(violations []hiss.InvariantViolation, entries []config.Exception, today time.Time) ([]hiss.InvariantViolation, error) {
-	scannerRules := make(map[string]struct{})
-	for _, rule := range hisscatalog.ScannerRuleIDs() {
-		scannerRules[rule] = struct{}{}
-	}
+// applyHISSExceptions removes only live, matching scanner findings and reports scanner-routed
+// declarations that match no finding as stale. Entries delegated to another decider or targeting
+// a rule/language cell outside the HISS scanner stay with their own gates.
+func applyHISSExceptions(scan *hiss.ScanReport, entries []config.Exception, today time.Time) ([]hiss.InvariantViolation, error) {
+	entries = scannerExceptionEntries(entries, scan)
+	violations := scan.Violations
 	used := make([]bool, len(entries))
 	remaining := make([]hiss.InvariantViolation, 0, len(violations))
 	for i := 0; i < len(violations); i++ {
-		entry, live := matchingHISSException(violations[i], entries, scannerRules, today, used)
+		entry, live := matchingHISSException(violations[i], entries, today, used)
 		if live {
 			printExcusedHISSFinding(violations[i], *entry)
 			continue
 		}
 		remaining = append(remaining, violations[i])
 	}
-	if err := unusedHISSException(entries, scannerRules, used); err != nil {
+	if err := unusedHISSException(entries, used); err != nil {
 		return nil, err
 	}
 	return remaining, nil
 }
 
-func matchingHISSException(violation hiss.InvariantViolation, entries []config.Exception, rules map[string]struct{}, today time.Time, used []bool) (*config.Exception, bool) {
+// scannerExceptionEntries selects the entries owned by the scanner that claimed each file.
+func scannerExceptionEntries(entries []config.Exception, scan *hiss.ScanReport) []config.Exception {
+	var selected []config.Exception
+	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
+		if entries[i].AppliesToHISSScanner(scan.ClaimedContentLanguage) {
+			selected = append(selected, entries[i])
+		}
+	}
+	return selected
+}
+
+// matchingHISSException selects the best live scanner exception matching violation and marks
+// every matching scanner entry (live or expired) as used.
+func matchingHISSException(violation hiss.InvariantViolation, entries []config.Exception, today time.Time, used []bool) (*config.Exception, bool) {
 	var selected *config.Exception
 	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
 		entry := &entries[i]
-		if !hissExceptionMatches(violation, entry, rules) {
+		if !hissExceptionMatches(violation, entry) {
 			continue
 		}
 		used[i] = true
@@ -59,12 +71,26 @@ func matchingHISSException(violation hiss.InvariantViolation, entries []config.E
 	return selected, selected != nil
 }
 
-func hissExceptionMatches(violation hiss.InvariantViolation, entry *config.Exception, rules map[string]struct{}) bool {
-	_, scannerRule := rules[entry.Rule]
-	return scannerRule && entry.Rule == violation.RuleID && entry.Path == violation.FilePath &&
-		(entry.Function == "" || entry.Function == violation.Symbol)
+// hissExceptionMatches reports whether entry is a HISS scanner exception covering violation's
+// rule, slash-normalized file path, and optional function scope.
+func hissExceptionMatches(violation hiss.InvariantViolation, entry *config.Exception) bool {
+	return entry.Rule == violation.RuleID &&
+		entry.Path == filepath.ToSlash(violation.FilePath) &&
+		violationMatchesFunction(violation, entry.Function)
 }
 
+// violationMatchesFunction checks whether violation belongs to fn when function scope is set,
+// matching either the violation's explicit Symbol or its fn:<name> function anchor.
+func violationMatchesFunction(violation hiss.InvariantViolation, fn string) bool {
+	if fn == "" || violation.Symbol == fn {
+		return true
+	}
+	anchored, ok := strings.CutPrefix(violation.Anchor, "fn:")
+	return ok && anchored == fn
+}
+
+// preferLiveHISSException keeps a live candidate over none or over a file-wide live entry when
+// candidate narrows the match to a function.
 func preferLiveHISSException(selected, candidate *config.Exception, today time.Time) *config.Exception {
 	if candidate.Expired(today) {
 		return selected
@@ -75,17 +101,30 @@ func preferLiveHISSException(selected, candidate *config.Exception, today time.T
 	return selected
 }
 
+// printExcusedHISSFinding prints an audit notice for a scanner finding waived by entry.
 func printExcusedHISSFinding(violation hiss.InvariantViolation, entry config.Exception) {
-	finding := fmt.Sprintf("[EXCUSED] %s %s:%d", violation.RuleID, violation.FilePath, violation.LineNumber)
-	if violation.Symbol != "" {
-		finding += " function " + violation.Symbol
+	finding := fmt.Sprintf("[EXCUSED] %s %s:%d", violation.RuleID, baseline.NormalizePath(violation.FilePath), violation.LineNumber)
+	if fn := excusedFunctionLabel(violation, entry); fn != "" {
+		finding += " function " + fn
 	}
 	fmt.Printf("%s: %s; exception until %s.\n", finding, entry.Reason, entry.Expires)
 }
 
-func unusedHISSException(entries []config.Exception, rules map[string]struct{}, used []bool) error {
+// excusedFunctionLabel returns the function name printed for an excused finding, if known.
+func excusedFunctionLabel(violation hiss.InvariantViolation, entry config.Exception) string {
+	if violation.Symbol != "" {
+		return violation.Symbol
+	}
+	if entry.Function != "" {
+		return entry.Function
+	}
+	return ""
+}
+
+// unusedHISSException fails the first HISS scanner exception that matched no scanner finding.
+func unusedHISSException(entries []config.Exception, used []bool) error {
 	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
-		if _, scannerRule := rules[entries[i].Rule]; scannerRule && !used[i] {
+		if !used[i] {
 			return fmt.Errorf("[FAIL] %s: HISS exception (rule %s, %s) is unused; no matching finding in its file/function, so remove the stale entry",
 				exceptionsGate, entries[i].Rule, entries[i].Target())
 		}

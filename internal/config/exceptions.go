@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	slashpath "path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
 	"github.com/cordanaLLM/praetor/internal/util"
 	"github.com/cordanaLLM/praetor/tools/secrets/rules"
@@ -492,12 +494,19 @@ func (e Exception) Problem(today time.Time) string {
 	return e.problem(today)
 }
 
+// AppliesToHISSScanner reports whether e is routed to the internal/hiss invariant scanner: its
+// entry sets no delegating tool and names a target in a rule/language cell the scanner decides.
+func (e Exception) AppliesToHISSScanner(contentLanguage func(string) string) bool {
+	return e.Tool == "" && hisscatalog.ScannerDecides(e.Rule, e.Target(), contentLanguage)
+}
+
+// functionProblem validates optional function scoping on HISS scanner exceptions.
 func (e Exception) functionProblem() string {
 	if e.Function == "" {
 		return ""
 	}
-	if !slices.Contains(hisscatalog.ScannerRuleIDs(), e.Rule) {
-		return fmt.Sprintf("function is only valid for a HISS scanner rule, got %s", e.Rule)
+	if !e.AppliesToHISSScanner(hiss.ContentCandidateLanguage) {
+		return e.nonScannerFunctionProblem()
 	}
 	if e.Path == "" || e.Glob != "" {
 		return "function requires one file path and no glob"
@@ -508,6 +517,19 @@ func (e Exception) functionProblem() string {
 	return ""
 }
 
+// nonScannerFunctionProblem explains why function scope is refused on an entry outside the HISS
+// scanner route.
+func (e Exception) nonScannerFunctionProblem() string {
+	if e.Tool != "" && hisscatalog.IsScannerRule(e.Rule) {
+		return fmt.Sprintf("function is only valid for a HISS scanner rule, got %s delegated to %s", e.Rule, e.Tool)
+	}
+	if hisscatalog.IsScannerRule(e.Rule) {
+		return fmt.Sprintf("function is only valid for a HISS scanner rule in a language it scans, got %s on %s", e.Rule, e.Target())
+	}
+	return fmt.Sprintf("function is only valid for a HISS scanner rule, got %s", e.Rule)
+}
+
+// targetProblem validates tool, path and glob targets for the entry's rule.
 func (e Exception) targetProblem() string {
 	if e.Rule == ExceptionRuleMutants {
 		if e.Tool != "" || e.Glob != "" || e.Path == "" {
@@ -527,10 +549,28 @@ func (e Exception) targetProblem() string {
 	if e.Rule == ExceptionRuleUILatencySource {
 		return e.uiLatencySourceProblem()
 	}
-	if e.Tool != "" {
-		return fmt.Sprintf("rule %s must not set tool", e.Rule)
+	if problem := e.delegatedHISSToolProblem(); problem != "" {
+		return problem
 	}
 	return e.pathOrGlobTargetProblem()
+}
+
+// delegatedHISSToolProblem validates tool when set outside the dedicated tool gates: only HISS
+// scanner rules may name another decider (such as golangci-lint or semgrep) to delegate an entry.
+func (e Exception) delegatedHISSToolProblem() string {
+	if e.Tool == "" {
+		return ""
+	}
+	if !hisscatalog.IsScannerRule(e.Rule) {
+		return fmt.Sprintf("rule %s must not set tool", e.Rule)
+	}
+	if len(e.Tool) > 64 || strings.TrimSpace(e.Tool) != e.Tool || strings.ContainsAny(e.Tool, " \t\r\n") {
+		return "tool must be a single decider name of at most 64 bytes without whitespace"
+	}
+	if strings.EqualFold(e.Tool, "hiss") || strings.EqualFold(e.Tool, "internal/hiss") {
+		return "omit tool for a HISS scanner exception; set tool only when delegating to another decider"
+	}
+	return ""
 }
 
 func (e Exception) uiLatencySourceProblem() string {
@@ -576,8 +616,10 @@ func (e Exception) declaredLintersTargetProblem() string {
 	return ""
 }
 
+// pathOrGlobTargetProblem checks that path and glob are mutually exclusive and well-formed,
+// enforcing single-file path targets on HISS scanner entries and HISS-11 supply-chain entries.
 func (e Exception) pathOrGlobTargetProblem() string {
-	if (slices.Contains(hisscatalog.ScannerRuleIDs(), e.Rule) || e.Rule == ExceptionRuleSupplyChain) && (e.Path == "" || e.Glob != "") {
+	if e.Rule == ExceptionRuleSupplyChain && (e.Path == "" || e.Glob != "") {
 		return fmt.Sprintf("rule %s must name one file by path, not a glob", e.Rule)
 	}
 	if (e.Path == "") == (e.Glob == "") {
@@ -593,7 +635,34 @@ func (e Exception) pathOrGlobTargetProblem() string {
 	if problem := StyleExclusionProblem(e.Glob); problem != "" {
 		return fmt.Sprintf("glob %q %s", e.Glob, problem)
 	}
+	return e.scannerGlobProblem()
+}
+
+// scannerGlobProblem requires an exact path when an undelegated glob could cover a scanner
+// cell. A wildcard in the extension (or in a basename without one) cannot fix a language.
+func (e Exception) scannerGlobProblem() string {
+	if e.Tool != "" || !hisscatalog.IsScannerRule(e.Rule) {
+		return ""
+	}
+	dir, name := slashpath.Split(e.Glob)
+	suffix := slashpath.Ext(name)
+	if suffix == "" {
+		suffix = name
+	}
+	if strings.ContainsAny(suffix, globCharacters) {
+		return fmt.Sprintf("rule %s glob %q has an ambiguous language: name one file by path or delegate with tool", e.Rule, e.Glob)
+	}
+	if e.AppliesToHISSScanner(hiss.ContentCandidateLanguage) || e.globCoversWorkflowCell(dir, name) {
+		return fmt.Sprintf("rule %s must name one file by path, not a glob", e.Rule)
+	}
 	return ""
+}
+
+// globCoversWorkflowCell checks the workflow scanner when a directory pattern can reach it.
+func (e Exception) globCoversWorkflowCell(dir, name string) bool {
+	return ghworkflow.IsYAMLName(name) &&
+		util.MatchGlobSegments(strings.Split(strings.TrimSuffix(dir, "/"), "/"), strings.Split(ghworkflow.Dir, "/")) &&
+		hisscatalog.ScannerDecides(e.Rule, ghworkflow.Dir+"/"+name, hiss.ContentCandidateLanguage)
 }
 
 // rootLicenseTargetProblem requires a root-license-notice or reuse-annotation-order entry to name

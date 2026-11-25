@@ -20,6 +20,24 @@ func runBaselineCmd(t *testing.T, f *auditFixture, extra ...string) (string, err
 	return captureStdout(t, func() error { return dispatchCommand("baseline", args) })
 }
 
+// TestBaselineInspect_SlashPaths checks the main and optional listings for snapshots
+// recorded with Windows separators, including when inspection runs on another platform.
+func TestBaselineInspect_SlashPaths(t *testing.T) {
+	root := t.TempDir()
+	main := &baseline.Baseline{Infractions: []baseline.Infraction{
+		{RuleID: "HISS-07", FilePath: `src\lib.rs`, LineNumber: 3},
+	}}
+	writeFixtureFile(t, root, gating.ReadmeBaselineFile,
+		`{"version":1,"infractions":[{"rule_id":"README-01","file_path":"docs\\README.md","line_number":4}]}`)
+	out, err := captureStdout(t, func() error {
+		return printBaseline(filepath.Join(root, ".standards-baseline.json"), main)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out, "[HISS-07] src/lib.rs:3", "[README-01] docs/README.md:4")
+}
+
 func TestBaselineRecord_Positive(t *testing.T) {
 	f := newAuditFixture(t)
 	f.addViolation(t)

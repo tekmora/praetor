@@ -441,7 +441,7 @@ func printBaseline(path string, b *baseline.Baseline) error {
 		fmt.Printf("Recorded increase rationale: %s\n", b.IncreaseRationale)
 	}
 	for i, inf := range b.Infractions {
-		fmt.Printf("  #%d [%s] %s:%d (%s) - %s\n", i+1, inf.RuleID, inf.FilePath, inf.LineNumber, inf.Symbol, inf.Message)
+		fmt.Printf("  #%d [%s] %s:%d (%s) - %s\n", i+1, inf.RuleID, baseline.NormalizePath(inf.FilePath), inf.LineNumber, inf.Symbol, inf.Message)
 	}
 
 	if b.Count() == 0 {
@@ -476,7 +476,7 @@ func printOptionalBaselines(repoDir, repo string) error {
 			fmt.Printf("Recorded increase rationale: %s\n", base.IncreaseRationale)
 		}
 		for i, inf := range base.Infractions {
-			fmt.Printf("  #%d [%s] %s:%d (%s) - %s\n", i+1, inf.RuleID, inf.FilePath, inf.LineNumber, inf.Anchor, inf.Message)
+			fmt.Printf("  #%d [%s] %s:%d (%s) - %s\n", i+1, inf.RuleID, baseline.NormalizePath(inf.FilePath), inf.LineNumber, inf.Anchor, inf.Message)
 		}
 		if base.Count() == 0 {
 			fmt.Printf("Zero technical debt recorded in %s.\n", file)
