@@ -82,3 +82,24 @@ func TestDirectoryAbsent_Boundary_ExistingDirectoryAndWrappedError(t *testing.T)
 		t.Fatal("a wrapped not-exist error for a missing directory with a trailing separator was not reported absent")
 	}
 }
+
+// TestSoleCause checks wrapped and singleton joins as well as the depth limit.
+// A distinct close cause anywhere in the chain must prevent abbreviation.
+func TestSoleCause(t *testing.T) {
+	change := errors.New("changed entry")
+	closeErr := errors.New("close failed")
+	single := fmt.Errorf("stat: %w", errors.Join(change))
+	if !errors.Is(SoleCause(single), change) || SoleCause(nil) != nil {
+		t.Fatalf("wrong single-cause classification: %v", single)
+	}
+	if SoleCause(fmt.Errorf("stat: %w", errors.Join(single, closeErr))) != nil {
+		t.Fatal("compound failure classified as an isolated change")
+	}
+	deep := change
+	for range 63 {
+		deep = errors.Join(deep)
+	}
+	if !errors.Is(SoleCause(deep), change) || SoleCause(errors.Join(deep)) != nil {
+		t.Fatal("expected a single leaf within 64 inspected errors only")
+	}
+}

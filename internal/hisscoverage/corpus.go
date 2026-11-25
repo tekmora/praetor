@@ -110,11 +110,16 @@ func (stage fixtureStage) captureBucket(ctx context.Context, parent *contextopt.
 		return bucket, fmt.Errorf("open fixture bucket %s: %w", name, err)
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
+	var report Report
 	entries, err := readBucketEntries(ctx, dir)
+	if errors.Is(util.SoleCause(err), contextopt.ErrUnionDirectory) {
+		stage.recordFixtureError(&report, name, "", escapedError{err})
+		bucket.findings = report.Findings
+		return bucket, nil
+	}
 	if err != nil {
 		return bucket, err
 	}
-	var report Report
 	files, err := stage.listedFixtures(ctx, name, entries, &report)
 	if err != nil {
 		return bucket, err
@@ -179,30 +184,43 @@ func (stage fixtureStage) recordFixtureError(report *Report, bucket, name string
 	})
 }
 
+// listedSnapshotReader reads a fixture using the identity saved by the bucket listing.
+type listedSnapshotReader interface {
+	ReadListedSnapshot(context.Context, string, os.FileInfo) ([]byte, error)
+}
+
 // captureFile saves one stable regular file or records a change since listing.
 func (b *bucketSnapshot) captureFile(
-	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket string, listed os.FileInfo, report *Report,
+	ctx context.Context, dir listedSnapshotReader, bucket string, listed os.FileInfo, report *Report,
 ) error {
 	name := listed.Name()
 	bounded, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
 	defer cancel()
 	data, err := dir.ReadListedSnapshot(bounded, name, listed)
-	if errors.Is(err, contextopt.ErrSourceIdentityUnavailable) {
-		b.stage.recordFixtureError(report, bucket, name, escapedError{err})
-		return nil
-	}
-	if errors.Is(err, contextopt.ErrSourceNotRegular) || errors.Is(err, os.ErrNotExist) {
-		recordChangedBucket(report, b.stage.ruleID, b.stage.language, bucket, name)
-		return nil
-	}
 	if err != nil {
-		return escapedError{fmt.Errorf("read fixture %s: %w", name, err)}
+		return b.stage.recordCaptureFailure(report, bucket, name, err)
 	}
 	file, err := b.store.save(bounded, name, data)
 	if err != nil {
 		return err
 	}
 	b.files = append(b.files, file)
+	return nil
+}
+
+// recordCaptureFailure abbreviates an isolated kind change or disappearance.
+// A second cause, including a failed close, remains in the fixture's diagnostic.
+func (stage fixtureStage) recordCaptureFailure(report *Report, bucket, name string, err error) error {
+	cause := util.SoleCause(err)
+	switch {
+	case errors.Is(cause, os.ErrNotExist), cause != nil && errors.Is(err, contextopt.ErrSourceNotRegular):
+		recordChangedBucket(report, stage.ruleID, stage.language, bucket, name)
+	case errors.Is(err, contextopt.ErrSourceIdentityUnavailable), errors.Is(err, contextopt.ErrSourceNotRegular),
+		errors.Is(err, os.ErrNotExist):
+		stage.recordFixtureError(report, bucket, name, escapedError{err})
+	default:
+		return escapedError{fmt.Errorf("read fixture %s: %w", name, err)}
+	}
 	return nil
 }
 
@@ -268,7 +286,7 @@ func classifyBucketEntry(ctx context.Context, entry os.DirEntry) (entryClass, os
 		return 0, nil, err
 	}
 	info, err := entry.Info()
-	if errors.Is(err, os.ErrNotExist) && !errors.Is(err, contextopt.ErrSourceIdentityUnavailable) {
+	if util.SoleNotExist(err) {
 		return entryChanged, nil, nil
 	}
 	if err != nil {

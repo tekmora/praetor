@@ -15,10 +15,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// readLeafAttributes requests only the attributes needed to classify a listed Windows leaf.
+const readLeafAttributes leafAccess = listDirectory + 1
+
 // openNativeLeaf opens the reparse point itself relative to the pinned parent handle.
 // Directory type is checked on the handle so a misplaced regular leaf stays distinct
 // from a missing bucket, including on Windows filesystems with ambiguous path errors.
-func openNativeLeaf(parent uintptr, parentName, name string, _ bool) (*os.File, error) {
+func openNativeLeaf(parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
 	leaf, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return nil, err
@@ -30,10 +33,17 @@ func openNativeLeaf(parent uintptr, parentName, name string, _ bool) (*os.File, 
 	}
 	// SAFETY: Sizeof is a compile-time ABI size and dereferences no pointer.
 	attrs.Length = uint32(unsafe.Sizeof(attrs))
+	rights := uint32(windows.FILE_GENERIC_READ)
+	options := uint32(windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT)
+	if access == readLeafAttributes {
+		rights = windows.FILE_READ_ATTRIBUTES
+		// A synchronous open would also require SYNCHRONIZE for an attribute query.
+		options = windows.FILE_OPEN_REPARSE_POINT
+	}
 	var handle windows.Handle
-	err = windows.NtCreateFile(&handle, windows.FILE_GENERIC_READ, &attrs, &windows.IO_STATUS_BLOCK{},
+	err = windows.NtCreateFile(&handle, rights, &attrs, &windows.IO_STATUS_BLOCK{},
 		nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+		windows.FILE_OPEN, options, 0, 0)
 	if err != nil {
 		var status windows.NTStatus
 		if errors.As(err, &status) {
@@ -65,7 +75,7 @@ func (dir *SnapshotDirectory) statListedName(name string) (_ os.FileInfo, err er
 	if err := ValidateLeafName(name); err != nil {
 		return nil, err
 	}
-	file, err := openLeafAt(dir.File, name, false)
+	file, err := openLeafAt(dir.File, name, readLeafAttributes)
 	if err != nil {
 		return nil, err
 	}

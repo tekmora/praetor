@@ -52,12 +52,18 @@ func DirectoryAbsent(dir string, err error) bool {
 // SoleNotExist reports one missing-file cause through ordinary wrappers and singleton
 // joins. A second cause (for example, closing the parent) must survive verification.
 func SoleNotExist(err error) bool {
+	return errors.Is(SoleCause(err), fs.ErrNotExist)
+}
+
+// SoleCause returns the single leaf through wrappers and singleton joins.
+// Multiple causes or a chain exceeding the inspection bound yield nil.
+func SoleCause(err error) error {
 	const maxWrappers = 64
 	for depth := 0; err != nil && depth < maxWrappers; depth++ {
 		if joined, ok := err.(interface{ Unwrap() []error }); ok {
 			causes := joined.Unwrap()
 			if len(causes) != 1 {
-				return false
+				return nil
 			}
 			err = causes[0]
 			continue
@@ -66,7 +72,7 @@ func SoleNotExist(err error) bool {
 			err = single.Unwrap()
 			continue
 		}
-		return errors.Is(err, fs.ErrNotExist)
+		return err
 	}
-	return false
+	return nil
 }

@@ -210,12 +210,15 @@ func listingCursor(t *testing.T, path string) *contextopt.SnapshotDirectory {
 	return cursor
 }
 
-// failedLookup wraps a regular entry with a metadata lookup error other than ENOENT.
-type failedLookup struct{ os.DirEntry }
+// failedLookup wraps a regular entry with the supplied metadata lookup failure.
+type failedLookup struct {
+	os.DirEntry
+	cause error
+}
 
-// Info returns a named permission failure as a filesystem lookup would.
+// Info associates the lookup failure with the entry that produced it.
 func (e failedLookup) Info() (os.FileInfo, error) {
-	return nil, &os.PathError{Op: "stat", Path: e.Name(), Err: os.ErrPermission}
+	return nil, &os.PathError{Op: "stat", Path: e.Name(), Err: e.cause}
 }
 
 // TestVerifyNamesFailedLookups requires a finding for every listed lookup failure.
@@ -224,7 +227,7 @@ func TestVerifyNamesFailedLookups(t *testing.T) {
 	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "b.go", cleanGo)
 	ctx := withBucketReader(t.Context(), func(_ string, entries []os.DirEntry) []os.DirEntry {
 		for i, entry := range entries {
-			entries[i] = failedLookup{entry}
+			entries[i] = failedLookup{entry, os.ErrPermission}
 		}
 		return entries
 	})
@@ -237,5 +240,78 @@ func TestVerifyNamesFailedLookups(t *testing.T) {
 		if finding.Fixture != name || !strings.Contains(finding.Detail, "incomplete replay") {
 			t.Fatalf("expected a named lookup failure on %q, got %+v", name, finding)
 		}
+	}
+}
+
+// TestVerifyMissingLookupPreservesClose checks the complete diagnostic through Verify.
+func TestVerifyMissingLookupPreservesClose(t *testing.T) {
+	const name = "missing.go"
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, name, cleanGo)
+	closeErr := errors.New("close metadata handle failed")
+	ctx := withBucketReader(t.Context(), func(_ string, entries []os.DirEntry) []os.DirEntry {
+		for i, entry := range entries {
+			entries[i] = failedLookup{entry, errors.Join(os.ErrNotExist, closeErr)}
+		}
+		return entries
+	})
+	report := verifySnapshot(t, ctx, root)
+	requireSnapshotFinding(t, report, 0, name, closeErr.Error())
+	if !strings.Contains(report.Findings[0].Detail, os.ErrNotExist.Error()) {
+		t.Fatalf("missing lookup cause: %+v", report.Findings)
+	}
+}
+
+// failedCapture returns the read and close result that captureFile must report.
+type failedCapture struct{ err error }
+
+// ReadListedSnapshot returns the fixture handle's terminal diagnostic.
+func (r failedCapture) ReadListedSnapshot(context.Context, string, os.FileInfo) ([]byte, error) {
+	return nil, r.err
+}
+
+// TestCaptureFailurePreservesClose distinguishes a single wrapped change from
+// the same change joined to a close failure at the fixture reader boundary.
+func TestCaptureFailurePreservesClose(t *testing.T) {
+	const name = "child.go"
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, name, cleanGo)
+	listed, err := os.Stat(filepath.Join(bucketPath(root, "HISS-01", "go", bucketNegative), name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := bucketSnapshot{stage: fixtureStage{ruleID: "HISS-01", language: "go"}}
+	closeErr := errors.New("close fixture handle failed")
+	for _, cause := range [...]error{os.ErrNotExist, contextopt.ErrSourceNotRegular} {
+		for _, cleanup := range [...]error{nil, closeErr} {
+			var report Report
+			err := errors.Join(fmt.Errorf("read fixture: %w", cause), cleanup)
+			if err := bucket.captureFile(t.Context(), failedCapture{err}, bucketNegative, listed, &report); err != nil {
+				t.Fatal(err)
+			}
+			if cleanup == nil {
+				requireSnapshotFinding(t, &report, 0, name, "changed during verification")
+				continue
+			}
+			requireSnapshotFinding(t, &report, 0, name, "incomplete replay")
+			detail := report.Findings[0].Detail
+			if !strings.Contains(detail, cause.Error()) || !strings.Contains(detail, closeErr.Error()) {
+				t.Fatalf("lost a capture or close diagnostic: %q", detail)
+			}
+		}
+	}
+}
+
+// TestVerifyUnionBucketIsIncomplete requires the native refusal to name the bucket
+// in the report even when a reader also returns entries from that directory.
+func TestVerifyUnionBucketIsIncomplete(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, "ignored.go", cleanGo)
+	stub := func(_ string, _ int) ([]os.DirEntry, error) {
+		return []os.DirEntry{namedTestDirectory{name: "partial"}}, contextopt.ErrUnionDirectory
+	}
+	report := verifySnapshot(t, context.WithValue(t.Context(), bucketReaderKey{}, stub), root)
+	requireSnapshotFinding(t, report, 0, "", "incomplete replay")
+	finding := report.Findings[0]
+	if finding.Bucket != bucketNegative || !strings.Contains(finding.Detail, "MNT_UNION") ||
+		!strings.Contains(finding.Detail, bucketNegative) || report.Passed() {
+		t.Fatalf("union-mounted bucket: %+v", report)
 	}
 }

@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+// ErrUnionDirectory identifies a Darwin MNT_UNION cursor that can switch directory layers.
+var ErrUnionDirectory = errors.New("MNT_UNION can switch the directory descriptor to the lower layer")
+
 // SnapshotDirectory retains the verified directory descriptor as the root for flat leaf
 // opens and as the cursor for its listing. Name is for diagnostics only.
 type SnapshotDirectory struct {
@@ -57,7 +60,7 @@ func OpenChildDirectory(ctx context.Context, dir *SnapshotDirectory, name string
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	child, err := openLeafAt(dir.File, name, true)
+	child, err := openLeafAt(dir.File, name, listDirectory)
 	if err != nil {
 		return nil, errors.Join(err, ctx.Err())
 	}
@@ -215,7 +218,7 @@ func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name strin
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	file, err := openLeafAt(dir.File, name, false)
+	file, err := openLeafAt(dir.File, name, readLeafData)
 	if err != nil {
 		return nil, err
 	}
@@ -230,9 +233,19 @@ func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name strin
 	return data, nil
 }
 
+// leafAccess describes the operation to be performed on the returned handle.
+type leafAccess uint8
+
+const (
+	// readLeafData allows the caller to read fixture bytes.
+	readLeafData leafAccess = iota
+	// listDirectory allows the caller to enumerate children.
+	listDirectory
+)
+
 // openLeafAt holds a reference to the parent's descriptor until the native open returns,
 // including if another caller closes the directory concurrently.
-func openLeafAt(parent *os.File, name string, directory bool) (*os.File, error) {
+func openLeafAt(parent *os.File, name string, access leafAccess) (*os.File, error) {
 	conn, err := parent.SyscallConn()
 	if err != nil {
 		return nil, err
@@ -240,7 +253,7 @@ func openLeafAt(parent *os.File, name string, directory bool) (*os.File, error) 
 	var child *os.File
 	var openErr error
 	if err := conn.Control(func(fd uintptr) {
-		child, openErr = openNativeLeaf(fd, parent.Name(), name, directory)
+		child, openErr = openNativeLeaf(fd, parent.Name(), name, access)
 	}); err != nil {
 		return nil, err
 	}

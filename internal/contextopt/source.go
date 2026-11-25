@@ -307,7 +307,7 @@ func openSource(root *os.Root, name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, openErr := openLeafAt(parent, name, false)
+	file, openErr := openLeafAt(parent, name, readLeafData)
 	if err := parent.Close(); err != nil {
 		if file != nil {
 			err = errors.Join(err, file.Close())

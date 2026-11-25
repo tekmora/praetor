@@ -7,18 +7,28 @@ package contextopt
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"unsafe"
 
+	"github.com/cordanaLLM/praetor/internal/util"
 	"golang.org/x/sys/unix"
 )
 
 // direntBlockSize matches the block used by os.File's Unix directory cursor.
 const direntBlockSize = 8192
 
+// direntNameOffset is the native header length preceding the first name byte.
+// SAFETY: Offsetof is a compile-time ABI constant and accesses no memory.
+const direntNameOffset = int(unsafe.Offsetof(unix.Dirent{}.Name))
+
 // maxEmptyDirentBlocks limits consecutive native reads that yield only unused slots.
 const maxEmptyDirentBlocks = 256
+
+// maxDirentReadAttempts includes the initial read and bounds retries during a signal storm.
+const maxDirentReadAttempts = 8
 
 // readNames returns at most n names, retaining surplus records for the next bounded read.
 func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
@@ -29,7 +39,7 @@ func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedNam
 			return nil, ctx.Err()
 		default:
 		}
-		batch, err := dir.readDirentBlock(ctx)
+		batch, err := dir.readDirentBlock(ctx, readNativeDirents)
 		if err != nil {
 			return nil, err
 		}
@@ -45,7 +55,7 @@ func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedNam
 }
 
 // readDirentBlock reads one block through the held file without opening a second directory cursor.
-func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context) ([]listedName, error) {
+func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context, read func(uintptr, []byte) (int, error)) ([]listedName, error) {
 	conn, err := dir.SyscallConn()
 	if err != nil {
 		return nil, err
@@ -53,7 +63,9 @@ func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context) ([]listedName
 	var buf [direntBlockSize]byte
 	var size int
 	var readErr error
-	if err := conn.Control(func(fd uintptr) { size, readErr = readNativeDirents(fd, buf[:]) }); err != nil {
+	if err := conn.Control(func(fd uintptr) {
+		size, readErr = retryDirentRead(ctx, func() (int, error) { return read(fd, buf[:]) })
+	}); err != nil {
 		return nil, err
 	}
 	if readErr != nil {
@@ -68,26 +80,47 @@ func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context) ([]listedName
 	return dir.decodeDirents(ctx, buf[:size])
 }
 
+// retryDirentRead retries only an isolated EINTR without bytes. Native syscall wrappers
+// may return -1 on failure. Cancellation and exhaustion retain the last interruption.
+func retryDirentRead(ctx context.Context, read func() (int, error)) (int, error) {
+	var n int
+	var err error
+	for range maxDirentReadAttempts {
+		select {
+		case <-ctx.Done():
+			return n, errors.Join(err, ctx.Err())
+		default:
+		}
+		n, err = read()
+		if n < -1 || n > 0 || !errors.Is(util.SoleCause(err), unix.EINTR) {
+			return n, err
+		}
+	}
+	return n, err
+}
+
 // decodeDirents pairs each parsed name with the type byte from that same native record.
 func (dir *SnapshotDirectory) decodeDirents(ctx context.Context, buf []byte) ([]listedName, error) {
 	var names []listedName
-	// SAFETY: Both offsets are compile-time constants. The native header precedes d_name.
-	const (
-		nameOffset = int(unsafe.Offsetof(unix.Dirent{}.Name))
-		typeOffset = unsafe.Offsetof(unix.Dirent{}.Type)
-	)
+	// SAFETY: This compile-time offset lies in the checked native header.
+	const typeOffset = unsafe.Offsetof(unix.Dirent{}.Type)
 	for offset := 0; offset < len(buf); {
 		record := buf[offset:]
-		if len(record) <= nameOffset {
+		if len(record) <= direntNameOffset {
 			return nil, io.ErrUnexpectedEOF
 		}
 		size := direntRecordSize(record)
-		if size <= nameOffset || size > len(record) {
+		if size <= direntNameOffset || size > len(record) {
 			return nil, io.ErrUnexpectedEOF
+		}
+		record = record[:size]
+		if !direntNameFits(record) {
+			err := fmt.Errorf("d_namlen exceeds the %d-byte name payload at offset %d", size-direntNameOffset, offset)
+			return nil, &os.PathError{Op: "decode dirent", Path: dir.Name(), Err: err}
 		}
 		offset += size
 		var slot [1]string
-		_, _, parsed := unix.ParseDirent(record[:size], 1, slot[:0])
+		_, _, parsed := unix.ParseDirent(record, 1, slot[:0])
 		if len(parsed) == 0 { // Native dot entries and unused directory slots.
 			continue
 		}

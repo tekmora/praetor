@@ -166,3 +166,21 @@ func TestBucketDirectoryOpenedOnce(t *testing.T) {
 		t.Fatalf("bucket acquisition returned %d event bytes, want one open (%d bytes): %v", n, unix.SizeofInotifyEvent, err)
 	}
 }
+
+// TestVerifyListedFileBecomesLink keeps the brief change finding for an isolated
+// no-follow refusal, even though the kernel also supplies a diagnostic for the open.
+func TestVerifyListedFileBecomesLink(t *testing.T) {
+	const name = "listed.go"
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, name, cleanGo)
+	report := verifyWithListingMutation(t, root, bucketNegative, func(dir string) {
+		path := filepath.Join(dir, name)
+		target := filepath.Join(dir, "original.go")
+		if err := os.Rename(path, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	})
+	requireSnapshotFinding(t, report, 0, name, "changed during verification")
+}
