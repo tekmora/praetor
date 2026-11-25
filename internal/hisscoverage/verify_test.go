@@ -611,6 +611,15 @@ func TestFindingStringEscapesControlCharacters(t *testing.T) {
 	}
 }
 
+// closedRootEntry looks up its metadata through a closed test root.
+type closedRootEntry struct {
+	os.DirEntry
+	root *os.Root
+}
+
+// Info returns the real filesystem error from the closed directory.
+func (e closedRootEntry) Info() (os.FileInfo, error) { return e.root.Lstat(e.Name()) }
+
 // TestClassifyBucketEntryEscapesStatError checks both copies of a listed name and the filesystem cause.
 func TestClassifyBucketEntryEscapesStatError(t *testing.T) {
 	const name = "bad\nname.go"
@@ -628,7 +637,7 @@ func TestClassifyBucketEntryEscapesStatError(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := "."
-	_, _, err = classifyBucketEntry(t.Context(), root, entries[0])
+	_, _, err = classifyBucketEntry(t.Context(), closedRootEntry{entries[0], root})
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) || pathErr.Path != filepath.Join(dir, name) {
 		t.Fatalf("stat error must retain the original path error: %v", err)

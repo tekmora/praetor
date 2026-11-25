@@ -42,14 +42,24 @@ func ReadRootSnapshot(ctx context.Context, root *os.Root, name string) ([]byte, 
 // ReadListedSnapshot captures bounded UTF-8 text from the regular file identified by a
 // pinned directory's Lstat. It checks the opened descriptor before and after copying.
 // Once the descriptor is open, subsequent changes to the directory entry are immaterial.
-func ReadListedSnapshot(ctx context.Context, root *os.Root, name string, listed os.FileInfo) (_ []byte, err error) {
+func ReadListedSnapshot(ctx context.Context, root *os.Root, name string, listed os.FileInfo) ([]byte, error) {
 	if err := validateRootLeaf(ctx, root, name); err != nil {
 		return nil, err
 	}
+	return readListedText(ctx, listed, func() (*os.File, error) {
+		return openSource(root, name)
+	})
+}
+
+// readListedText checks the captured identity and validates the bounded UTF-8 payload.
+func readListedText(ctx context.Context, listed os.FileInfo, open func() (*os.File, error)) (_ []byte, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file, err := openListedSource(root, name, listed, MaxSourceBytes)
+	if err := checkListedSource(listed, MaxSourceBytes); err != nil {
+		return nil, err
+	}
+	file, err := open()
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +76,16 @@ func ReadListedSnapshot(ctx context.Context, root *os.Root, name string, listed 
 
 // validateRootLeaf checks the arguments for a flat file or child directory in a pinned root.
 func validateRootLeaf(ctx context.Context, root *os.Root, name string) error {
-	if ctx == nil || root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+	if ctx == nil || root == nil {
 		return fmt.Errorf("context, directory and flat filename required")
+	}
+	return validateLeafName(name)
+}
+
+// validateLeafName permits one ordinary component below a pinned directory.
+func validateLeafName(name string) error {
+	if !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+		return fmt.Errorf("flat filename required: %w", os.ErrInvalid)
 	}
 	return validatePath(name)
 }

@@ -23,21 +23,16 @@ type claimSnapshot map[string]bucketSnapshot
 // bucketSnapshot retains the captured fixture bytes and findings about the same listing.
 type bucketSnapshot struct {
 	stage    fixtureStage
+	store    *fixtureStore
 	files    []capturedFixture
 	findings []Finding
 }
 
-// capturedFixture holds the listed name and the bytes that replay stages under that name.
-type capturedFixture struct {
-	name string
-	data []byte
-}
-
 // openCorpusSnapshot pins the corpus once, captures the catalog's buckets, then closes all
-// handles before replay. Further consumers, including ownership checks, share this snapshot.
-func openCorpusSnapshot(ctx context.Context, rootDir string, catalog *Catalog) (_ corpusSnapshot, err error) {
+// source directory handles before replay. Further consumers, including ownership checks, share this snapshot.
+func (store *fixtureStore) openCorpusSnapshot(ctx context.Context, rootDir string, catalog *Catalog) (_ corpusSnapshot, err error) {
 	corpus := make(corpusSnapshot)
-	root, err := contextopt.OpenDirectoryIn(ctx, rootDir, filepath.FromSlash(FixtureDir))
+	root, err := contextopt.OpenSnapshotDirectoryIn(ctx, rootDir, filepath.FromSlash(FixtureDir))
 	if err != nil {
 		if util.DirectoryAbsent(filepath.Join(rootDir, filepath.FromSlash(FixtureDir)), err) {
 			return corpus, nil
@@ -49,7 +44,7 @@ func openCorpusSnapshot(ctx context.Context, rootDir string, catalog *Catalog) (
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := corpus.captureRule(ctx, root, &catalog.Rules[i]); err != nil {
+		if err := corpus.captureRule(ctx, root, &catalog.Rules[i], store); err != nil {
 			return nil, err
 		}
 	}
@@ -57,7 +52,7 @@ func openCorpusSnapshot(ctx context.Context, rootDir string, catalog *Catalog) (
 }
 
 // captureRule reads a catalog rule through its directory in the pinned corpus.
-func (corpus corpusSnapshot) captureRule(ctx context.Context, root *os.Root, rule *Rule) (err error) {
+func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.SnapshotDirectory, rule *Rule, store *fixtureStore) (err error) {
 	dir, err := contextopt.OpenChildDirectory(ctx, root, rule.ID)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -71,7 +66,7 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *os.Root, rul
 			return err
 		}
 		stage := fixtureStage{ruleID: rule.ID, language: rule.Coverage[i].Language}
-		claim, err := stage.captureClaim(ctx, dir)
+		claim, err := stage.captureClaim(ctx, dir, store)
 		if err != nil {
 			return err
 		}
@@ -81,7 +76,7 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *os.Root, rul
 }
 
 // captureClaim captures each bucket relative to the pinned language directory.
-func (stage fixtureStage) captureClaim(ctx context.Context, rule *os.Root) (_ claimSnapshot, err error) {
+func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.SnapshotDirectory, store *fixtureStore) (_ claimSnapshot, err error) {
 	dir, err := contextopt.OpenChildDirectory(ctx, rule, stage.language)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -96,7 +91,7 @@ func (stage fixtureStage) captureClaim(ctx context.Context, rule *os.Root) (_ cl
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		bucket, err := stage.captureBucket(ctx, dir, name)
+		bucket, err := stage.captureBucket(ctx, dir, name, store)
 		if err != nil {
 			return nil, err
 		}
@@ -106,8 +101,8 @@ func (stage fixtureStage) captureClaim(ctx context.Context, rule *os.Root) (_ cl
 }
 
 // captureBucket pins one bucket for both its bounded listing and its regular file reads.
-func (stage fixtureStage) captureBucket(ctx context.Context, parent *os.Root, name string) (bucket bucketSnapshot, err error) {
-	bucket.stage = stage
+func (stage fixtureStage) captureBucket(ctx context.Context, parent *contextopt.SnapshotDirectory, name string, store *fixtureStore) (bucket bucketSnapshot, err error) {
+	bucket.stage, bucket.store = stage, store
 	dir, err := contextopt.OpenChildDirectory(ctx, parent, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return bucket, nil
@@ -144,11 +139,11 @@ func (stage fixtureStage) captureBucket(ctx context.Context, parent *os.Root, na
 
 // captureEntry classifies a listed entry and captures bounded text for a regular fixture.
 func (b *bucketSnapshot) captureEntry(
-	ctx context.Context, dir *os.Root, bucket string, entry os.DirEntry, report *Report,
+	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket string, entry os.DirEntry, report *Report,
 ) (bool, error) {
 	name := entry.Name()
 	rule, lang := b.stage.ruleID, b.stage.language
-	class, listed, err := classifyBucketEntry(ctx, dir, entry)
+	class, listed, err := classifyBucketEntry(ctx, entry)
 	if err != nil {
 		return false, err
 	}
@@ -166,17 +161,28 @@ func (b *bucketSnapshot) captureEntry(
 		recordIncompleteBucket(report, rule, lang, bucket, name, maxFixturesPerBucket, "regular files")
 		return true, nil
 	}
+	return b.captureFile(ctx, dir, bucket, name, listed, report)
+}
+
+// captureFile saves one stable regular file or records a change since listing.
+func (b *bucketSnapshot) captureFile(
+	ctx context.Context, dir *contextopt.SnapshotDirectory, bucket, name string, listed os.FileInfo, report *Report,
+) (bool, error) {
 	bounded, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
 	defer cancel()
-	data, err := contextopt.ReadListedSnapshot(bounded, dir, name, listed)
+	data, err := dir.ReadListedSnapshot(bounded, name, listed)
 	if errors.Is(err, contextopt.ErrSourceNotRegular) || errors.Is(err, os.ErrNotExist) {
-		recordChangedBucket(report, rule, lang, bucket, name)
+		recordChangedBucket(report, b.stage.ruleID, b.stage.language, bucket, name)
 		return true, nil
 	}
 	if err != nil {
 		return false, escapedError{fmt.Errorf("read fixture %s: %w", name, err)}
 	}
-	b.files = append(b.files, capturedFixture{name: name, data: data})
+	file, err := b.store.save(bounded, name, data)
+	if err != nil {
+		return false, err
+	}
+	b.files = append(b.files, file)
 	return false, nil
 }
 
@@ -190,17 +196,16 @@ type bucketReaderKey struct{}
 type bucketEntryObserver func(dir string, entries []os.DirEntry) []os.DirEntry
 
 // readBucketEntries reads up to maxBucketEntries plus one overflow sentinel through dir.
-func readBucketEntries(ctx context.Context, dir *os.Root) (_ []os.DirEntry, err error) {
+func readBucketEntries(ctx context.Context, dir *contextopt.SnapshotDirectory) ([]os.DirEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	listing, err := dir.Open(".")
-	if err != nil {
-		return nil, fmt.Errorf("open fixture listing %s: %w", dir.Name(), err)
+	next := func(n int) ([]os.DirEntry, error) { return dir.ReadEntries(ctx, n) }
+	if stub, ok := ctx.Value(bucketReaderKey{}).(func(string, int) ([]os.DirEntry, error)); ok {
+		next = func(n int) ([]os.DirEntry, error) { return stub(dir.Name(), n) }
 	}
-	defer func() { err = errors.Join(err, listing.Close()) }()
-	entries, err := listing.ReadDir(maxBucketEntries + 1)
-	if err != nil && !errors.Is(err, io.EOF) {
+	entries, err := collectBucketEntries(ctx, next)
+	if err != nil {
 		return nil, fmt.Errorf("list fixture bucket %s: %w", dir.Name(), err)
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
@@ -208,6 +213,30 @@ func readBucketEntries(ctx context.Context, dir *os.Root) (_ []os.DirEntry, err 
 		entries = observe(dir.Name(), entries)
 	}
 	return entries, nil
+}
+
+// collectBucketEntries consumes a single directory cursor through EOF or the overflow entry.
+// Every successful nonterminal read advances by at least one entry, bounding calls at 4097.
+func collectBucketEntries(ctx context.Context, next func(int) ([]os.DirEntry, error)) ([]os.DirEntry, error) {
+	const limit = maxBucketEntries + 1
+	var entries []os.DirEntry
+	for reads := 0; reads < limit; reads++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		chunk, err := next(limit - len(entries))
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		entries = append(entries, chunk...)
+		if len(entries) == limit || errors.Is(err, io.EOF) {
+			return entries, nil
+		}
+		if len(chunk) == 0 {
+			return nil, io.ErrNoProgress
+		}
+	}
+	return nil, io.ErrNoProgress
 }
 
 // entryClass describes a bucket entry's observed kind or a change since listing.
@@ -220,8 +249,8 @@ const (
 	entryChanged
 )
 
-// classifyBucketEntry inspects zero and unknown type bits with the bucket's rooted Lstat.
-func classifyBucketEntry(ctx context.Context, dir *os.Root, entry os.DirEntry) (entryClass, os.FileInfo, error) {
+// classifyBucketEntry inspects zero and unknown type bits with the descriptor-relative metadata saved by the listing.
+func classifyBucketEntry(ctx context.Context, entry os.DirEntry) (entryClass, os.FileInfo, error) {
 	if entry.IsDir() {
 		return entryDirectory, nil, nil
 	}
@@ -232,7 +261,7 @@ func classifyBucketEntry(ctx context.Context, dir *os.Root, entry os.DirEntry) (
 	if err := ctx.Err(); err != nil {
 		return 0, nil, err
 	}
-	info, err := dir.Lstat(entry.Name())
+	info, err := entry.Info()
 	if errors.Is(err, os.ErrNotExist) {
 		return entryChanged, nil, nil
 	}

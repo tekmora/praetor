@@ -74,7 +74,7 @@ func TestVerifyBucketControlThreeRegularFilesPasses(t *testing.T) {
 // TestVerifyBucketBoundaryAt256RegularFilesPasses is the upper pass boundary: a bucket with
 // exactly maxFixturesPerBucket (256) regular files replays every fixture and passes.
 func TestVerifyBucketBoundaryAt256RegularFilesPasses(t *testing.T) {
-	verifyPassingBucketCount(t, maxFixturesPerBucket)
+	verifyPassingBucketCount(t, 256)
 }
 
 // TestVerifyBucketPast256RegularFilesIsIncomplete is the negative overflow boundary: a 257th
@@ -82,7 +82,7 @@ func TestVerifyBucketBoundaryAt256RegularFilesPasses(t *testing.T) {
 // replay finding naming the bucket rather than certifying a truncated scan.
 func TestVerifyBucketPast256RegularFilesIsIncomplete(t *testing.T) {
 	root := t.TempDir()
-	stageNumberedFixtures(t, bucketPath(root, "HISS-01", "go", bucketPositive), "rec", recursiveGo, maxFixturesPerBucket+1)
+	stageNumberedFixtures(t, bucketPath(root, "HISS-01", "go", bucketPositive), "rec", recursiveGo, 257)
 
 	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateEnforced))
 	if err != nil {
@@ -91,8 +91,8 @@ func TestVerifyBucketPast256RegularFilesIsIncomplete(t *testing.T) {
 	if report.Passed() {
 		t.Fatal("a 257-file bucket must fail Verify as an incomplete, non-certifying replay")
 	}
-	if len(report.Findings) != 1 {
-		t.Fatalf("Findings = %+v, want 1 incomplete-replay finding", report.Findings)
+	if report.Fixtures != 256 || len(report.Findings) != 1 {
+		t.Fatalf("want 256 replayed fixtures and one overflow finding, got %+v", report)
 	}
 	finding := report.Findings[0]
 	if finding.Bucket != bucketPositive || !strings.Contains(finding.Detail, "incomplete replay") ||
@@ -294,7 +294,7 @@ func TestVerifyBucketNonRegularEntryIsSkippedAndNamed(t *testing.T) {
 func TestVerifyBucketUnknownTypeRegularFilesRespectBound(t *testing.T) {
 	root := t.TempDir()
 	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
-	stageNumberedFixtures(t, posDir, "rec", recursiveGo, maxFixturesPerBucket+1)
+	stageNumberedFixtures(t, posDir, "rec", recursiveGo, 257)
 
 	ctx := withBucketReader(t.Context(), wrapEntriesWithMode(posDir, fs.ModeIrregular))
 	report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))

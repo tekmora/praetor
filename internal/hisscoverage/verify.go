@@ -208,14 +208,20 @@ func (r *Report) Passed() bool {
 // past the regular-file or directory-entry bound records an incomplete-replay finding so the
 // report fails. The verdict covers the bytes captured through one pinned corpus root before
 // replay. A later change to the fixture tree is outside this snapshot and shows on the next run.
-func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, error) {
+// Across all buckets the snapshot retains at most 1 MiB of fixture backing arrays.
+// Additional bytes spill to a private file. Capture and replay each handle one active
+// fixture of at most 1 MiB of text in addition to the retained budget. The pinned Go
+// version uses up to 32 KiB of copy scratch during capture.
+func Verify(ctx context.Context, rootDir string, catalog *Catalog) (_ *Report, err error) {
 	if ctx == nil {
 		return nil, errors.New("hisscoverage: verify requires a context")
 	}
 	if err := catalog.Validate(); err != nil {
 		return nil, err
 	}
-	corpus, err := openCorpusSnapshot(ctx, rootDir, catalog)
+	var store fixtureStore
+	defer func() { err = errors.Join(err, store.close()) }()
+	corpus, err := store.openCorpusSnapshot(ctx, rootDir, catalog)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +541,11 @@ func replayBucket(ctx context.Context, bucket bucketSnapshot, report *Report) ([
 			return nil, err
 		}
 		file := bucket.files[i]
-		result, err := bucket.stage.reported(ctx, file.name, file.data)
+		data, err := bucket.store.load(ctx, file)
+		if err != nil {
+			return nil, err
+		}
+		result, err := bucket.stage.reported(ctx, file.name, data)
 		if err != nil {
 			return nil, err
 		}

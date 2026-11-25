@@ -88,3 +88,92 @@ func TestOpenSourceRefusesReplacementSymlink(t *testing.T) {
 		t.Fatalf("want the refused leaf's open error, got %v", err)
 	}
 }
+
+// listedTestBucket records the original directory identity and frees its name for a replacement.
+func listedTestBucket(t *testing.T) (*SnapshotDirectory, os.FileInfo, string) {
+	t.Helper()
+	dir := t.TempDir()
+	root := snapshotDirectory(t, dir)
+	if err := root.Mkdir("bucket", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := root.Lstat("bucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Rename("bucket", "original"); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := OpenSnapshotDirectoryIn(t.Context(), dir, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := parent.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return parent, listed, filepath.Join(dir, "bucket")
+}
+
+// openReplacedBucket attempts the post-observation acquisition and releases any accepted handle.
+func openReplacedBucket(ctx context.Context, parent *SnapshotDirectory, listed os.FileInfo) error {
+	child, err := parent.openListedDirectory(ctx, "bucket", listed)
+	if err != nil {
+		return err
+	}
+	return child.Close()
+}
+
+// TestListedDirectoryRefusesReplacementLink rejects a link back to the observed inode.
+func TestListedDirectoryRefusesReplacementLink(t *testing.T) {
+	parent, listed, path := listedTestBucket(t)
+	if err := os.Symlink("original", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := openReplacedBucket(t.Context(), parent, listed); err == nil {
+		t.Fatal("opened the observed directory through its replacement link")
+	}
+}
+
+// TestListedDirectoryRefusesReplacementFIFO requires the acquisition to finish while
+// the FIFO has no writer. A failing blocking opener is released during cleanup.
+func TestListedDirectoryRefusesReplacementFIFO(t *testing.T) {
+	parent, listed, path := listedTestBucket(t)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- openReplacedBucket(ctx, parent, listed) }()
+	select {
+	case err := <-done:
+		if err == nil || ctx.Err() != nil {
+			t.Fatalf("expected an open error before the deadline, got %v (context %v)", err, ctx.Err())
+		}
+	case <-ctx.Done():
+		releaseBlockedBucket(t, path, done)
+		t.Fatal("directory open blocked on a FIFO until the context expired")
+	}
+}
+
+// releaseBlockedBucket pairs with a blocked read open before the test closes its parent.
+func releaseBlockedBucket(t *testing.T, path string, done <-chan error) {
+	t.Helper()
+	writer, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := writer.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case err := <-done:
+		t.Logf("released directory opener returned %v", err)
+	case <-time.After(time.Second):
+		t.Error("directory opener still running after FIFO release")
+	}
+}

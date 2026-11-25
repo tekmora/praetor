@@ -150,7 +150,7 @@ func OpenDirectoryIn(ctx context.Context, root, rel string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	return walkComponents(ctx, current, parts)
+	return walkComponents(ctx, current, parts, childDirectory)
 }
 
 // relativeComponents splits a root-relative path into the components to walk.
@@ -169,15 +169,20 @@ func relativeComponents(rel string) ([]string, error) {
 	return parts, nil
 }
 
-// walkComponents descends each component strictly, closing whichever root it does not return.
-func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *os.Root, err error) {
+// directoryHandle covers the two owned directory handles used in component walks.
+type directoryHandle interface {
+	*os.Root | *SnapshotDirectory
+	Close() error
+}
+
+// walkComponents descends each component strictly, closing whichever handle it does not return.
+func walkComponents[D directoryHandle](ctx context.Context, current D, parts []string, open func(context.Context, D, string) (D, error)) (D, error) {
 	for i := 0; i < len(parts) && i < MaxPathDepth; i++ {
 		if parts[i] == "" || parts[i] == "." {
 			continue
 		}
-		next, openErr := childDirectory(ctx, current, parts[i])
-		err = errors.Join(openErr, current.Close())
-		if err != nil {
+		next, openErr := open(ctx, current, parts[i])
+		if err := errors.Join(openErr, current.Close()); err != nil {
 			if next != nil {
 				err = errors.Join(err, next.Close())
 			}
@@ -186,15 +191,6 @@ func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *o
 		current = next
 	}
 	return current, nil
-}
-
-// OpenChildDirectory pins a single directory entry of parent and checks its identity.
-// The caller owns the returned root. A missing entry retains os.ErrNotExist.
-func OpenChildDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
-	if err := validateRootLeaf(ctx, parent, name); err != nil {
-		return nil, err
-	}
-	return childDirectory(ctx, parent, name)
 }
 
 func childDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
@@ -302,13 +298,29 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 	return size, nil
 }
 
+// openSource opens a regular-file candidate relative to the pinned root.
+func openSource(root *os.Root, name string) (*os.File, error) {
+	if err := validateLeafName(name); err != nil {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
+	}
+	parent, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	file, openErr := openLeafAt(parent, name, false)
+	if err := parent.Close(); err != nil {
+		if file != nil {
+			err = errors.Join(err, file.Close())
+		}
+		return nil, errors.Join(openErr, err)
+	}
+	return file, openErr
+}
+
 // openListedSource enforces the listed type and size before opening the leaf without following links.
 func openListedSource(root *os.Root, name string, listed os.FileInfo, limit int64) (*os.File, error) {
-	if listed == nil || !listed.Mode().IsRegular() {
-		return nil, ErrSourceNotRegular
-	}
-	if listed.Size() > limit {
-		return nil, fmt.Errorf("source exceeds %d bytes: %w", limit, util.ErrFileTooLarge)
+	if err := checkListedSource(listed, limit); err != nil {
+		return nil, err
 	}
 	file, err := openSource(root, name)
 	if err != nil {
@@ -320,6 +332,20 @@ func openListedSource(root *os.Root, name string, listed os.FileInfo, limit int6
 		return nil, errors.Join(err, statErr)
 	}
 	return file, nil
+}
+
+// checkListedSource verifies the listed type and the byte bound before opening a leaf.
+func checkListedSource(listed os.FileInfo, limit int64) error {
+	if listed == nil || !listed.Mode().IsRegular() {
+		return ErrSourceNotRegular
+	}
+	if listed.Size() < 0 {
+		return fmt.Errorf("negative source size: %w", os.ErrInvalid)
+	}
+	if listed.Size() > limit {
+		return fmt.Errorf("source exceeds %d bytes: %w", limit, util.ErrFileTooLarge)
+	}
+	return nil
 }
 
 func validateText(data []byte) error {
@@ -341,12 +367,31 @@ func (r contextReader) Read(buffer []byte) (int, error) {
 	return r.reader.Read(buffer)
 }
 
+// stableRead allocates only the observed payload size. A growing file cannot enlarge
+// the capture buffer before stableCopy detects that the observation has changed.
 func stableRead(ctx context.Context, file *os.File, before os.FileInfo) ([]byte, error) {
-	var buffer bytes.Buffer
-	if _, err := stableCopy(ctx, &buffer, file, before, MaxSourceBytes); err != nil {
+	if err := checkListedSource(before, MaxSourceBytes); err != nil {
 		return nil, err
 	}
-	return buffer.Bytes(), nil
+	data := make([]byte, before.Size())
+	dst := snapshotDestination(data)
+	if _, err := stableCopy(ctx, &dst, file, before, MaxSourceBytes); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// snapshotDestination fills a single pre-sized fixture array during the stable copy.
+type snapshotDestination []byte
+
+// Write rejects bytes beyond the observed size without allocating another backing array.
+func (dst *snapshotDestination) Write(p []byte) (int, error) {
+	n := copy(*dst, p)
+	*dst = (*dst)[n:]
+	if n != len(p) {
+		return n, fmt.Errorf("source grew during snapshot: %w", io.ErrShortWrite)
+	}
+	return n, nil
 }
 
 // stableCopy copies at most limit bytes of an opened file into dst and fails unless

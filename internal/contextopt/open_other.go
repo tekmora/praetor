@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-// openSource refuses platforms without the pinned snapshot opener.
-func openSource(_ *os.Root, _ string) (*os.File, error) {
+// openNativeLeaf refuses platforms without the pinned snapshot opener.
+func openNativeLeaf(_ uintptr, _, _ string, _ bool) (*os.File, error) {
 	return nil, fmt.Errorf("context snapshots require Unix or Windows")
 }

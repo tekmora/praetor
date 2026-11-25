@@ -7,31 +7,33 @@ package contextopt
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
 
-// openSource opens one leaf of the pinned directory. openat applies O_NOFOLLOW to the
-// leaf itself, and O_NONBLOCK prevents a substituted FIFO from blocking the type check.
-func openSource(root *os.Root, name string) (*os.File, error) {
-	if !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
-		return nil, &os.PathError{Op: "openat", Path: name, Err: os.ErrInvalid}
-	}
-	parent, err := root.Open(".")
-	if err != nil {
-		return nil, err
-	}
+// openNativeLeaf acquires a flat leaf relative to a live descriptor. A directory lookup
+// refuses other types in the kernel, and a substituted FIFO cannot block either kind.
+func openNativeLeaf(parent uintptr, parentName, name string, directory bool) (*os.File, error) {
 	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOFOLLOW
-	// The private parent stays open until openat returns. Its kernel descriptor fits in int.
-	fd, err := unix.Openat(int(parent.Fd()), name, flags, 0)
-	closeErr := parent.Close()
+	if directory {
+		flags |= unix.O_DIRECTORY
+	}
+	if parent > math.MaxInt {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: unix.EBADF}
+	}
+	fd, err := unix.Openat(int(parent), name, flags, 0)
 	if err != nil {
-		return nil, errors.Join(&os.PathError{Op: "openat", Path: name, Err: err}, closeErr)
+		pathErr := &os.PathError{Op: "openat", Path: name, Err: err}
+		if errors.Is(err, unix.ELOOP) {
+			return nil, errors.Join(ErrSourceNotRegular, pathErr)
+		}
+		return nil, pathErr
 	}
-	if closeErr != nil {
-		return nil, errors.Join(closeErr, unix.Close(fd))
+	if fd < 0 {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: unix.EBADF}
 	}
-	return os.NewFile(uintptr(fd), filepath.Join(root.Name(), name)), nil
+	return os.NewFile(uintptr(fd), filepath.Join(parentName, name)), nil
 }

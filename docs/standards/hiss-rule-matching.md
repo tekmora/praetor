@@ -774,6 +774,13 @@ captures regular fixture bytes before replay. The verdict covers those bytes and
 in those listings. A listed regular file that disappears or becomes a directory before capture
 produces an incomplete-replay finding. A change after capture shows on the next run.
 
+Across all buckets, the snapshot retains at most 1 MiB of fixture backing arrays between
+reads. Further fixture bytes go to a private temporary file, which Verify closes and
+removes when the run ends. Capture and replay each handle one additional fixture of at
+most 1 MiB of text at a time. With the pinned Go toolchain, capture also uses up to
+32 KiB for the streaming copy. Directory metadata and scanner working memory are outside
+the fixture-byte budget.
+
 For each bucket (`positive/`, `negative/`, `gap/`, `measured/`), the verifier can certify a
 listing of at most 4,096 directory entries and replay up to 256 regular files. It reads one
 additional entry to detect overflow. A 4,097th entry or a 257th regular file produces an
