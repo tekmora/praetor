@@ -132,20 +132,12 @@ func TestVerifyBucketDirectoriesDoNotConsumeFixtureBound(t *testing.T) {
 }
 
 // TestVerifyBucketDirectoryEntryBoundary exercises the real listing limit with directory-only
-// negative buckets and checks overflow reported on either read.
+// negative buckets and checks overflow that first appears on the next run.
 func TestVerifyBucketDirectoryEntryBoundary(t *testing.T) {
 	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "backed.go", recursiveGo)
 	negDir := bucketPath(root, "HISS-01", "go", bucketNegative)
 	stageNumberedSubdirs(t, negDir, "dir", maxTestBucketEntries)
-	t.Run("4096 directories", func(t *testing.T) {
-		report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateEnforced))
-		if err != nil {
-			t.Fatalf("verify: %v", err)
-		}
-		if !report.Passed() || report.Fixtures != 1 {
-			t.Fatalf("4096 directories must pass with only the positive fixture replayed: %+v", report)
-		}
-	})
+	t.Run("4096 directories", func(t *testing.T) { requireDirectoryBoundaryPasses(t, root) })
 
 	const sentinel = "z-overflow"
 	if err := contextopt.EnsureDirectory(t.Context(), filepath.Join(negDir, sentinel), 0o700); err != nil {
@@ -154,24 +146,45 @@ func TestVerifyBucketDirectoryEntryBoundary(t *testing.T) {
 	t.Run("4097 directories", func(t *testing.T) {
 		requireDirectoryOverflow(t, t.Context(), root, sentinel)
 	})
-	t.Run("overflow only on second read", func(t *testing.T) {
-		reads := 0
-		reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
-			entries, err := readBucketEntries(ctx, dir)
-			if err != nil || dir != negDir {
-				return entries, err
-			}
+	t.Run("overflow only on second read", func(t *testing.T) { requireOverflowOnSecondRead(t, root, sentinel) })
+}
+
+// requireDirectoryBoundaryPasses checks that a negative bucket of exactly 4096 directories passes with only the
+// positive fixture replayed.
+func requireDirectoryBoundaryPasses(t *testing.T, root string) {
+	t.Helper()
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("4096 directories must pass with only the positive fixture replayed: %+v", report)
+	}
+}
+
+// requireOverflowOnSecondRead checks that an overflow the first negative-bucket listing hides is found on the
+// second read of the same bucket.
+func requireOverflowOnSecondRead(t *testing.T, root, sentinel string) {
+	t.Helper()
+	reads := 0
+	reader := func(dir string, entries []os.DirEntry) []os.DirEntry {
+		if filepath.Base(dir) == bucketNegative {
 			reads++
 			if reads == 1 {
-				return entries[:min(len(entries), maxTestBucketEntries)], nil
+				return entries[:min(len(entries), maxTestBucketEntries)]
 			}
-			return entries, nil
 		}
-		requireDirectoryOverflow(t, withBucketReader(t.Context(), reader), root, sentinel)
-		if reads != 2 {
-			t.Fatalf("negative bucket reads = %d, want 2", reads)
-		}
-	})
+		return entries
+	}
+	ctx := withBucketReader(t.Context(), reader)
+	first := verifySnapshot(t, ctx, root)
+	if !first.Passed() || first.Fixtures != 1 {
+		t.Fatalf("first listing at the bound should pass: %+v", first)
+	}
+	requireDirectoryOverflow(t, ctx, root, sentinel)
+	if reads != 2 {
+		t.Fatalf("negative bucket reads = %d, want 2", reads)
+	}
 }
 
 // requireDirectoryOverflow checks that Verify identifies the first excess directory in the negative bucket.
@@ -205,23 +218,22 @@ func (e unknownTypeEntry) Type() fs.FileMode { return e.mode }
 
 func (e unknownTypeEntry) Info() (fs.FileInfo, error) { return e.inner.Info() }
 
-// withBucketReader attaches a stub bucketEntryReader to ctx for deterministic replay tests.
-func withBucketReader(ctx context.Context, reader bucketEntryReader) context.Context {
+// withBucketReader observes the pinned reader's listing for deterministic mutation tests.
+func withBucketReader(ctx context.Context, reader bucketEntryObserver) context.Context {
 	return context.WithValue(ctx, bucketReaderKey{}, reader)
 }
 
-// wrapEntriesWithMode returns a bucketEntryReader that masks every entry of targetDir with mode.
-func wrapEntriesWithMode(targetDir string, mode fs.FileMode) bucketEntryReader {
-	return func(ctx context.Context, dir string) ([]os.DirEntry, error) {
-		entries, err := readBucketEntries(ctx, dir)
-		if err != nil || dir != targetDir {
-			return entries, err
+// wrapEntriesWithMode returns an observer that masks every entry of targetDir with mode.
+func wrapEntriesWithMode(targetDir string, mode fs.FileMode) bucketEntryObserver {
+	return func(dir string, entries []os.DirEntry) []os.DirEntry {
+		if filepath.Base(dir) != filepath.Base(targetDir) {
+			return entries
 		}
 		wrapped := make([]os.DirEntry, len(entries))
 		for i := 0; i < len(entries) && i < maxBucketEntries+1; i++ {
 			wrapped[i] = unknownTypeEntry{inner: entries[i], mode: mode}
 		}
-		return wrapped, nil
+		return wrapped
 	}
 }
 
@@ -294,110 +306,21 @@ func TestVerifyBucketUnknownTypeRegularFilesRespectBound(t *testing.T) {
 	}
 }
 
-// TestVerifyBucketFileAddedDuringReplayIsIncomplete verifies that a regular file added to a
-// bucket after its initial listing and before the post-replay re-read fails Verify with an
-// incomplete-replay finding naming the bucket.
-func TestVerifyBucketFileAddedDuringReplayIsIncomplete(t *testing.T) {
-	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
-	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
-
-	reads := 0
-	reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
-		entries, err := readBucketEntries(ctx, dir)
-		if err != nil || dir != posDir {
-			return entries, err
-		}
-		reads++
-		if reads == 1 {
-			if writeErr := os.WriteFile(filepath.Join(posDir, "z-added.go"), []byte(recursiveGo), 0o600); writeErr != nil {
-				t.Fatalf("stage added fixture: %v", writeErr)
-			}
-		}
-		return entries, nil
-	}
-
-	report, err := Verify(withBucketReader(t.Context(), reader), root, catalogFor("HISS-01", "go", StateEnforced))
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if reads != 2 {
-		t.Fatalf("bucket reads = %d, want initial read plus post-replay re-read", reads)
-	}
-	assertAddedFixtureIncomplete(t, report)
-}
-
-// assertAddedFixtureIncomplete checks the one incomplete-replay finding a bucket changed during
-// the replay records for the added fixture.
-func assertAddedFixtureIncomplete(t *testing.T, report *Report) {
-	t.Helper()
-	if report.Passed() || len(report.Findings) != 1 {
-		t.Fatalf("bucket mutation must record 1 incomplete finding, got %+v", report.Findings)
-	}
-	got := report.Findings[0]
-	if got.Fixture != "z-added.go" || !strings.Contains(got.Detail, "incomplete replay") ||
-		!strings.Contains(got.Detail, "HISS-01/go/positive") {
-		t.Fatalf("finding = %q, want incomplete replay naming HISS-01/go/positive and z-added.go", got)
-	}
-}
-
-// TestVerifyBucketFileRemovedDuringReplayIsIncomplete verifies that removing a replayed regular
-// file before the post-replay re-read also records an incomplete-replay finding.
-func TestVerifyBucketFileRemovedDuringReplayIsIncomplete(t *testing.T) {
-	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "a-first.go", recursiveGo)
-	writeCorpusFixture(t, root, "HISS-01", "go", bucketPositive, "b-second.go", recursiveGo)
-	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
-
-	reads := 0
-	reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
-		if dir == posDir {
-			reads++
-			if reads == 2 {
-				if rmErr := os.Remove(filepath.Join(posDir, "b-second.go")); rmErr != nil {
-					t.Fatalf("remove replayed fixture: %v", rmErr)
-				}
-			}
-		}
-		return readBucketEntries(ctx, dir)
-	}
-
-	report, err := Verify(withBucketReader(t.Context(), reader), root, catalogFor("HISS-01", "go", StateEnforced))
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if report.Passed() || len(report.Findings) != 1 || report.Findings[0].Fixture != "b-second.go" ||
-		!strings.Contains(report.Findings[0].Detail, "incomplete replay") {
-		t.Fatalf("removed fixture must fail as incomplete naming b-second.go, got %+v", report.Findings)
-	}
-}
-
 // TestVerifyBucketListedFileBecomesDirectoryIsIncomplete replaces a listed regular fixture
 // before classification and requires Verify to identify the changed bucket and fixture.
 func TestVerifyBucketListedFileBecomesDirectoryIsIncomplete(t *testing.T) {
 	const fixture = "clean.go"
 	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
 	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, fixture, cleanGo)
-	negDir := bucketPath(root, "HISS-01", "go", bucketNegative)
-	swapped := false
-	reader := func(ctx context.Context, dir string) ([]os.DirEntry, error) {
-		entries, err := readBucketEntries(ctx, dir)
-		if err != nil || dir != negDir || swapped {
-			return entries, err
-		}
+	report := verifyWithListingMutation(t, root, bucketNegative, func(dir string) {
 		path := filepath.Join(dir, fixture)
 		if err := os.Remove(path); err != nil {
 			t.Fatalf("remove listed fixture: %v", err)
 		}
-		if err := contextopt.EnsureDirectory(ctx, path, 0o700); err != nil {
+		if err := contextopt.EnsureDirectory(t.Context(), path, 0o700); err != nil {
 			t.Fatalf("replace listed fixture with directory: %v", err)
 		}
-		swapped = true
-		return entries, nil
-	}
-
-	report, err := Verify(withBucketReader(t.Context(), reader), root, catalogFor("HISS-01", "go", StateEnforced))
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
+	})
 	if report.Passed() || len(report.Findings) != 1 {
 		t.Fatalf("replacing a listed fixture must fail with one finding, got %+v", report)
 	}
@@ -408,4 +331,137 @@ func TestVerifyBucketListedFileBecomesDirectoryIsIncomplete(t *testing.T) {
 	if got := report.Findings[0]; got != want {
 		t.Fatalf("finding = %q, want %q", got, want)
 	}
+}
+
+// verifySnapshot runs the real verifier on the HISS-01 Go claim and requires a usable report.
+func verifySnapshot(t *testing.T, ctx context.Context, root string) *Report {
+	t.Helper()
+	report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateEnforced))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+// verifyWithListingMutation changes the tree once after the target bucket's bounded read,
+// then requires exactly one listing for the whole Verify run.
+func verifyWithListingMutation(t *testing.T, root, bucket string, mutate func(string)) *Report {
+	t.Helper()
+	reads := 0
+	reader := func(dir string, entries []os.DirEntry) []os.DirEntry {
+		if filepath.Base(dir) == bucket {
+			reads++
+			if reads == 1 {
+				mutate(dir)
+			}
+		}
+		return entries
+	}
+	report := verifySnapshot(t, withBucketReader(t.Context(), reader), root)
+	if reads != 1 {
+		t.Fatalf("%s listed %d times, want one listing", bucket, reads)
+	}
+	return report
+}
+
+// requireSnapshotFinding checks the total replay count and the only finding's name and reason.
+func requireSnapshotFinding(t *testing.T, report *Report, count int, name, detail string) {
+	t.Helper()
+	if report.Fixtures != count || len(report.Findings) != 1 || report.Findings[0].Fixture != name ||
+		!strings.Contains(report.Findings[0].Detail, detail) {
+		t.Fatalf("want %d fixtures and one %q finding on %s: %+v", count, detail, name, report)
+	}
+}
+
+// afterFixtureCapture schedules a mutation between the completed capture and the first replay.
+func afterFixtureCapture(ctx context.Context, mutate func()) context.Context {
+	return context.WithValue(ctx, snapshotReadyKey{}, mutate)
+}
+
+// TestVerifySnapshotSameNameReplacement stages a trigger at the captured negative fixture's
+// name. The first replay uses the clean bytes, and the next run reports the replacement.
+func TestVerifySnapshotSameNameReplacement(t *testing.T) {
+	const name = "clean.go"
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, name, cleanGo)
+	target := filepath.Join(bucketPath(root, "HISS-01", "go", bucketNegative), name)
+	trigger := filepath.Join(root, "replacement.go")
+	if err := os.WriteFile(trigger, []byte(recursiveGo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := afterFixtureCapture(t.Context(), func() {
+		if err := os.Rename(trigger, target); err != nil {
+			t.Fatal(err)
+		}
+	})
+	report := verifySnapshot(t, ctx, root)
+	if !report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("captured clean fixture: %+v", report)
+	}
+	requireSnapshotFinding(t, verifySnapshot(t, t.Context(), root), 1, name, "over-matches")
+}
+
+// TestVerifySnapshotSymlinkAfterListing checks that only the next listing reports the new link.
+func TestVerifySnapshotSymlinkAfterListing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation requires elevated privileges")
+	}
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, "clean.go", cleanGo)
+	target := filepath.Join(root, "trigger.go")
+	if err := os.WriteFile(target, []byte(recursiveGo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report := verifyWithListingMutation(t, root, bucketNegative, func(dir string) {
+		if err := os.Symlink(target, filepath.Join(dir, "added.go")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("captured listing: %+v", report)
+	}
+	requireSnapshotFinding(t, verifySnapshot(t, t.Context(), root), 1, "added.go", "not a regular fixture")
+}
+
+// replaceCorpus renames the original tree and puts a violating negative fixture at its old path.
+func replaceCorpus(t *testing.T, root string) {
+	t.Helper()
+	corpus := filepath.Join(root, filepath.FromSlash(FixtureDir))
+	if err := os.Rename(corpus, filepath.Join(root, "original")); err != nil {
+		t.Fatal(err)
+	}
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "replacement.go", recursiveGo)
+}
+
+// TestVerifySnapshotCorpusReplaced checks both the pinned directory during capture and the
+// captured bytes after its handles close. The next run sees the replacement tree.
+func TestVerifySnapshotCorpusReplaced(t *testing.T) {
+	for _, phase := range [...]string{"after capture", "during listing"} {
+		t.Run(phase, func(t *testing.T) {
+			root := corpusRoot(t, "HISS-01", "go", bucketPositive, "rec.go", recursiveGo)
+			writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "clean.go", cleanGo)
+			var first *Report
+			if phase == "after capture" {
+				ctx := afterFixtureCapture(t.Context(), func() { replaceCorpus(t, root) })
+				first = verifySnapshot(t, ctx, root)
+			} else {
+				if runtime.GOOS == "windows" {
+					t.Skip("Windows can prevent renaming an open directory")
+				}
+				first = verifyWithListingMutation(t, root, bucketPositive, func(string) { replaceCorpus(t, root) })
+			}
+			if !first.Passed() || first.Fixtures != 2 {
+				t.Fatalf("original corpus: %+v", first)
+			}
+			requireSnapshotFinding(t, verifySnapshot(t, t.Context(), root), 1, "replacement.go", "over-matches")
+		})
+	}
+}
+
+// TestVerifySnapshotOneListing checks that a finding names the replayed fixture even when
+// another violating fixture is added immediately after the real listing.
+func TestVerifySnapshotOneListing(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketNegative, "listed.go", recursiveGo)
+	report := verifyWithListingMutation(t, root, bucketNegative, func(string) {
+		writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, "added.go", recursiveGo)
+	})
+	requireSnapshotFinding(t, report, 1, "listed.go", "over-matches")
 }

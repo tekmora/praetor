@@ -33,13 +33,43 @@ func OpenDirectory(ctx context.Context, path string) (*os.Root, error) {
 // ReadRootSnapshot reads a bounded regular UTF-8 file from a pinned directory.
 // A flat name is required; symlinks and changes during the read are rejected.
 func ReadRootSnapshot(ctx context.Context, root *os.Root, name string) ([]byte, error) {
-	if ctx == nil || root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
-		return nil, fmt.Errorf("context, directory and flat filename required")
-	}
-	if err := validatePath(name); err != nil {
+	if err := validateRootLeaf(ctx, root, name); err != nil {
 		return nil, err
 	}
 	return snapshotRoot(ctx, root, name)
+}
+
+// ReadListedSnapshot captures bounded UTF-8 text from the regular file identified by a
+// pinned directory's Lstat. It checks the opened descriptor before and after copying.
+// Once the descriptor is open, subsequent changes to the directory entry are immaterial.
+func ReadListedSnapshot(ctx context.Context, root *os.Root, name string, listed os.FileInfo) (_ []byte, err error) {
+	if err := validateRootLeaf(ctx, root, name); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := openListedSource(root, name, listed, MaxSourceBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, file.Close()) }()
+	data, err := stableRead(ctx, file, listed)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateText(data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// validateRootLeaf checks the arguments for a flat file or child directory in a pinned root.
+func validateRootLeaf(ctx context.Context, root *os.Root, name string) error {
+	if ctx == nil || root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+		return fmt.Errorf("context, directory and flat filename required")
+	}
+	return validatePath(name)
 }
 
 // ReadSnapshot reads one immutable regular UTF-8 file using the same bounded,

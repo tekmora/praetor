@@ -619,9 +619,16 @@ func TestClassifyBucketEntryEscapesStatError(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("list fixture: entries=%v err=%v", entries, err)
 	}
-	// A NUL in the parent forces Lstat to fail even when running with elevated privileges.
-	dir := filepath.Join(t.TempDir(), "parent\x00")
-	_, err = classifyBucketEntry(t.Context(), dir, entries[0])
+	// Closing the pinned parent forces a real Lstat error on every host.
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dir := "."
+	_, _, err = classifyBucketEntry(t.Context(), root, entries[0])
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) || pathErr.Path != filepath.Join(dir, name) {
 		t.Fatalf("stat error must retain the original path error: %v", err)

@@ -769,6 +769,11 @@ dependency tooling as one of the repository's own manifests; inside an archive i
 archive with no file, more than 16 files, a repeated name or a path that leaves the fixture root
 fails the replay (`TestParseArchive_*` in `internal/hisscoverage/archive_test.go`).
 
+Each Verify run pins the fixture corpus directory and lists each catalog bucket once. It
+captures regular fixture bytes before replay. The verdict covers those bytes and the entries
+in those listings. A listed regular file that disappears or becomes a directory before capture
+produces an incomplete-replay finding. A change after capture shows on the next run.
+
 For each bucket (`positive/`, `negative/`, `gap/`, `measured/`), the verifier can certify a
 listing of at most 4,096 directory entries and replay up to 256 regular files. It reads one
 additional entry to detect overflow. A 4,097th entry or a 257th regular file produces an

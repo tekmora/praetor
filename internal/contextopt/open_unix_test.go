@@ -7,6 +7,7 @@ package contextopt
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -57,5 +58,33 @@ func TestNonblockingOpenRejectsFileReplacedByFIFO(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("source open blocked on FIFO")
+	}
+}
+
+// TestOpenSourceRefusesReplacementSymlink checks the open itself when the relative link
+// points to the very inode already inspected. An identity comparison alone accepts it.
+func TestOpenSourceRefusesReplacementSymlink(t *testing.T) {
+	dir := contextFixture(t, map[string][]byte{"fixture.go": []byte("original")})
+	root := snapshotDirectory(t, dir)
+	const name = "fixture.go"
+	if _, err := root.Lstat(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Rename(name, "original.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Symlink("original.go", name); err != nil {
+		t.Fatal(err)
+	}
+	file, err := openSource(root, name)
+	if file != nil {
+		t.Errorf("opened a fixture through a replacement link")
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != name {
+		t.Fatalf("want the refused leaf's open error, got %v", err)
 	}
 }

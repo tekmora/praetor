@@ -2,7 +2,6 @@ package hisscoverage
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -10,14 +9,15 @@ import (
 // file where a bucket directory belongs must not be replayed as an empty bucket. On Windows the
 // read reports not-exist for both, which made the misplaced bucket silently count as empty.
 func TestReplayBucketDistinguishesAbsentFromMisplaced(t *testing.T) {
-	base := t.TempDir()
-	if results, err := replayBucket(t.Context(), base, bucketPositive, "HISS-00", &Report{}); err != nil || len(results) != 0 {
-		t.Fatalf("absent bucket was not empty: %v %v", results, err)
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	catalog := catalogFor("HISS-01", "go", StateEnforced)
+	if report, err := Verify(t.Context(), root, catalog); err != nil || !report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("absent bucket was not empty: %v %v", report, err)
 	}
-	if err := os.WriteFile(filepath.Join(base, bucketPositive), []byte("not a directory"), 0o600); err != nil {
+	if err := os.WriteFile(bucketPath(root, "HISS-01", "go", bucketNegative), []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replayBucket(t.Context(), base, bucketPositive, "HISS-00", &Report{}); err == nil {
+	if _, err := Verify(t.Context(), root, catalog); err == nil {
 		t.Fatal("a regular file was replayed as an empty bucket")
 	}
 }

@@ -188,6 +188,15 @@ func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *o
 	return current, nil
 }
 
+// OpenChildDirectory pins a single directory entry of parent and checks its identity.
+// The caller owns the returned root. A missing entry retains os.ErrNotExist.
+func OpenChildDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
+	if err := validateRootLeaf(ctx, parent, name); err != nil {
+		return nil, err
+	}
+	return childDirectory(ctx, parent, name)
+}
+
 func childDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -262,6 +271,9 @@ func snapshotRootBytes(ctx context.Context, root *os.Root, name string) ([]byte,
 	return buffer.Bytes(), nil
 }
 
+// ErrSourceNotRegular identifies a source whose link or opened file is not regular.
+var ErrSourceNotRegular = errors.New("source must be regular")
+
 // snapshotRootCopy streams one regular file of at most limit bytes from a pinned
 // directory into dst, rejecting symlinks, non-regular files and any change to the
 // file's identity, size or modification time during the copy. dst may hold a partial
@@ -274,13 +286,7 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 	if err != nil {
 		return 0, err
 	}
-	if !before.Mode().IsRegular() {
-		return 0, fmt.Errorf("source must be regular")
-	}
-	if before.Size() > limit {
-		return 0, fmt.Errorf("source exceeds %d bytes: %w", limit, util.ErrFileTooLarge)
-	}
-	file, err := openSource(root, name)
+	file, err := openListedSource(root, name, before, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -294,6 +300,26 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 		return 0, errors.Join(fmt.Errorf("source replaced during snapshot"), err)
 	}
 	return size, nil
+}
+
+// openListedSource enforces the listed type and size before opening the leaf without following links.
+func openListedSource(root *os.Root, name string, listed os.FileInfo, limit int64) (*os.File, error) {
+	if listed == nil || !listed.Mode().IsRegular() {
+		return nil, ErrSourceNotRegular
+	}
+	if listed.Size() > limit {
+		return nil, fmt.Errorf("source exceeds %d bytes: %w", limit, util.ErrFileTooLarge)
+	}
+	file, err := openSource(root, name)
+	if err != nil {
+		// A refused replacement link or device has platform-specific open errors.
+		current, statErr := root.Lstat(name)
+		if statErr == nil && !current.Mode().IsRegular() {
+			return nil, errors.Join(ErrSourceNotRegular, err)
+		}
+		return nil, errors.Join(err, statErr)
+	}
+	return file, nil
 }
 
 func validateText(data []byte) error {
@@ -331,7 +357,10 @@ func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.Fil
 	if err != nil {
 		return 0, err
 	}
-	if !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
+	if !opened.Mode().IsRegular() {
+		return 0, ErrSourceNotRegular
+	}
+	if !os.SameFile(before, opened) {
 		return 0, fmt.Errorf("source changed while opening")
 	}
 	count, err := io.Copy(dst, io.LimitReader(contextReader{ctx, file}, limit+1))
