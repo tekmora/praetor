@@ -1,10 +1,15 @@
 package hisscoverage
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
@@ -751,5 +756,303 @@ func TestVerifyRemovingHISS08RustFailsCommittedCorpus(t *testing.T) {
 		if !strings.Contains(report.Findings[i].String(), want[i]) {
 			t.Errorf("finding %d = %q, want path %s", i, report.Findings[i], want[i])
 		}
+	}
+}
+
+// plantSymlink creates a symbolic link at linkPath pointing to target, skipping on hosts without symlink rights.
+func plantSymlink(t *testing.T, target, linkPath string) {
+	t.Helper()
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- parent fixture directories require the owner execute bit to be traversed
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o750); err != nil {
+		t.Fatalf("mkdir parent for %s: %v", linkPath, err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
+}
+
+// TestVerifyRejectsSymlinkedCorpusRoot verifies that a corpus root symlink to a directory outside
+// the repository (or a path escaping rootDir via "..") fails Verify naming the path and lists
+// nothing from outside.
+func TestVerifyRejectsSymlinkedCorpusRoot(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "outside-secret.go"), []byte(cleanGo), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	root := t.TempDir()
+	corpusPath := filepath.Join(root, filepath.FromSlash(FixtureDir))
+	plantSymlink(t, outside, corpusPath)
+
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateUnsupported))
+	if err == nil {
+		t.Fatalf("symlinked corpus root must fail Verify, got report=%+v", report)
+	}
+	if !strings.Contains(err.Error(), corpusPath) && !strings.Contains(err.Error(), FixtureDir) {
+		t.Errorf("error = %q, want corpus path %s", err, corpusPath)
+	}
+	if strings.Contains(err.Error(), "outside-secret.go") || report != nil {
+		t.Errorf("Verify leaked outside entries: report=%+v err=%v", report, err)
+	}
+
+	escapeRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	if _, err := Verify(t.Context(), escapeRoot, catalogFor("HISS-01", "../../../../outside", StateManual)); err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("escaping language path error = %v, want escapes repository root", err)
+	}
+}
+
+// TestVerifyRejectsSymlinkedDirectoryInsideCorpus verifies that a symlinked directory anywhere
+// inside FixtureDir is reported as an unowned symlink and never entered.
+func TestVerifyRejectsSymlinkedDirectoryInsideCorpus(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "outside-leak.go"), []byte(recursiveGo), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	rels := []string{
+		"HISS-01/go/gap",
+		"HISS-01/rust",
+		"HISS-01/golnag/linked",
+		"HISS-01/go/positive/nested/linked",
+	}
+	for i := 0; i < len(rels); i++ {
+		rel := rels[i]
+		t.Run(rel, func(t *testing.T) {
+			assertSymlinkedCorpusSubdirNotEntered(t, outside, rel)
+		})
+	}
+}
+
+// assertSymlinkedCorpusSubdirNotEntered plants a symlink to outside at FixtureDir/rel and checks
+// that Verify reports the symlink path without replaying or listing anything inside outside.
+func assertSymlinkedCorpusSubdirNotEntered(t *testing.T, outside, rel string) {
+	t.Helper()
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	wantRel := FixtureDir + "/" + rel
+	plantSymlink(t, outside, filepath.Join(root, filepath.FromSlash(wantRel)))
+
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("symlink %s must fail without replaying outside files: fixtures=%d findings=%+v",
+			wantRel, report.Fixtures, report.Findings)
+	}
+	if len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantRel) {
+		t.Fatalf("findings = %+v, want one naming %s", report.Findings, wantRel)
+	}
+	if strings.Contains(report.Findings[0].String(), "outside-leak.go") {
+		t.Fatalf("finding leaked target contents: %s", report.Findings[0])
+	}
+}
+
+// corpusDirOpener is satisfied when corpusChecker streams directories through an injectable opener.
+type corpusDirOpener interface {
+	setOpenDir(func(string) (fs.ReadDirFile, error))
+}
+
+// installCorpusDirOpener attaches open when v supports chunked directory streaming.
+func installCorpusDirOpener(v any, open func(string) (fs.ReadDirFile, error)) bool {
+	cfg, ok := v.(corpusDirOpener)
+	if ok {
+		cfg.setOpenDir(open)
+	}
+	return ok
+}
+
+// syntheticDirEntry implements fs.DirEntry for bounded directory-reader tests.
+type syntheticDirEntry struct {
+	name string
+}
+
+// Name returns the synthetic entry's filename.
+func (e syntheticDirEntry) Name() string { return e.name }
+
+// IsDir reports false because synthetic entries represent regular files.
+func (e syntheticDirEntry) IsDir() bool { return false }
+
+// Type returns regular-file mode bits.
+func (e syntheticDirEntry) Type() fs.FileMode { return 0 }
+
+// Info returns os.ErrNotExist; readDirBounded inspects Name only while reading chunks.
+func (e syntheticDirEntry) Info() (fs.FileInfo, error) { return nil, os.ErrNotExist }
+
+// countingSyntheticDir yields total synthetic entries across ReadDir(n) calls while recording
+// the total entries handed back to the caller.
+type countingSyntheticDir struct {
+	info     fs.FileInfo
+	total    int
+	offset   int
+	returned *int
+}
+
+// Stat returns the real directory's FileInfo so handle identity validation passes.
+func (d *countingSyntheticDir) Stat() (fs.FileInfo, error) { return d.info, nil }
+
+// Read returns io.EOF on directory streams.
+func (d *countingSyntheticDir) Read([]byte) (int, error) { return 0, io.EOF }
+
+// Close satisfies fs.File.
+func (d *countingSyntheticDir) Close() error { return nil }
+
+// ReadDir returns up to n synthetic entries (or all remaining when n <= 0) and counts them.
+func (d *countingSyntheticDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	rem := d.total - d.offset
+	if rem <= 0 {
+		if n <= 0 {
+			return nil, nil
+		}
+		return nil, io.EOF
+	}
+	take := rem
+	if n > 0 && n < take {
+		take = n
+	}
+	out := make([]fs.DirEntry, take)
+	for i := 0; i < take; i++ {
+		out[i] = syntheticDirEntry{name: fmt.Sprintf("entry-%05d.go", d.offset+i)}
+	}
+	d.offset += take
+	*d.returned += take
+	return out, nil
+}
+
+// TestVerifyCorpusDirectoryEntryBound verifies that maxCorpusEntries+1 fails with the bound error
+// and that the chunked reader pulls at most maxCorpusEntries plus one chunk from an oversized dir.
+func TestVerifyCorpusDirectoryEntryBound(t *testing.T) {
+	const oneChunk = 256
+	assertSyntheticCorpusEntryBound(t, maxCorpusEntries+1, maxCorpusEntries+oneChunk)
+	assertSyntheticCorpusEntryBound(t, maxCorpusEntries*2, maxCorpusEntries+oneChunk)
+
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	overDir := filepath.Join(root, filepath.FromSlash(FixtureDir), "HISS-01", "golnag")
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- fixture directory needs the owner execute bit to be listed
+	if err := os.MkdirAll(overDir, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", overDir, err)
+	}
+	for i := 0; i < maxCorpusEntries+1; i++ {
+		name := filepath.Join(overDir, fmt.Sprintf("f%04d.go", i))
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if _, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial)); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Verify over %d entries = %v, want bound error", maxCorpusEntries+1, err)
+	}
+}
+
+// assertSyntheticCorpusEntryBound checks readDirBounded against total synthetic entries and verifies
+// the reader returned between maxCorpusEntries+1 and maxAllowed entries.
+func assertSyntheticCorpusEntryBound(t *testing.T, total, maxAllowed int) {
+	t.Helper()
+	dir := t.TempDir()
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", dir, err)
+	}
+	returned := 0
+	checker := newCorpusChecker(catalogFor("HISS-01", "go", StatePartial), &Report{})
+	installed := installCorpusDirOpener(checker, func(string) (fs.ReadDirFile, error) {
+		return &countingSyntheticDir{info: info, total: total, returned: &returned}, nil
+	})
+	if !installed {
+		t.Fatalf("readDirBounded does not stream directory entries in bounded chunks")
+	}
+	_, err = checker.readDirBounded(t.Context(), dir)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("readDirBounded(%d entries) error = %v, want bound error", total, err)
+	}
+	if returned < maxCorpusEntries+1 || returned > maxAllowed {
+		t.Fatalf("reader returned %d entries for total=%d, want [%d, %d]",
+			returned, total, maxCorpusEntries+1, maxAllowed)
+	}
+}
+
+// cancelAfterErrCallsContext cancels its underlying context on Err call number limit so a multi-chunk
+// directory read sees cancellation between chunks deterministically.
+type cancelAfterErrCallsContext struct {
+	context.Context
+	cancel context.CancelFunc
+	calls  atomic.Int64
+	limit  int64
+}
+
+// Err returns nil through call limit (cancelling on call limit) and the cancelled error thereafter.
+func (c *cancelAfterErrCallsContext) Err() error {
+	n := c.calls.Add(1)
+	if n < c.limit {
+		return nil
+	}
+	if n == c.limit {
+		c.cancel()
+		return nil
+	}
+	return c.Context.Err()
+}
+
+// TestVerifyCancelledContextStopsCorpusWalk verifies that both a pre-cancelled context and a
+// context cancelled between ReadDir chunks stop Verify with the context error.
+func TestVerifyCancelledContextStopsCorpusWalk(t *testing.T) {
+	preRoot := t.TempDir()
+	plantCorpusFile(t, preRoot, "orphan.go", cleanGo)
+	preCtx, preCancel := context.WithCancel(t.Context())
+	preCancel()
+	if _, err := Verify(preCtx, preRoot, catalogFor("HISS-01", "go", StateUnsupported)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-cancelled Verify error = %v, want context.Canceled", err)
+	}
+
+	midRoot := t.TempDir()
+	for i := 0; i < 300; i++ {
+		plantCorpusFile(t, midRoot, fmt.Sprintf("orphan-%03d.go", i), cleanGo)
+	}
+	inner, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	midCtx := &cancelAfterErrCallsContext{Context: inner, cancel: cancel, limit: 1}
+	if _, err := Verify(midCtx, midRoot, catalogFor("HISS-01", "go", StateUnsupported)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-read cancelled Verify error = %v, want context.Canceled", err)
+	}
+}
+
+// TestVerifyBoundsUnownedSubtreeFindings verifies that an unowned subtree with more files than the
+// per-subtree findings cap yields the cap plus one summary finding naming the omitted file count.
+func TestVerifyBoundsUnownedSubtreeFindings(t *testing.T) {
+	const (
+		findingsBound = 64
+		extraFiles    = 11
+	)
+	atBoundRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	plantUnownedSubtreeFiles(t, atBoundRoot, findingsBound)
+	atReport, err := Verify(t.Context(), atBoundRoot, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil || atReport.Passed() || len(atReport.Findings) != findingsBound {
+		t.Fatalf("at-bound subtree: err=%v findings=%d, want %d", err, len(atReport.Findings), findingsBound)
+	}
+
+	overRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	plantUnownedSubtreeFiles(t, overRoot, findingsBound+extraFiles)
+	overReport, err := Verify(t.Context(), overRoot, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify over-bound subtree: %v", err)
+	}
+	if overReport.Passed() || len(overReport.Findings) != findingsBound+1 {
+		t.Fatalf("over-bound findings = %d, want %d (%d + 1 summary)",
+			len(overReport.Findings), findingsBound+1, findingsBound)
+	}
+	wantSummary := fmt.Sprintf("%d further unowned file(s) omitted", extraFiles)
+	summaries := 0
+	for i := 0; i < len(overReport.Findings); i++ {
+		if strings.Contains(overReport.Findings[i].Detail, wantSummary) {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("summary findings containing %q = %d, want 1 in %+v", wantSummary, summaries, overReport.Findings)
+	}
+}
+
+// plantUnownedSubtreeFiles writes count unowned files across subdirectories of HISS-01/golnag.
+func plantUnownedSubtreeFiles(t *testing.T, root string, count int) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		rel := fmt.Sprintf("HISS-01/golnag/dir-%02d/file-%03d.go", i/16, i)
+		plantCorpusFile(t, root, rel, cleanGo)
 	}
 }
