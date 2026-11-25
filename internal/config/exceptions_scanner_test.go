@@ -5,6 +5,7 @@
 package config_test
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ type languageTargetSample struct {
 // coverageLanguageTargets maps each .config/hiss/coverage.yaml language to a representative path
 // and glob target for exception validation tests.
 var coverageLanguageTargets = map[string]languageTargetSample{
-	"go":             {path: "pkg/sample.go", glob: "pkg/*.go"},
+	"go":             {path: "src/sample.go", glob: "src/*.go"},
 	"c":              {path: "src/sample.c", glob: "src/*.c"},
 	"rust":           {path: "src/sample.rs", glob: "src/*.rs"},
 	"python":         {path: "pkg/sample.py", glob: "pkg/*.py"},
@@ -81,8 +82,9 @@ func assertScannerDecidedCell(t *testing.T, ruleID, language string, sample lang
 		t.Errorf("%s/%s is scanner-decided, yet function-scoped exception failed: %v", ruleID, language, err)
 	}
 	globErr := config.ValidateExceptions([]config.Exception{buildScannerCellEntry(ruleID, "", sample.glob, "")}, scannerRoutingToday)
-	if globErr == nil || !strings.Contains(globErr.Error(), "must name one file by path, not a glob") {
-		t.Errorf("%s/%s scanner cell accepted a glob target: %v", ruleID, language, globErr)
+	want := fmt.Sprintf("rule %s must name one file by path, not a glob (%q)", ruleID, sample.glob)
+	if globErr == nil || !strings.Contains(globErr.Error(), want) {
+		t.Errorf("%s/%s glob refusal = %v, want %q", ruleID, language, globErr, want)
 	}
 }
 

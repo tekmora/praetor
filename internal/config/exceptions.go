@@ -653,7 +653,7 @@ func (e Exception) scannerGlobProblem() string {
 		return fmt.Sprintf("rule %s glob %q has an ambiguous language: name one file by path or delegate with tool", e.Rule, e.Glob)
 	}
 	if e.AppliesToHISSScanner(hiss.ContentCandidateLanguage) || e.globCoversWorkflowCell(dir, name) {
-		return fmt.Sprintf("rule %s must name one file by path, not a glob", e.Rule)
+		return fmt.Sprintf("rule %s must name one file by path, not a glob (%q)", e.Rule, e.Glob)
 	}
 	return ""
 }

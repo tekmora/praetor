@@ -122,6 +122,14 @@ matching no finding in its file and function is stale and fails the audit, and a
 rule/language cell the scanner does not decide or naming another decider via `tool` stays out of
 the scanner route (`applyHISSExceptions` in `cmd/standardsctl/audit_exceptions.go`;
 `TestAudit_HISSException*`, `TestAudit_HISSScannerExceptions_EndToEnd`).
+For files identified by content, stale detection covers only files the scanner admitted and
+examined: a scanner claims such a file after its admission bound (for example the 64-workflow
+limit) and a completed scan, so an entry for a file past that bound or one the scanner declined is
+not reported stale (`TestAuditedInfractions_WorkflowAdmission`,
+`TestAuditedInfractions_ContentClaims`). C and C++ sources route by extension and take no part in
+that check: an entry for one the scanner skipped, for example past the size bound, is still
+reported stale (#2067). A
+fixed-language glob for a function-scoped rule is refused with the rule, the glob and the remedy.
 
 | Key | Rule |
 | :--- | :--- |
