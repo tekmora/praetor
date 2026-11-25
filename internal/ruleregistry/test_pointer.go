@@ -207,7 +207,7 @@ func (e *testEvidence) recordTypes(pkg string, decl *ast.GenDecl, imports hiss.G
 	}
 }
 
-// testParameter returns an empty name for *testing.T or the identifier of a candidate package-level alias.
+// testParameter returns an empty name for imported testing.T or "T" for a candidate package-level alias.
 func testParameter(signature *ast.FuncType, imports hiss.GoImports) (string, bool) {
 	if signature.TypeParams != nil || signature.Results.NumFields() != 0 || signature.Params.NumFields() != 1 {
 		return "", false
@@ -220,7 +220,7 @@ func testParameter(signature *ast.FuncType, imports hiss.GoImports) (string, boo
 		return "", true
 	}
 	ident, ok := ptr.X.(*ast.Ident)
-	if !ok {
+	if !ok || ident.Name != "T" {
 		return "", false
 	}
 	_, bound := imports.Path(ident.Name)

@@ -438,15 +438,17 @@ func TestAudit_TestPackageFiles(t *testing.T) {
 func TestAudit_TestParameterAlias(t *testing.T) {
 	const alias = "import std \"testing\"\ntype T = std.T\n"
 	const direct = "package check\n" + alias
-	const test = "package check\nfunc TestGate(*T) {}\n"
+	const test = "package check\nfunc Test(*T) {}\n"
 	for _, tc := range [...]struct {
 		name, file, source, test string
 		wantError                bool
 	}{
-		{"same file", "gate_test.go", "package check\nimport \"testing\"\ntype T = testing.T\nfunc TestGate(*T) {}\n", "", false},
+		{"same file", "gate_test.go", "package check\nimport \"testing\"\ntype T = testing.T\nfunc Test(*T) {}\n", "", false},
+		{"alias named TT", "gate_test.go", "package check\nimport \"testing\"\ntype TT = testing.T\nfunc Test(*TT) {}\n", "", true},
+		{"renamed import", "gate_test.go", "package check\nimport tt \"testing\"\nfunc Test(*tt.T) {}\n", "", false},
 		{"later test file", "zz_test.go", direct, test, false},
 		{"ordinary source", "types.go", direct, test, false},
-		{"external test package", "zz_test.go", "package check_test\n" + alias, "package check_test\nfunc TestGate(*T) {}\n", false},
+		{"external test package", "zz_test.go", "package check_test\n" + alias, "package check_test\nfunc Test(*T) {}\n", false},
 		{"different package", "zz_test.go", "package check_test\n" + alias, test, true},
 		{"constrained alias", "zz_test.go", "//go:build ignore\n\n" + direct, test, true},
 		{"legacy constrained source", "types.go", "// +build ignore\n\n" + direct, test, true},
@@ -455,7 +457,7 @@ func TestAudit_TestParameterAlias(t *testing.T) {
 		{"unrelated import", "zz_test.go", "package check\nimport std \"example.com/other\"\ntype T = std.T\n", test, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := pointerFixtureRoot(t, "test:internal/check.TestGate")
+			root := pointerFixtureRoot(t, "test:internal/check.Test")
 			writeTestFile(t, root, "internal/check/"+tc.file, tc.source)
 			if tc.test != "" {
 				writeTestFile(t, root, "internal/check/gate_test.go", tc.test)
