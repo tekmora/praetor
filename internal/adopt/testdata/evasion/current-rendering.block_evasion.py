@@ -408,7 +408,7 @@ LEFTHOOK_NARROWING = ("LEFTHOOK_EXCLUDE", "LEFTHOOK_SKIP")
 
 
 class Blocked(Exception):
-    pass
+    """Signal a refused command or invalid hook input with its blocking reason."""
 
 
 def read_payload_command(stream):
