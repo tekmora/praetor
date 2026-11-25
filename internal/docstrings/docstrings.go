@@ -84,6 +84,14 @@ type Report struct {
 
 // Check evaluates diff-scoped docstring coverage against the merge base.
 func Check(ctx context.Context, opts Options) (*Report, error) {
+	return checkWithRanges(ctx, opts, cifilter.GetChangedLineRanges)
+}
+
+// rangeCollector returns the changed source lines between the base and the selected head.
+type rangeCollector func(context.Context, string, string, string) (map[string][]cifilter.LineRange, error)
+
+// checkWithRanges pins the head before collecting ranges and evaluating their declarations.
+func checkWithRanges(ctx context.Context, opts Options, collect rangeCollector) (*Report, error) {
 	if ctx == nil {
 		return nil, errors.New("docstrings check requires a context")
 	}
@@ -115,7 +123,7 @@ func Check(ctx context.Context, opts Options) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	ranges, err := cifilter.GetChangedLineRanges(ctx, repoDir, baseRef, head)
+	ranges, err := collect(ctx, repoDir, baseRef, head)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +275,7 @@ func isWorktreeHead(headRef string) bool {
 // It returns ok=false when rel is a non-regular worktree entry or a gitlink/symlink tree entry.
 func readTargetFile(ctx context.Context, repoDir, headRef, rel string) ([]byte, bool, error) {
 	if !isWorktreeHead(headRef) {
-		return readGitRevisionFile(ctx, repoDir, headRef, rel, maxSourceBytes)
+		return readGitRevisionFile(ctx, repoDir, headRef, rel)
 	}
 	fullPath := filepath.Join(repoDir, filepath.FromSlash(rel))
 	info, err := os.Lstat(fullPath)
@@ -288,7 +296,7 @@ func readTargetFile(ctx context.Context, repoDir, headRef, rel string) ([]byte, 
 }
 
 // readGitRevisionFile reads raw blob bytes at headRef, skipping gitlinks and symlinks.
-func readGitRevisionFile(ctx context.Context, repoDir, headRef, rel string, maxBytes int) ([]byte, bool, error) {
+func readGitRevisionFile(ctx context.Context, repoDir, headRef, rel string) ([]byte, bool, error) {
 	gitCtx, cancel := context.WithTimeout(ctx, gitReadTimeout)
 	defer cancel()
 	treeOut, err := util.RunGit(gitCtx, repoDir, "ls-tree", headRef, "--", rel)
@@ -299,7 +307,7 @@ func readGitRevisionFile(ctx context.Context, repoDir, headRef, rel string, maxB
 	if len(fields) == 0 || fields[0] == "160000" || fields[0] == "120000" {
 		return nil, false, nil
 	}
-	out, err := util.RunGitBytes(gitCtx, repoDir, maxBytes, "cat-file", "blob", headRef+":"+rel)
+	out, err := util.RunGitBytes(gitCtx, repoDir, maxSourceBytes, "cat-file", "blob", headRef+":"+rel)
 	if err != nil {
 		return nil, false, fmt.Errorf("read %s at %s: %w", rel, headRef, util.CommandDiagnostic(err, out.Stderr))
 	}

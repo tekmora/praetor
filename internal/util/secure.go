@@ -478,6 +478,15 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	})
 }
 
+// WriteTrackedFileAtomicIn publishes one tracked file through a pinned directory. Its
+// fresh sibling is created under the process umask and renamed over the destination.
+func WriteTrackedFileAtomicIn(dir *os.Root, name string, data []byte) error {
+	if !filepath.IsLocal(name) || name == "." || filepath.Base(name) != name {
+		return fmt.Errorf("util: expected a single file name in %q, got %q", dir.Name(), name)
+	}
+	return replaceAtomically(dir, name, data, filePermission{mode: TrackedFilePerm})
+}
+
 // WriteFileExclusive creates path holding data and fails with an error matching
 // os.ErrExist when anything -- a file, a directory, a dangling symbolic link -- is
 // already there. It never truncates, replaces or writes through an existing entry.

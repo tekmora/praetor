@@ -7,6 +7,7 @@ package adopt
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // updateHarnessGolden rewrites the harness goldens from the current rendering:
@@ -158,11 +160,19 @@ func compareHarnessGolden(t *testing.T, name, got string) {
 		}
 		return
 	}
-	want, err := root.ReadFile(name)
+	if err := checkHarnessGolden(root, name, got); err != nil {
+		t.Error(err)
+	}
+}
+
+// checkHarnessGolden compares the rendering with a bounded, regular golden file in root.
+func checkHarnessGolden(root *os.Root, name, got string) error {
+	want, err := util.ReadLimitedIn(root, name, maxEmittedFileBytes)
 	if err != nil {
-		t.Fatalf("read golden (regenerate with -update-harness-golden): %v", err)
+		return fmt.Errorf("read golden (regenerate with -update-harness-golden): %w", err)
 	}
 	if got != strings.ReplaceAll(string(want), "\r\n", "\n") {
-		t.Errorf("harness differs from testdata/%s (regenerate with -update-harness-golden after review):\n%s", name, got)
+		return fmt.Errorf("harness differs from testdata/%s (regenerate with -update-harness-golden after review):\n%s", name, got)
 	}
+	return nil
 }

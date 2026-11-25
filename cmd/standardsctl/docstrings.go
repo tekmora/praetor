@@ -120,21 +120,37 @@ func reportDocstringsRange(ctx context.Context, repoPath, baseRef, headRef strin
 func runDocstringsPrePush(ctx context.Context, repoPath string, override *int, r io.Reader) error {
 	updates, err := docstrings.ParsePrePushStdin(ctx, r)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
+		if _, writeErr := fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err); writeErr != nil {
+			return fmt.Errorf("report pre-push input error (%w): %w", err, writeErr)
+		}
 		return exitStatusError{code: 2}
 	}
 	if len(updates) == 0 {
 		// lefthook hands stdin to one use_stdin job only; an empty input is stated, never a silent pass.
-		fmt.Println("Docstring check: skipped, no pushed ref update on stdin (a delete-only push, or another hook job read the input)")
-		return nil
+		return writeDocstringsSkip("no pushed ref update on stdin (a delete-only push, or another hook job read the input)")
 	}
+	return checkDocstringsUpdates(ctx, repoPath, override, updates)
+}
+
+// writeDocstringsSkip delivers the reason a pre-push range was skipped.
+func writeDocstringsSkip(reason string) error {
+	if _, err := fmt.Fprintf(os.Stdout, "Docstring check: skipped, %s\n", reason); err != nil {
+		return fmt.Errorf("write docstrings skip diagnostic: %w", err)
+	}
+	return nil
+}
+
+// checkDocstringsUpdates checks each distinct pushed range and reports updates without a base.
+func checkDocstringsUpdates(ctx context.Context, repoPath string, override *int, updates []docstrings.PrePushUpdate) error {
 	seen := make(map[string]bool, len(updates))
 	failed := false
 	for i := 0; i < len(updates); i++ {
 		u := updates[i]
 		base, skipReason := docstrings.ResolvePrePushBase(ctx, repoPath, "origin", u.LocalOID, u.RemoteOID)
 		if base == "" {
-			fmt.Printf("Docstring check: skipped, no pushed-range base (%s); CI checks pull request range\n", skipReason)
+			if err := writeDocstringsSkip(fmt.Sprintf("no pushed-range base (%s); CI checks pull request range", skipReason)); err != nil {
+				return err
+			}
 			continue
 		}
 		key := base + ".." + u.LocalOID

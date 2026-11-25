@@ -73,22 +73,63 @@ func TestEvasionArchiveRejectsEscapingSymlinks(t *testing.T) {
 	assertFixtureSymlinkUnchanged(t, archive, outside, previous)
 }
 
+var evasionFixtureLinks = [...]struct {
+	name string
+	link func(string, string) error
+}{
+	{"relative symlink", os.Symlink},
+	{"hard link", os.Link},
+}
+
+// TestEvasionUpdateReplacesLinkedCurrent checks that publishing detaches both kinds of link.
+func TestEvasionUpdateReplacesLinkedCurrent(t *testing.T) {
+	for _, kind := range evasionFixtureLinks {
+		t.Run(kind.name, func(t *testing.T) {
+			if kind.name == "relative symlink" && runtime.GOOS == "windows" {
+				t.Skip("symlink creation needs developer mode on Windows")
+			}
+			checkLinkedCurrentReplacement(t, kind.link)
+		})
+	}
+}
+
+// checkLinkedCurrentReplacement verifies all three byte sequences for one kind of fixture link.
+func checkLinkedCurrentReplacement(t *testing.T, link func(string, string) error) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	const previous, next = "outgoing rendering\r\n", "new rendering\n"
+	const independent = "independent.py"
+	mustWrite(t, independent, previous)
+	if err := link(independent, currentEvasionFixture); err != nil {
+		t.Fatal(err)
+	}
+	if err := util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
+		return updateCurrentEvasionRendering(root, []byte(next))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	archive := fixtureDigest(t, "outgoing", []byte(previous)) + ".block_evasion.py"
+	for name, want := range map[string]string{independent: previous, archive: previous, currentEvasionFixture: next} {
+		if got := mustRead(t, name); got != want {
+			t.Errorf("%s contains %q, want %q", name, got, want)
+		}
+	}
+}
+
 // TestEvasionUpdateRejectsArchiveAliases checks both names stay intact when the archive aliases current.
 func TestEvasionUpdateRejectsArchiveAliases(t *testing.T) {
-	links := []struct {
-		name string
-		link func(string, string) error
-	}{
-		{"relative symlink", os.Symlink},
-		{"hard link", os.Link},
-	}
-	for _, kind := range links {
-		for _, next := range []string{"new rendering\n", "outgoing rendering\n"} {
-			t.Run(kind.name+"/"+strings.TrimSpace(next), func(t *testing.T) {
+	for _, kind := range evasionFixtureLinks {
+		for _, tc := range []struct{ name, next string }{
+			{"changed", "new rendering\n"},
+			{"LF checkout", "outgoing rendering\n"},
+			{"identical CRLF", "outgoing rendering\r\n"},
+		} {
+			t.Run(kind.name+"/"+tc.name, func(t *testing.T) {
 				if kind.name == "relative symlink" && runtime.GOOS == "windows" {
 					t.Skip("symlink creation needs developer mode on Windows")
 				}
-				assertEvasionArchiveAliasRefused(t, kind.link, next)
+				assertEvasionArchiveAliasRefused(t, kind.link, tc.next)
 			})
 		}
 	}
@@ -224,6 +265,11 @@ func TestFixtureReadLimits(t *testing.T) {
 		{"shared", "fixture", func(dir, _ string) error {
 			_, err := readFixtureFile(dir, "fixture")
 			return err
+		}},
+		{"golden", "harness.golden", func(dir, data string) error {
+			return util.InConfinedDirectory(dir, ".", func(root *os.Root) error {
+				return checkHarnessGolden(root, "harness.golden", data)
+			})
 		}},
 		{"current", currentEvasionFixture, func(dir, data string) error {
 			return util.InConfinedDirectory(dir, ".", func(root *os.Root) error {

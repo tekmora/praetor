@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,54 +101,140 @@ func TestDocstringExceptions_CommittedHead(t *testing.T) {
 	}
 }
 
-// TestDocstringExceptions_MovingHead advances topic between the manifest and source reads.
+// TestDocstringExceptions_LinkedManifest checks the same manifest boundary in the checkout and commit.
+func TestDocstringExceptions_LinkedManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs developer mode on Windows")
+	}
+	for _, tc := range []struct {
+		name    string
+		outside bool
+	}{{"inside", false}, {"outside", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			expires := time.Now().UTC().AddDate(0, 0, 1).Format(time.DateOnly)
+			root := linkedExceptionFixture(t, tc.outside, expires)
+			ctx := exceptionFixtureContext(t)
+			for _, head := range []string{"WORKTREE", "HEAD"} {
+				checkLinkedManifest(t, ctx, root, head, expires, tc.outside)
+			}
+		})
+	}
+}
+
+// checkLinkedManifest checks one mode's coverage verdict or refusal of an escaping link.
+func checkLinkedManifest(t *testing.T, ctx context.Context, root, head, expires string, outside bool) {
+	t.Helper()
+	rep, err := Check(ctx, Options{RepoDir: root, BaseRef: "HEAD^", HeadRef: head})
+	if outside {
+		if err == nil || !strings.Contains(err.Error(), "load docstrings exceptions") {
+			t.Errorf("%s: want a manifest error for the escaping link, got %+v, %v", head, rep, err)
+		}
+		return
+	}
+	if err != nil || !rep.Passed || rep.Counted != 0 {
+		t.Fatalf("%s: want the exception to excuse snapshot.py, got %+v, %v", head, rep, err)
+	}
+	assertDocstringException(t, rep.Exceptions, "excepted", expires)
+}
+
+// linkedExceptionFixture commits a manifest pointing at a matching policy inside or outside the fixture.
+func linkedExceptionFixture(t *testing.T, outside bool, expires string) string {
+	t.Helper()
+	data := []byte("def snapshot():\n    return 1\n")
+	root := writeDocstringExceptionFixture(t, data, fmt.Sprintf("%x", sha256.Sum256(data)), "", expires)
+	policy := filepath.Join(root, "policy")
+	if outside {
+		policy = t.TempDir()
+	} else if err := util.MkdirConfined(root, "policy", util.SecureDirPerm); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(root, config.ManifestFileName)
+	target := filepath.Join(policy, "standards.yaml")
+	if err := os.Rename(manifest, target); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, manifest); err != nil {
+		t.Fatal(err)
+	}
+	testsupport.InitGitRepoWithOrigin(t, root, "")
+	testsupport.RunFixtureGit(t, root, []string{"commit", "--allow-empty", "-m", "base"},
+		[]string{"add", "."}, []string{"commit", "-m", "add linked exception and source"})
+	return root
+}
+
+// TestDocstringExceptions_MovingHead moves a revision after the diff and before the manifest read.
 func TestDocstringExceptions_MovingHead(t *testing.T) {
 	for _, head := range []string{"topic", "topic@{0}"} {
 		t.Run(head, func(t *testing.T) { checkMovingExceptionHead(t, head) })
 	}
 }
 
-// checkMovingExceptionHead checks that a branch or reflog expression keeps its initial source bytes.
+// checkMovingExceptionHead checks the initial diff, declaration and disposition despite a ref update.
 func checkMovingExceptionHead(t *testing.T, head string) {
 	t.Helper()
-	later := []byte("def later():\n    return 2\n")
 	expires := time.Now().UTC().AddDate(0, 0, 1).Format(time.DateOnly)
-	root := writeDocstringExceptionFixture(t, []byte("def initial():\n    return 1\n"), fmt.Sprintf("%x", sha256.Sum256(later)), "", expires)
+	root := movingExceptionFixture(t, expires)
+	ctx := exceptionFixtureContext(t)
+	collect := func(ctx context.Context, dir, base, ref string) (map[string][]cifilter.LineRange, error) {
+		ranges, err := cifilter.GetChangedLineRanges(ctx, dir, base, ref)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := util.RunGit(ctx, dir, "update-ref", "refs/heads/topic", "HEAD"); err != nil {
+			return nil, fmt.Errorf("move topic after diff: %w", err)
+		}
+		return ranges, nil
+	}
+	rep, err := checkWithRanges(ctx, Options{RepoDir: root, BaseRef: "HEAD^", HeadRef: head}, collect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta := testsupport.RunFixtureGit(t, root, []string{"rev-list", "--count", "topic...HEAD"}); delta != "0" {
+		t.Fatal("range collection did not move topic to HEAD")
+	}
+	want := []UncoveredFunction{{Path: "snapshot.py", Line: 1, Name: "initial"}}
+	if rep.Passed || rep.Counted != 1 || !slices.Equal(rep.Uncovered, want) {
+		t.Fatalf("want the initial uncovered declaration, got %+v", rep)
+	}
+	assertDocstringException(t, rep.Exceptions, "stale", expires)
+}
+
+// movingExceptionFixture creates sibling commits changing different declarations of the same base file.
+func movingExceptionFixture(t *testing.T, expires string) string {
+	t.Helper()
+	const base = "def first():\n    return 1\n\ndef second():\n    return 2\n"
+	initial := strings.Replace(base, "first", "initial", 1)
+	later := strings.Replace(base, "second", "later", 1)
+	root := writeDocstringExceptionFixture(t, []byte(base), fmt.Sprintf("%x", sha256.Sum256([]byte(later))), "", expires)
 	testsupport.InitGitRepoWithOrigin(t, root, "")
-	testsupport.RunFixtureGit(t, root,
-		[]string{"commit", "--allow-empty", "-m", "base"},
-		[]string{"add", "snapshot.py", config.ManifestFileName},
-		[]string{"commit", "-m", "stale exception for different bytes"},
-		[]string{"branch", "topic"})
-	if err := os.WriteFile(filepath.Join(root, "snapshot.py"), later, 0o600); err != nil {
+	testsupport.RunFixtureGit(t, root, []string{"add", "snapshot.py"}, []string{"commit", "-m", "two declarations"})
+	source := filepath.Join(root, "snapshot.py")
+	if err := os.WriteFile(source, []byte(initial), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	testsupport.RunFixtureGit(t, root,
-		[]string{"rm", config.ManifestFileName},
-		[]string{"commit", "-am", "new source without an exception"})
-	moved := false
-	t.Cleanup(SetTargetFileReaderForTest(func(ctx context.Context, dir, ref, rel string) ([]byte, bool, error) {
-		if out, err := util.RunGit(ctx, dir, "update-ref", "refs/heads/topic", "HEAD"); err != nil {
-			return nil, false, fmt.Errorf("move topic: %w: %s", err, out)
-		}
-		moved = true
-		return readTargetFile(ctx, dir, ref, rel)
-	}))
+		[]string{"add", "snapshot.py", config.ManifestFileName},
+		[]string{"commit", "-m", "rename first declaration with stale exception"},
+		[]string{"branch", "topic"}, []string{"switch", "--detach", "HEAD^"})
+	if err := os.WriteFile(source, []byte(later), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testsupport.RunFixtureGit(t, root, []string{"commit", "-am", "rename second declaration without an exception"})
+	return root
+}
+
+// exceptionFixtureContext runs the check's Git commands with the same isolation as fixture setup.
+func exceptionFixtureContext(t *testing.T) context.Context {
+	t.Helper()
 	ctx, err := util.WithCommandEnvironment(t.Context(), testsupport.HermeticGitEnv(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, err := Check(ctx, Options{RepoDir: root, BaseRef: "HEAD~2", HeadRef: head})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !moved {
-		t.Fatal("source read did not advance topic")
-	}
-	if rep.Passed || rep.Counted != 1 || len(rep.Uncovered) != 1 || rep.Uncovered[0].Name != "initial" {
-		t.Fatalf("want the initial uncovered function, got %+v", rep)
-	}
-	assertDocstringException(t, rep.Exceptions, "stale", expires)
+	return ctx
 }
 
 // checkCommittedExceptionFixture checks HEAD after independently setting the two manifest states.
@@ -165,10 +253,7 @@ func checkCommittedExceptionFixture(t *testing.T, root string, headEntry, checko
 			t.Fatal(err)
 		}
 	}
-	ctx, err := util.WithCommandEnvironment(t.Context(), testsupport.HermeticGitEnv(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ctx := exceptionFixtureContext(t)
 	rep, err := Check(ctx, Options{RepoDir: root, BaseRef: "HEAD^", HeadRef: "HEAD"})
 	if err != nil {
 		t.Fatal(err)

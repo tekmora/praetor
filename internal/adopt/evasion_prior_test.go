@@ -55,9 +55,6 @@ func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", currentEvasionFixture, err)
 	}
-	if bytes.Equal(previous, current) {
-		return nil
-	}
 	equal, err := util.CanonicalTextEquivalent(previous, current)
 	if err != nil {
 		return fmt.Errorf("compare %s: %w", currentEvasionFixture, err)
@@ -69,7 +66,10 @@ func updateCurrentEvasionRendering(root *os.Root, current []byte) error {
 	if err := archiveEvasionRenderingIn(root, digest, previous, !equal); err != nil {
 		return err
 	}
-	if err := root.WriteFile(currentEvasionFixture, current, 0o644); err != nil {
+	if bytes.Equal(previous, current) {
+		return nil
+	}
+	if err := util.WriteTrackedFileAtomicIn(root, currentEvasionFixture, current); err != nil {
 		return fmt.Errorf("write %s: %w", currentEvasionFixture, err)
 	}
 	return nil
@@ -90,7 +90,7 @@ func archiveEvasionRenderingIn(root *os.Root, digest string, previous []byte, cr
 		if !create {
 			return nil
 		}
-		return createEvasionArchive(root, archive, previous)
+		return util.WriteTrackedFileAtomicIn(root, archive, previous)
 	}
 	if err != nil {
 		return fmt.Errorf("stat outgoing rendering archive %s: %w", archive, err)
@@ -120,19 +120,6 @@ func compareEvasionArchive(root *os.Root, archive string, previous []byte) error
 	}
 	if !equal {
 		return fmt.Errorf("outgoing rendering archive %s differs from its recorded bytes", archive)
-	}
-	return nil
-}
-
-// createEvasionArchive claims an absent digest name without overwriting a concurrent creation.
-func createEvasionArchive(root *os.Root, archive string, previous []byte) error {
-	file, err := root.OpenFile(archive, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("create outgoing rendering archive %s: %w", archive, err)
-	}
-	_, writeErr := file.Write(previous)
-	if err := errors.Join(writeErr, file.Close()); err != nil {
-		return fmt.Errorf("write outgoing rendering archive %s: %w", archive, errors.Join(err, root.Remove(archive)))
 	}
 	return nil
 }

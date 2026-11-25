@@ -17,7 +17,7 @@ import (
 // TestDocstringsClosedOutput checks both entry points with passing coverage and a failed report write.
 func TestDocstringsClosedOutput(t *testing.T) {
 	dir := t.TempDir()
-	testsupport.InitGitRepoWithOrigin(t, dir, "")
+	testsupport.InitGitRepoWithOrigin(t, dir, ".")
 	base := testsupport.RunFixtureGit(t, dir,
 		[]string{"commit", "--allow-empty", "-m", "base"}, []string{"rev-parse", "HEAD"})
 	head := testsupport.RunFixtureGit(t, dir,
@@ -42,5 +42,11 @@ func TestDocstringsClosedOutput(t *testing.T) {
 	line := "refs/heads/topic " + head + " refs/heads/topic " + base + "\n"
 	if err := runDocstringsPrePush(ctx, dir, nil, strings.NewReader(line)); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("pre-push: got %v, want closed output error", err)
+	}
+	for _, input := range []string{"", "refs/heads/topic " + head + " refs/heads/topic " + strings.Repeat("0", len(head)) + "\n"} {
+		err := runDocstringsPrePush(ctx, dir, nil, strings.NewReader(input))
+		if !errors.Is(err, os.ErrClosed) || !strings.Contains(err.Error(), "skip diagnostic") {
+			t.Errorf("skipped pre-push %q: got %v, want closed skip diagnostic", input, err)
+		}
 	}
 }
