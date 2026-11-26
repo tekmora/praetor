@@ -95,16 +95,15 @@ func ValidatePRChecklistWithPolicy(prBody string, policy ReceiptPolicy) (*PRChec
 // Missing input returns a call error and a checklist finding. A supplied body that
 // exceeds a parsing limit returns the limit finding with a nil call error.
 func ValidatePRChecklistWithPolicyContext(ctx context.Context, prBody string, policy ReceiptPolicy) (*PRChecklistResult, error) {
+	doc, finding := parseChecklistDocument(prBody)
+	if finding != "" {
+		return &PRChecklistResult{Errors: []string{finding}}, nil
+	}
 	if strings.TrimSpace(prBody) == "" {
 		return &PRChecklistResult{
 			Valid:  false,
 			Errors: []string{"PR body is empty; checklist required"},
 		}, errors.New("empty PR body")
-	}
-
-	doc, finding := parseChecklistDocument(prBody)
-	if finding != "" {
-		return &PRChecklistResult{Errors: []string{finding}}, nil
 	}
 
 	res := &PRChecklistResult{}

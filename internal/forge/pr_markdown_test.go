@@ -17,6 +17,9 @@ func TestChecklistUsesOnlyVisibleTaskText(t *testing.T) {
 		{"quoted comment", `Reviewed "<!-- HISS-16 -->"`, `Reviewed ""`},
 		{"HTML attribute", `<span title="HISS-16">Reviewed</span>`, "Reviewed"},
 		{"link destination", "[Reviewed](HISS-16)", "Reviewed"},
+		{"autolink after hyphen", "HISS-<https://example.org>16", "HISS-https://example.org16"},
+		{"autolink before hyphen", "HISS<https://example.org/>-16", "HISShttps://example.org/-16"},
+		{"image alt text", "![HISS-16](https://example.org/badge.png)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := "<!-- - [x] HISS-16 -->\n\n- [x] " + tc.label + "\n- [x] HISS-15\n" + receipt
@@ -57,13 +60,67 @@ func TestChecklistMarkdownOutline(t *testing.T) {
 	}
 }
 
-// TestChecklistFirstReceiptInContainer rejects an invalid first receipt even with a valid second.
-func TestChecklistFirstReceiptInContainer(t *testing.T) {
+// TestChecklistQuotedReceipts selects the first receipt outside a blockquote.
+func TestChecklistQuotedReceipts(t *testing.T) {
 	first := "> ~~~receipt\n> invalid\n> ~~~\n"
-	body := prChecklistBoxes + "\n" + first + fencedReceipt(t, "```receipt", "```")
+	signed := fencedReceipt(t, "```receipt", "```")
+	body := prChecklistBoxes + "\n" + first + signed
 	res, err := ValidatePRChecklist(body)
-	if err != nil || res.Valid || res.HasReceipt || !containsFragment(res.Errors, "not valid receipt JSON") {
-		t.Fatalf("expected the first receipt's JSON error: %+v, %v", res, err)
+	if err != nil || !res.Valid || !res.HasReceipt {
+		t.Fatalf("top-level signed receipt after quoted invalid JSON: %+v, %v", res, err)
+	}
+	quoted := "> " + strings.ReplaceAll(strings.TrimSpace(signed), "\n", "\n> ")
+	res, err = ValidatePRChecklist("> - [x] HISS-16\n>\n" + quoted)
+	if err != nil || res.HasReceipt || res.receiptFence || res.hasTickedBox {
+		t.Fatalf("quoted task and signed receipt: %+v, %v", res, err)
+	}
+}
+
+// TestChecklistCommentAcrossBlocks skips a second comment through its raw closer or EOF.
+func TestChecklistCommentAcrossBlocks(t *testing.T) {
+	hidden := "<!-- closed --> <!--\n\n- [x] HISS-16\n- [x] HISS-15\n\n" +
+		fencedReceipt(t, "```receipt", "```")
+	for _, tc := range []struct {
+		name, suffix string
+		want         []string
+	}{
+		{"visible after close", "\n<!-- close -->\n\n- [x] HISS-15", []string{"- [x] HISS-15"}},
+		{"open at EOF", "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := ValidatePRChecklist(hidden + tc.suffix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.HasReceipt || res.receiptFence || res.HasHISS16Check || !slices.Equal(res.outline, tc.want) {
+				t.Fatalf("expected only visible items %q: %+v", tc.want, res)
+			}
+			visible := len(tc.want) > 0
+			if res.hasTickedBox != visible || res.Has3DTestsCheck != visible {
+				t.Fatalf("expected visible HISS-15 task = %t: %+v", visible, res)
+			}
+		})
+	}
+}
+
+// TestChecklistPartialCommentLabel keeps the visible prefix when the closer is in another block.
+func TestChecklistPartialCommentLabel(t *testing.T) {
+	body := "- [x] reviewed <!-- HISS-16\n\n-->\n\n- [x] HISS-15"
+	res, err := ValidatePRChecklist(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"- [x] reviewed", "- [x] HISS-15"}
+	if res.HasHISS16Check || !res.Has3DTestsCheck || !slices.Equal(res.outline, want) {
+		t.Fatalf("expected visible task labels %q: %+v", want, res)
+	}
+}
+
+// TestChecklistTextBesideImage preserves the visible label beside an image.
+func TestChecklistTextBesideImage(t *testing.T) {
+	res, err := ValidatePRChecklist("- [x] ![HISS-15](https://example.org/badge.png) HISS-16")
+	if err != nil || !res.HasHISS16Check || res.Has3DTestsCheck || !slices.Equal(res.outline, []string{"- [x] HISS-16"}) {
+		t.Fatalf("expected exactly the visible HISS-16 label: %+v, %v", res, err)
 	}
 }
 
@@ -91,14 +148,27 @@ func TestChecklistBodyLineBoundaries(t *testing.T) {
 // TestChecklistBodyByteLimit reports a single finding before reading any checklist item.
 func TestChecklistBodyByteLimit(t *testing.T) {
 	const checked = "- [x] HISS-16\n"
-	body := checked + strings.Repeat("x", maxReferenceTextBytes+1-len(checked))
-	res, err := ValidatePRChecklist(body)
-	if err != nil || res == nil {
-		t.Fatalf("expected a checklist result for oversized input, got %+v, %v", res, err)
+	byteFinding := fmt.Sprintf("pull request body exceeds %d bytes", maxReferenceTextBytes)
+	for _, tc := range []struct{ name, body, finding string }{
+		{"oversized task", checked + strings.Repeat("x", maxReferenceTextBytes+1-len(checked)), byteFinding},
+		{"oversized spaces", strings.Repeat(" ", maxReferenceTextBytes+1), byteFinding},
+		{"oversized blank lines", strings.Repeat("\n", MaxPRLinesLimit), fmt.Sprintf("PR body exceeds %d lines", MaxPRLinesLimit)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := ValidatePRChecklist(tc.body)
+			if err != nil || res == nil {
+				t.Fatalf("expected a checklist result for oversized input, got %+v, %v", res, err)
+			}
+			if res.Valid || res.HasHISS16Check || !slices.Equal(res.Errors, []string{tc.finding}) {
+				t.Fatalf("expected only %q, got %+v", tc.finding, res)
+			}
+		})
 	}
-	want := []string{fmt.Sprintf("pull request body exceeds %d bytes", maxReferenceTextBytes)}
-	if res.Valid || res.HasHISS16Check || !slices.Equal(res.Errors, want) {
-		t.Fatalf("expected an invalid result with only %q, got %+v", want, res)
+	body := prChecklistBoxes + fencedReceipt(t, "```receipt", "```") + "~~~\n"
+	atLimit := body + strings.Repeat("x", maxReferenceTextBytes-len(body)-len("\n~~~")) + "\n~~~"
+	res, err := ValidatePRChecklist(atLimit)
+	if err != nil || !res.Valid {
+		t.Fatalf("complete body at byte limit: %+v, %v", res, err)
 	}
 }
 

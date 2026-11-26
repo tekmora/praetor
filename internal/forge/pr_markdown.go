@@ -58,6 +58,7 @@ var checklistParser = goldmark.New(
 type checklistDocument struct {
 	source []byte
 	root   ast.Node
+	hidden checklistRanges
 }
 
 // parseChecklistDocument returns a limit finding or the bounded Markdown tree.
@@ -72,7 +73,12 @@ func parseChecklistDocument(body string) (*checklistDocument, string) {
 		return nil, fmt.Sprintf("PR body exceeds %d lines", MaxPRLinesLimit)
 	}
 	source := []byte(body)
-	return &checklistDocument{source: source, root: checklistParser.Parse(text.NewReader(source))}, ""
+	root := checklistParser.Parse(text.NewReader(source))
+	hidden, err := scanChecklistComments(source, root)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return &checklistDocument{source: source, root: root, hidden: hidden}, ""
 }
 
 // readChecklist visits blocks in document order. Each heading or task paragraph consumes
@@ -84,7 +90,12 @@ func (d *checklistDocument) readChecklist(res *PRChecklistResult) (string, error
 			return ast.WalkContinue, nil
 		}
 		switch block := n.(type) {
+		case *ast.Blockquote:
+			return ast.WalkSkipChildren, nil
 		case *ast.Heading:
+			if d.hidden.contains(block.Pos()) {
+				return ast.WalkSkipChildren, nil
+			}
 			label, err := d.visibleText(block)
 			if err != nil {
 				return ast.WalkStop, err
@@ -93,13 +104,7 @@ func (d *checklistDocument) readChecklist(res *PRChecklistResult) (string, error
 		case *ast.Paragraph, *ast.TextBlock:
 			return ast.WalkSkipChildren, d.readTask(n, res)
 		case *ast.FencedCodeBlock:
-			if _, closed := block.AttributeString("explicitClose"); !closed {
-				line, _ := block.AttributeString("openingLine")
-				res.Errors = append(res.Errors, fmt.Sprintf("close the code fence opened at line %d", line))
-			}
-			if receipt == nil && d.isReceipt(block) {
-				receipt = block
-			}
+			receipt = d.readFence(block, receipt, res)
 		default:
 			return ast.WalkContinue, nil
 		}
@@ -110,6 +115,21 @@ func (d *checklistDocument) readChecklist(res *PRChecklistResult) (string, error
 	}
 	res.receiptFence = receipt != nil
 	return d.receiptText(receipt)
+}
+
+// readFence reports missing closers and selects the first visible receipt in source order.
+func (d *checklistDocument) readFence(block, receipt *ast.FencedCodeBlock, res *PRChecklistResult) *ast.FencedCodeBlock {
+	if d.hidden.contains(block.Pos()) {
+		return receipt
+	}
+	if _, closed := block.AttributeString("explicitClose"); !closed {
+		line, _ := block.AttributeString("openingLine")
+		res.Errors = append(res.Errors, fmt.Sprintf("close the code fence opened at line %d", line))
+	}
+	if receipt == nil && d.isReceipt(block) {
+		return block
+	}
+	return receipt
 }
 
 // receiptText extracts the first receipt, including when its payload is empty or invalid.
@@ -132,7 +152,7 @@ func (d *checklistDocument) isReceipt(block *ast.FencedCodeBlock) bool {
 // also emits a checkbox for "[x]label", so enforce the checklist's separator at its AST position.
 func (d *checklistDocument) readTask(n ast.Node, res *PRChecklistResult) error {
 	box, ok := n.FirstChild().(*task.TaskCheckBox)
-	if !ok {
+	if !ok || d.hidden.contains(box.Pos()) {
 		return nil
 	}
 	after := box.Pos() + len("[x]")
@@ -165,30 +185,24 @@ func (res *PRChecklistResult) recordCheckedLabel(label string) {
 	}
 }
 
-// visibleText reads only text descendants. The goldmark writer resolves Markdown escapes
-// and entities in ordinary text and preserves literal code. Remove its HTML escaping once.
+// visibleText reads rendered labels, including autolinks and literal code.
+// The writer escapes its output as HTML, so unescape it once after flushing.
 func (d *checklistDocument) visibleText(block ast.Node) (string, error) {
 	var encoded strings.Builder
 	writer := bufio.NewWriter(&encoded)
 	err := ast.Walk(block, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
-		t, ok := n.(*ast.Text)
-		if !entering || !ok {
+		if !entering {
 			return ast.WalkContinue, nil
 		}
-		value := t.Value(d.source)
-		if t.IsRaw() {
-			// CommonMark folds each line ending inside a code span to one space.
-			line, endsLine := bytes.CutSuffix(value, []byte{'\n'})
-			if endsLine {
-				gmhtml.DefaultWriter.RawWrite(writer, bytes.TrimSuffix(line, []byte{'\r'}))
-				return ast.WalkContinue, writer.WriteByte(' ')
+		switch inline := n.(type) {
+		case *ast.Image:
+			return ast.WalkSkipChildren, nil
+		case *ast.AutoLink:
+			if !d.hidden.contains(inline.Pos()) {
+				gmhtml.DefaultWriter.RawWrite(writer, inline.Label(d.source))
 			}
-			gmhtml.DefaultWriter.RawWrite(writer, value)
-		} else {
-			gmhtml.DefaultWriter.Write(writer, value)
-		}
-		if t.SoftLineBreak() || t.HardLineBreak() {
-			return ast.WalkContinue, writer.WriteByte('\n')
+		case *ast.Text:
+			return ast.WalkContinue, d.writeVisibleText(writer, inline)
 		}
 		return ast.WalkContinue, nil
 	})
@@ -199,4 +213,23 @@ func (d *checklistDocument) visibleText(block ast.Node) (string, error) {
 		return "", fmt.Errorf("flush Markdown text: %w", err)
 	}
 	return strings.TrimSpace(html.UnescapeString(encoded.String())), nil
+}
+
+// writeVisibleText preserves Markdown escapes, entities and code-span line folding.
+func (d *checklistDocument) writeVisibleText(writer *bufio.Writer, t *ast.Text) error {
+	value := d.hidden.visibleValue(t, d.source)
+	if t.IsRaw() {
+		line, endsLine := bytes.CutSuffix(value, []byte{'\n'})
+		if endsLine {
+			gmhtml.DefaultWriter.RawWrite(writer, bytes.TrimSuffix(line, []byte{'\r'}))
+			return writer.WriteByte(' ')
+		}
+		gmhtml.DefaultWriter.RawWrite(writer, value)
+	} else {
+		gmhtml.DefaultWriter.Write(writer, value)
+	}
+	if (t.SoftLineBreak() || t.HardLineBreak()) && !d.hidden.contains(t.Segment.Stop) {
+		return writer.WriteByte('\n')
+	}
+	return nil
 }

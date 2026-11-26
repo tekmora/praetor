@@ -68,12 +68,13 @@ func checkRenovateNote(body string) error {
 	inSummary := false
 	block := doc.root.FirstChild()
 	for range doc.root.ChildCount() {
-		if block.Kind() == ast.KindHeading || block.Kind() == ast.KindParagraph {
+		heading := block.Kind() == ast.KindHeading
+		if (heading && !doc.hidden.contains(block.Pos())) || block.Kind() == ast.KindParagraph {
 			label, err := doc.visibleText(block)
 			if err != nil {
 				return err
 			}
-			if block.Kind() == ast.KindHeading {
+			if heading {
 				inSummary = label == strings.TrimPrefix(renovateSummary, "## ")
 			} else if inSummary && slices.Contains(strings.Split(label, "\n"), renovateNote) {
 				return nil
@@ -88,7 +89,13 @@ func checkRenovateNote(body string) error {
 func checkRenovateOutline(body string, wantOutline []string) error {
 	result, err := ValidatePRChecklist(body)
 	if err != nil {
+		if result != nil {
+			return fmt.Errorf("validate rendered checklist: %w: %v", err, result.Errors)
+		}
 		return err
+	}
+	if result.hasTickedBox {
+		return fmt.Errorf("rendered body contains a checked box")
 	}
 	// The bot leaves all mandatory checks and the receipt for the takeover author.
 	unfilled, err := ValidatePRChecklist(renovateNote)
@@ -100,9 +107,6 @@ func checkRenovateOutline(body string, wantOutline []string) error {
 	}
 	if result.receiptFence {
 		return fmt.Errorf("rendered body contains a receipt fence")
-	}
-	if result.hasTickedBox {
-		return fmt.Errorf("rendered body contains a checked box")
 	}
 	if !slices.Equal(result.outline, wantOutline) {
 		return fmt.Errorf("rendered outline = %q, want %q", result.outline, wantOutline)
@@ -122,8 +126,7 @@ func checkRenovateBody(template string, notes, wantOutline []string) error {
 	if err := checkRenovateOutline(body, wantOutline); err != nil {
 		return err
 	}
-	// Check the configured title after checking the rendered outline. A raw HTML
-	// prefix can leave an HTML comment open even after its CommonMark block ends.
+	// The configured prefix contains exactly the shipped title.
 	beforeSummary, _, _ := strings.Cut(template, "\n"+renovateSummary+"\n")
 	if strings.TrimSpace(beforeSummary) != wantOutline[0] {
 		return fmt.Errorf("unexpected content before the summary heading")
@@ -196,6 +199,9 @@ func TestRenovatePRBody(t *testing.T) {
 	receiptHeading := want[len(want)-1]
 	moved = strings.Replace(moved, receiptHeading, renovateDefaultBody+"\n\n"+receiptHeading, 1)
 	checkRenovateReviewInputs(t, template, notes, want)
+	checked := strings.Replace(template, "{{{controls}}}", "{{{controls}}}- [x] HISS-16 verified\n", 1)
+	commented := strings.Replace(template, "{{{notes}}}", "<!-- {{{notes}}} -->", 1)
+	checkRenderedRenovateMutations(t, checked, commented, notes, want)
 	for _, tc := range []struct {
 		name, template string
 		notes          []string
@@ -209,11 +215,11 @@ func TestRenovatePRBody(t *testing.T) {
 		{"parts moved before section 4", moved, notes, false},
 		{"missing controls", strings.Replace(template, "{{{controls}}}", "", 1), notes, false},
 		{"checked box", strings.Replace(template, "- [ ]", "- [x]", 1), notes, false},
-		{"checked box after controls on the same line", strings.Replace(template, "{{{controls}}}", "{{{controls}}}- [x] HISS-16 verified\n", 1), notes, false},
+		{"checked box after controls on the same line", checked, notes, false},
 		{"asterisk checked box", "* [x] HISS-16 verified\n\n" + template, notes, false},
 		{"unrelated ordered checked box", "1) [X] already reviewed\n\n" + template, notes, false},
 		{"extra unchecked asterisk box", "* [ ] Extra item\n\n" + template, notes, false},
-		{"commented notes", strings.Replace(template, "{{{notes}}}", "<!-- {{{notes}}} -->", 1), notes, false},
+		{"commented notes", commented, notes, false},
 		{"comment starts before summary", "<!--\n" + template, notes, false},
 		{"second comment hides summary", "<!-- heading --> <!--\n" + template, notes, false},
 		{"ninth summary field", strings.Replace(template, "{{{footer}}}", "{{{footer}}}{{{extra}}}", 1), notes, false},
@@ -231,6 +237,31 @@ func TestRenovatePRBody(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// checkRenderedRenovateMutations exercises reader findings independently of the template comparison.
+func checkRenderedRenovateMutations(t *testing.T, checked, commented string, notes, want []string) {
+	t.Helper()
+	err := checkRenovateOutline(renderRenovateBody(checked, notes), want)
+	if err == nil || err.Error() != "rendered body contains a checked box" {
+		t.Errorf("checked task after controls: %v", err)
+	}
+	for _, body := range []string{
+		renderRenovateBody(commented, notes),
+		renovateSummary + "\n\n<!-- closed --> <!--\n\n" + renovateNote + "\n\n-->",
+	} {
+		if err := checkRenovateNote(body); err == nil || err.Error() != "rendered summary is missing the visible takeover note" {
+			t.Errorf("hidden takeover note: %v", err)
+		}
+	}
+}
+
+// TestRenovateOutlineEmptyBody retains the validator's finding alongside its call error.
+func TestRenovateOutlineEmptyBody(t *testing.T) {
+	err := checkRenovateOutline(" \n", nil)
+	if err == nil || !strings.Contains(err.Error(), "empty PR body") || !strings.Contains(err.Error(), "PR body is empty; checklist required") {
+		t.Fatalf("expected both the call error and the finding: %v", err)
 	}
 }
 
