@@ -122,7 +122,7 @@ type Canonical struct {
 	DispatchInput json.RawMessage
 	// AgentType is the agent type a SubagentStart payload names.
 	AgentType string
-	// TranscriptPath is the subagent transcript path supplied on SubagentStop.
+	// TranscriptPath names the Claude transcript supplied on Stop or SubagentStop.
 	TranscriptPath string
 	// ResolvedModel is the model a Claude launch receipt reports the subagent runs on.
 	ResolvedModel string

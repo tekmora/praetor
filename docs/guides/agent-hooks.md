@@ -1544,7 +1544,7 @@ stop is denied (`stopLedgerSizeVerdict` in `internal/agenthook/evaluate.go`,
 `internal/agenthook/dialect_agent.go`); a malformed flag reads as false. A repeated pass
 changes the wording of a checkpoint block (`Checkpoint remains incomplete: …`) and turns the
 prose-question deny below into a stated skip. `stop` runs every check on each pass (the
-prose question, own pull request reviews, the ledger verify, the checkpoint): on the first pass one deny lists each
+prose question, own pull request reviews, launched units without a waiter, the ledger verify, the checkpoint): on the first pass one deny lists each
 failing check, so the single continuation is not spent on the question alone; on the
 repeated pass the question is skipped and what still fails halts the session
 (`TestRunStopQuestionAndDueCheckpointPerClient`). A failing ledger verify does not
@@ -1578,6 +1578,30 @@ Claude Code runs the command through its shell tool with `run_in_background: tru
 | `2` | Invalid input or failed read, with the cause named. No failed read counts as clean checks. |
 
 `--json` emits one object with `exit_code` and an `items` array containing those same lines; process exit codes are unchanged. Existing reviews form the baseline. A new review ID, state or submission timestamp wakes the wait, including a pending review that becomes submitted. Review findings take precedence over terminal checks. Tests use offline forge fixtures: `internal/prwait/`, `internal/agenthook/stop_reviews_test.go`, and `cmd/standardsctl/pr_test.go`.
+
+### Launched units without a waiter
+
+For Claude Code, `stop` reads the session transcript the stop event names and refuses a turn end
+while a systemd user unit the session launched still runs and nothing will wake the session when
+it ends (`internal/agenthook/stop_inflight.go`, `stop_inflight_launch.go`,
+`stop_inflight_transcript.go`):
+
+- **Launched units**: Bash commands that run `systemd-run --user --unit NAME` (or `--unit=NAME`),
+  at most 128 names; scope runs end with their call and are not counted, and command text is never
+  executed.
+- **Waiters**: background Bash tasks (`run_in_background`) with no later completed, failed or
+  killed notification for their task id.
+- **Live units**: one `systemctl --user is-active` call for all names, with a two-second deadline;
+  `active`, `activating` and `reloading` count as live.
+
+Live units and no waiter deny the stop, naming up to five units and asking for one background
+wait on them or for stopping them. The transcript read is bounded (64 MiB per file, 100,000
+lines, 8 MiB per row) and ignores sidechain and foreign-session rows. Whatever the check cannot
+know allows the stop with a named note: other clients, non-Linux hosts, a repeated stop
+(`stop_hook_active`), a missing, unreadable or oversized transcript, an unresolved background
+request, and a missing, slow or unreadable `systemctl` (`TestStopInflight`,
+`TestStopInflightStatusFailure`, `TestStopInflightUnavailable`, `TestStopInflightBatch`,
+`TestStopInflightNotifications`).
 
 ### Prose-question check
 

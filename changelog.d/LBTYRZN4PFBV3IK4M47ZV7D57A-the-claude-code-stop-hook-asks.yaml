@@ -1,0 +1,2 @@
+type: fixed
+title: The Claude Code stop hook asks for a background wait when a launched systemd user unit is still running and the session has no pending background task.

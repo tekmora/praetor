@@ -173,10 +173,10 @@ func dispatch(ctx context.Context, row Registration, canonical Canonical, root s
 	if agentTrafficEvent(row.Event) {
 		return evaluateAgentTraffic(ctx, row, canonical, root, in)
 	}
+	if row.Event == EventStop {
+		return evaluateStop(ctx, row, root, canonical, in)
+	}
 	if !checkpointWired(row.Client) {
-		if row.Event == EventStop {
-			return mergeStopChecks(evaluateStopQuestion(row, canonical), evaluateStopReviewThreads(ctx, root))
-		}
 		return evaluateCommand(ctx, canonical, root, in)
 	}
 	switch row.Event {
@@ -184,8 +184,6 @@ func dispatch(ctx context.Context, row Registration, canonical Canonical, root s
 		return evaluatePreEdit(ctx, row, canonical, root, in)
 	case EventPostTool:
 		return evaluatePostTool(ctx, canonical, root, in)
-	case EventStop:
-		return evaluateStop(ctx, row, root, canonical, in)
 	default:
 		return evaluateCommand(ctx, canonical, root, in)
 	}
@@ -276,11 +274,19 @@ func evaluatePostTool(ctx context.Context, canonical Canonical, root string, in 
 // is a stated skip and a still-failing ledger or checkpoint halts, naming what remains.
 // The question's stated skip survives an otherwise clean stop.
 func evaluateStop(ctx context.Context, row Registration, root string, canonical Canonical, in Invocation) Verdict {
+	// Overlap the independent unit check with reviews to preserve the checkpoint budget.
+	inflight := make(chan Verdict, 1)
+	go func() {
+		inflight <- evaluateStopInflight(ctx, row.Client, canonical, runUnitStatus)
+	}()
 	reviews := evaluateStopReviewThreads(ctx, root)
 	question := evaluateStopQuestion(row, canonical)
+	if !checkpointWired(row.Client) {
+		return mergeStopChecks(question, reviews, <-inflight)
+	}
 	ledger := evaluateStopLedger(ctx, root, canonical)
 	checkpoint := evaluateStopCheckpoint(ctx, root, canonical, in)
-	return mergeStopChecks(question, ledger, checkpoint, reviews)
+	return mergeStopChecks(question, ledger, checkpoint, reviews, <-inflight)
 }
 
 // mergeStopChecks combines multiple stop check verdicts, prioritizing denials while preserving any stated skips.
