@@ -387,7 +387,7 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 		}
 		return errors.New("render pull request template: the effective audit policy is unresolved")
 	}
-	_, err = s.scaffoldFile(ctx, scaffold{
+	return s.scaffoldInstalledTemplate(ctx, scaffold{
 		rel:       rel,
 		perm:      filePerm,
 		content:   []byte(buildPullRequestTemplate(s.policy.Policy.Complexity)),
@@ -396,7 +396,6 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 		created:   "Scaffolded pull request template with HISS verification checklist",
 		verified:  "Existing pull request template verified present",
 	})
-	return err
 }
 
 func reconcileSecurityPolicy(ctx context.Context, s *adoptSession) error {
@@ -679,6 +678,8 @@ var prTemplateVerification = []string{
 	"",
 	"Otherwise, record which verification ran and the reason the gate reported.",
 	"",
+	"Repositories enforcing `forge validate-pr` need a signed receipt before merge.",
+	"",
 	"`praetorctl gate run` writes signed receipts to `.standards-receipt.json`.",
 	"",
 	"If pre-push kept a copy, find it at `.git/praetor-receipts/<sha>.json`.",
@@ -770,4 +771,5 @@ var priorPRTemplateDigests = map[string]string{
 	"f8208c878433aa167841408a5e19ac07e17c3e5ef602c025123567b912b5737d": "scoped description marker and author-supplied test result (#2063)",
 	"ff2d340d908204fc04649b5437f37b1150ea0ba0023f04611933a7c510efac81": "restored lint settings and policy-aware verification checklist (#2063)",
 	"f7bc6f14ae6db6538510fcc4640200188fbcd6f33e7c8c91c056b97f810c7603": "effective per-function limits under the engine framework policy (#2063)",
+	"5b99577c018ca840d21537863b36bacfb4b3c2c6b28cd41c219c346c3d1fea8b": "signed receipt required when forge validate-pr is enforced (#2063)",
 }

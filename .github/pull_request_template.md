@@ -69,6 +69,8 @@ If the gate signs a receipt for this head, paste its JSON in the fence below.
 
 Otherwise, record which verification ran and the reason the gate reported.
 
+Repositories enforcing `forge validate-pr` need a signed receipt before merge.
+
 `praetorctl gate run` writes signed receipts to `.standards-receipt.json`.
 
 If pre-push kept a copy, find it at `.git/praetor-receipts/<sha>.json`.

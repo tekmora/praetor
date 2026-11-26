@@ -4,5 +4,7 @@ title: >-
   the description marker. The checklist states the repository's effective numeric limits for
   function length, cyclomatic and cognitive complexity, and statement count. It asks for actual
   test results. Authors paste a signed receipt when the gate issues one or record
-  which verification ran and why the gate issued no receipt. Readoption refreshes unedited
-  templates and respects the requested permission ceiling when another writer finishes first.
+  which verification ran and why the gate issued no receipt. Repositories enforcing
+  `forge validate-pr` require a signed receipt before merge. Readoption refreshes templates
+  matching a known release or the last locally recorded rendering, retaining LF or CRLF.
+  Other copies are preserved and reported. Concurrent refreshes respect the permission ceiling.

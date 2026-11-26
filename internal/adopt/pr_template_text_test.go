@@ -4,11 +4,10 @@
 package adopt
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 )
 
 const prTemplateFixtures = "testdata/pr-template"
@@ -31,6 +31,7 @@ var priorPRTemplateFiles = [...]string{
 	"concise.md.prior",
 	"hiss-16.md.prior",
 	"hiss.md.prior",
+	"policy-limits.md.prior",
 	"policy-reference.md.prior",
 	"preset.md.prior",
 	"scoped-marker.md.prior",
@@ -39,17 +40,16 @@ var priorPRTemplateFiles = [...]string{
 }
 
 // checkPRTemplateFixtures reads at most one entry beyond the recorded inventory.
-func checkPRTemplateFixtures(dir string) error {
-	f, err := os.Open(dir)
+func checkPRTemplateFixtures(ctx context.Context, dir string) error {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
+	entries, err := readVerificationDirectory(ctx, dir, len(priorPRTemplateFiles))
 	if err != nil {
 		return err
 	}
-	names, readErr := f.Readdirnames(len(priorPRTemplateFiles) + 1)
-	if errors.Is(readErr, io.EOF) {
-		readErr = nil
-	}
-	if err := errors.Join(readErr, f.Close()); err != nil {
-		return err
+	names := make([]string, len(entries))
+	for i := 0; i < len(entries) && i <= len(priorPRTemplateFiles); i++ {
+		names[i] = entries[i].Name()
 	}
 	slices.Sort(names)
 	if !slices.Equal(names, priorPRTemplateFiles[:]) {
@@ -64,16 +64,21 @@ func TestPriorPRTemplateFixtureInventory(t *testing.T) {
 	for _, name := range priorPRTemplateFiles[1:] {
 		mustWrite(t, filepath.Join(dir, name), "fixture\n")
 	}
-	if err := checkPRTemplateFixtures(dir); err == nil {
+	if err := checkPRTemplateFixtures(t.Context(), dir); err == nil {
 		t.Fatal("accepted a missing fixture")
 	}
 	mustWrite(t, filepath.Join(dir, "unknown"), "fixture\n")
-	if err := checkPRTemplateFixtures(dir); err == nil {
+	if err := checkPRTemplateFixtures(t.Context(), dir); err == nil {
 		t.Fatal("accepted an unknown name in place of the missing fixture")
 	}
 	mustWrite(t, filepath.Join(dir, priorPRTemplateFiles[0]), "fixture\n")
-	if err := checkPRTemplateFixtures(dir); err == nil {
+	if err := checkPRTemplateFixtures(t.Context(), dir); err == nil {
 		t.Fatal("accepted an extra fixture")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 0)
+	defer cancel()
+	if err := checkPRTemplateFixtures(ctx, prTemplateFixtures); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired inventory read returned %v", err)
 	}
 }
 
@@ -149,6 +154,7 @@ func TestPRTemplateReceiptInstructions(t *testing.T) {
 		for _, want := range [...]string{
 			"If the gate signs a receipt for this head, paste its JSON in the fence below.",
 			"Otherwise, record which verification ran and the reason the gate reported.",
+			"Repositories enforcing `forge validate-pr` need a signed receipt before merge.",
 			"`.standards-receipt.json`",
 			"If pre-push kept a copy",
 			"\n```receipt\n```\n",
@@ -241,6 +247,129 @@ func TestPRTemplateDefaultLimits(t *testing.T) {
 	}
 }
 
+// adoptTemplateUnderManifest resolves the fixture's catalog and installs the template in a fresh session.
+func adoptTemplateUnderManifest(t *testing.T, s *adoptSession, manifest string) *AdoptReport {
+	t.Helper()
+	mustWrite(t, filepath.Join(s.repoPath, manifestFile), manifest)
+	session := &adoptSession{repoPath: s.repoPath, opts: s.opts, report: &AdoptReport{}}
+	if err := reconcilePolicyCatalog(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcilePullRequestTemplate(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	return session.report
+}
+
+// TestPRTemplateReadoptionAfterPolicyChange tightens the pinned repository's McCabe limit.
+func TestPRTemplateReadoptionAfterPolicyChange(t *testing.T) {
+	for _, tc := range [...]struct {
+		name         string
+		crlf, edited bool
+	}{
+		{name: "LF"},
+		{name: "CRLF", crlf: true},
+		{name: "hand-edited limit", edited: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkTemplatePolicyChange(t, tc.crlf, tc.edited)
+		})
+	}
+}
+
+// checkTemplatePolicyChange compares the file bytes and reported action after tightening the policy.
+func checkTemplatePolicyChange(t *testing.T, crlf, edited bool) {
+	t.Helper()
+	s, _ := catalogSession(t)
+	manifest := repoText(t, s.repoPath, manifestFile) +
+		"overrides:\n  complexity:\n    max_cognitive: 15\n    max_statements: 50\n    max_cyclomatic: "
+	adoptTemplateUnderManifest(t, s, manifest+"8\n")
+	original := repoText(t, s.repoPath, prTemplateFile)
+	template := original
+	const installed = "McCabe cyclomatic <= 8 "
+	if !strings.Contains(template, installed) {
+		t.Fatalf("first adoption lacks %q", installed)
+	}
+	if crlf {
+		template = crlfText(template)
+	}
+	want := strings.Replace(template, installed, "McCabe cyclomatic <= 7 ", 1)
+	if edited {
+		template = strings.Replace(template, installed, "McCabe cyclomatic <= 9 ", 1)
+		want = template
+	}
+	if template != original {
+		mustWrite(t, filepath.Join(s.repoPath, prTemplateFile), template)
+	}
+	report := adoptTemplateUnderManifest(t, s, manifest+"7\n")
+	if got := repoText(t, s.repoPath, prTemplateFile); got != want {
+		t.Errorf("template after tightening differs from the expected %s rendering", t.Name())
+	}
+	action := report.ActionDetails[len(report.ActionDetails)-1]
+	if !strings.EqualFold(action.Path, prTemplateFile) || strings.HasPrefix(action.Details, "Refreshed") == edited {
+		t.Errorf("unexpected template action %+v", action)
+	}
+	if warned(report, action.Path, "kept") != edited {
+		t.Errorf("unexpected template drift warnings %q", report.Warnings)
+	}
+}
+
+// TestPRTemplateInstallRecord binds a verified CRLF copy and leaves its record alone on preview and drift.
+func TestPRTemplateInstallRecord(t *testing.T) {
+	s := ceilingPRTemplateSession(t.TempDir())
+	s.policy.Policy.Complexity.MaxCyclomatic = 8
+	installed := crlfText(buildPullRequestTemplate(s.policy.Policy.Complexity))
+	// Exercise the existing uppercase path as well as an installation with no prior record.
+	mustWrite(t, filepath.Join(s.repoPath, prTemplateUpper), installed)
+	record := filepath.Join(s.repoPath, workingDirPath, "adopt-installed", prTemplateUpper+".sha256")
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	want := fixtureDigest(t, prTemplateUpper, []byte(installed)) + "\n"
+	if got := mustRead(t, record); got != want {
+		t.Fatalf("verified CRLF template install record = %q, want %q", got, want)
+	}
+	s.policy.Policy.Complexity.MaxCyclomatic = 7
+	s.opts.DryRun = true
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if mustRead(t, record) != want || repoText(t, s.repoPath, prTemplateUpper) != installed {
+		t.Fatal("preview changed the template or its install record")
+	}
+	s.opts.DryRun = false
+	mustWrite(t, filepath.Join(s.repoPath, prTemplateUpper), installed+"Owner edit.\r\n")
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if mustRead(t, record) != want {
+		t.Fatal("readoption advanced the install record after preserving a hand edit")
+	}
+	mustWrite(t, filepath.Join(s.repoPath, prTemplateUpper), installed)
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := crlfText(buildPullRequestTemplate(s.policy.Policy.Complexity))
+	if repoText(t, s.repoPath, prTemplateUpper) != refreshed || mustRead(t, record) != fixtureDigest(t, prTemplateUpper, []byte(refreshed))+"\n" {
+		t.Fatal("restoring the installed bytes did not refresh both the template and its digest")
+	}
+}
+
+// TestPRTemplateRejectsMalformedInstallRecord requires an invalid digest to fail before writing.
+func TestPRTemplateRejectsMalformedInstallRecord(t *testing.T) {
+	s := ceilingPRTemplateSession(t.TempDir())
+	rel := filepath.Join(workingDirPath, "adopt-installed", prTemplateFile+".sha256")
+	record := filepath.Join(s.repoPath, rel)
+	mustWrite(t, record, "invalid digest\n")
+	if err := reconcilePullRequestTemplate(t.Context(), s); err == nil || !strings.Contains(err.Error(), rel) {
+		t.Fatalf("malformed install record: got %v, want an error naming the record", err)
+	}
+	assertAbsent(t, s.repoPath, prTemplateFile)
+	if got := mustRead(t, record); got != "invalid digest\n" {
+		t.Errorf("malformed record was overwritten with %q", got)
+	}
+}
+
 // TestPriorPRTemplateDigests records the current rendering and replays each older fixture.
 func TestPriorPRTemplateDigests(t *testing.T) {
 	current := fixtureDigest(t, prTemplateFile, []byte(repoText(t, sourceCheckout, prTemplateFile)))
@@ -265,7 +394,7 @@ func TestPriorPRTemplateDigests(t *testing.T) {
 // TestForgeText_PriorTemplate verifies readoption of every shipped version in an adopter's checkout.
 func TestForgeText_PriorTemplate(t *testing.T) {
 	current := installedPRTemplate(t, t.TempDir(), nil)
-	if err := checkPRTemplateFixtures(prTemplateFixtures); err != nil {
+	if err := checkPRTemplateFixtures(t.Context(), prTemplateFixtures); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range priorPRTemplateFiles {
