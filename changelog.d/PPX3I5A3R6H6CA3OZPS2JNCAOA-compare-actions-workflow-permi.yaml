@@ -1,2 +1,3 @@
 type: fixed
 title: Compare Actions workflow permissions with the current owner after a repository transfer or rename
+breaking: true
