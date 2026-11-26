@@ -34,7 +34,7 @@ const (
 // step runs before the makefile and git-hooks steps, so it decides from what those steps will
 // do, not from what they did:
 //
-//   - verify-all: the makefile step runs and the plan is not preserved. A preserved custom
+//   - verify-all: the makefile step runs and can write the target. A preserved custom
 //     verify-all is repository-owned, and adoption neither reads nor runs it.
 //   - lefthook: plannedHookActivation predicts praetor's hooks installed by lefthook.
 //
@@ -47,7 +47,7 @@ func (s *adoptSession) generatedPipelines(ctx context.Context) (hisscatalog.Pipe
 	if err != nil {
 		return 0, hooksNone, fmt.Errorf("resolve adoption.decline for the harness: %w", err)
 	}
-	if !makefileDeclined && s.verification.Status != verificationPreserved {
+	if !makefileDeclined && s.verification.Status != verificationPreserved && !s.verification.ambiguousVerifyAll {
 		generated |= hisscatalog.PipelineVerifyAll
 	}
 	hooks, err := s.plannedHookActivation(ctx)
@@ -170,6 +170,6 @@ func (s *adoptSession) workingTreeVerifyAll(ctx context.Context) (bool, error) {
 func makefileHasVerifyAll(data []byte) bool {
 	text, _ := util.NormalizeLineEndings(string(data))
 	text = withoutDocumentationMakefileBlock(text)
-	recipe, _ := util.MakefileTargetRecipe(text, verificationTarget)
-	return mayDefineVerificationTarget(text) && !strings.Contains(recipe, unavailableVerificationRecipe)
+	recipe, found := util.MakefileTargetRecipe(text, verificationTarget)
+	return found && !strings.Contains(recipe, unavailableVerificationRecipe)
 }

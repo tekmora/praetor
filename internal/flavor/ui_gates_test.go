@@ -159,3 +159,36 @@ func TestAuditUIGates_ScreenMatrixMissingKey(t *testing.T) {
 		t.Fatalf("missing matrix key must fail naming ui.screen_matrix: %v", err)
 	}
 }
+
+// TestAuditUIGatesLogicalRule requires the prerequisite to belong to a confirmed verify-all rule.
+func TestAuditUIGatesLogicalRule(t *testing.T) {
+	dir := writeBaseSvelteDir(t, `{"name":"ui","devDependencies":{"@axe-core/playwright":"4.11.1"}}`)
+	renderUISpecFixture(t, dir)
+	writeMatrixFixture(t, dir, "{}", true)
+	manifest := &config.Manifest{UI: &config.UIPolicy{
+		InputLatencyMs:     100,
+		InputLatencySource: validUISourceFixture,
+		Routes:             []string{"/"},
+		ScreenMatrix:       "screen-matrix.json",
+	}}
+	for _, tc := range [...]struct {
+		rules string
+		want  bool
+	}{
+		{"verify-all:\n$(UNKNOWN) \\\nverify-all: ui-gates", false},
+		{"NAME := aux\n$(NAME) verify-all: ui-gates", true},
+		{"$(UNKNOWN) verify-all: ui-gates", false},
+		{"verify-all: # ui-gates", false},
+		{"verify-all: ; @$(MAKE) ui-gates", true},
+		{"verify-all: \\\n ui-gates", true},
+	} {
+		file := strings.Replace(validUIMakefileFixture, "verify-all: ui-gates", tc.rules, 1)
+		if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := flavor.AuditUIGates(dir, manifest)
+		if (err == nil) != tc.want || (err != nil && !strings.Contains(err.Error(), "does not include target ui-gates")) {
+			t.Errorf("rules %q: audit error = %v, want pass = %v", tc.rules, err, tc.want)
+		}
+	}
+}

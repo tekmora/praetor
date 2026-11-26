@@ -73,21 +73,20 @@ func makefileEvidenceDirective(line string) bool {
 
 // declaration distinguishes simple assignments from literal rules by their first Make operator.
 func (r *makefileEvidenceReader) declaration(line, target string) bool {
-	assign, colon, _ := makefileSplit(line)
-	if assign >= 0 && (colon < 0 || assign < colon) {
+	if assign := makefileLeadingAssignment(line); assign >= 0 {
 		name := strings.Trim(line[:assign], " \t")
 		return makefileMatchesIdentifier(name) && !makefileEvidenceDirective(name) && makefileAllowedAssignment(line, assign)
 	}
-	return colon > 0 && line[0] != '\t' && r.rule(line, colon, target)
+	return r.rule(line, target)
 }
 
 // rule validates every rule and refuses a second declaration, including one in a target list.
-func (r *makefileEvidenceReader) rule(line string, colon int, target string) bool {
-	names := makefileAllowedRuleTargets(line, colon, makefileNames)
-	if len(names) == 0 || !makefileLiteralWords(line[:colon]) {
+func (r *makefileEvidenceReader) rule(line, target string) bool {
+	head, tail, names := makefileAllowedRule(line, makefileNames)
+	if len(names) == 0 || !makefileLiteralWords(head) {
 		return false
 	}
-	literal, recipe := makefileLiteralRuleTail(line[colon+1:])
+	literal, recipe := makefileLiteralRuleTail(tail)
 	if !literal || makefileEvidenceRefusesSpelling(names, target) {
 		return false
 	}
@@ -125,11 +124,7 @@ func makefileLiteralWords(text string) bool {
 // makefileLiteralRuleTail checks literal prerequisites on either side of the optional order-only
 // separator and reports whether the rule also has a literal inline command.
 func makefileLiteralRuleTail(tail string) (literal, recipe bool) {
-	prerequisites, command, _ := strings.Cut(tail, ";")
-	prerequisites, _, comment := strings.Cut(prerequisites, "#")
-	if comment {
-		command = "" // A semicolon inside the Make comment cannot start an inline recipe.
-	}
+	prerequisites, command := makefileRuleTailParts(tail)
 	normal, orderOnly, _ := strings.Cut(prerequisites, "|")
 	literal = makefileLiteralWords(normal) && makefileLiteralWords(orderOnly) && !strings.Contains(command, "$")
 	return literal, makefileLiteralCommand(command)

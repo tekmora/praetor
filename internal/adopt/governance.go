@@ -277,14 +277,15 @@ func verificationMakefileReplacement(
 	return replacement, nil
 }
 
+// recordPreservedVerificationMakefile reconciles any documentation block and reports the kept Makefile.
 func (s *adoptSession) recordPreservedVerificationMakefile(ctx context.Context, documentationEnabled bool) error {
 	if documentationEnabled {
 		return reconcileDocumentationMakefile(ctx, s)
 	}
-	s.report.recordReconciled(makefileName, "Existing verify-all preserved; execution has not been verified by adoption")
-	return nil
+	return recordPreservedVerificationReconciled(s, false)
 }
 
+// reconcileExistingVerificationMakefile protects any potential verify-all from a competing recipe.
 func reconcileExistingVerificationMakefile(
 	ctx context.Context, s *adoptSession, full string, data []byte, exists, generated, documentationEnabled, withLauncher bool,
 ) (bool, error) {
@@ -293,11 +294,7 @@ func reconcileExistingVerificationMakefile(
 	}
 	content := string(data)
 	if !strings.Contains(content, "PRAETORCTL") && !hasEngineMakefileInclude(content) {
-		if documentationEnabled {
-			return true, reconcileDocumentationMakefile(ctx, s)
-		}
-		s.report.recordReconciled(makefileName, "Existing verify-all preserved; execution has not been verified by adoption")
-		return true, nil
+		return true, s.recordPreservedVerificationMakefile(ctx, documentationEnabled)
 	}
 	var inserted bool
 	updated := content
@@ -343,9 +340,12 @@ func updatePreservedVerificationMakefile(
 	return true, nil
 }
 
+// recordPreservedVerificationReconciled describes the retained rules and their known ownership.
 func recordPreservedVerificationReconciled(s *adoptSession, documentationEnabled bool) error {
 	if documentationEnabled {
 		s.report.recordReconciled(makefileName, "Documentation gate already attached to verify-all")
+	} else if s.verification.ambiguousVerifyAll {
+		s.report.recordReconciled(makefileName, ambiguousVerifyReason)
 	} else {
 		s.report.recordReconciled(makefileName, "Existing verify-all preserved; execution has not been verified by adoption")
 	}

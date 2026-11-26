@@ -59,12 +59,20 @@ func checkMakefileSourceEntries(ctx context.Context, dir *os.Root, entries []os.
 	return ctx.Err()
 }
 
-// makefileCaseAliases reports whether both spellings select a single directory entry.
+// makefileCaseAliases checks whether sibling matching needs to fold case for this operand.
 func makefileCaseAliases(dir *os.Root, entries []os.DirEntry, base string) (bool, error) {
 	alternate := strings.ToUpper(base)
 	if alternate == base {
 		alternate = strings.ToLower(base)
 	}
+	if alternate == base {
+		return makefileRevisionDirectoryVisible(dir)
+	}
+	return makefileSameEntry(dir, entries, base, alternate)
+}
+
+// makefileSameEntry checks that two different spellings resolve to a single listed entry.
+func makefileSameEntry(dir *os.Root, entries []os.DirEntry, base, alternate string) (bool, error) {
 	alias, err := dir.Lstat(alternate)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -83,4 +91,18 @@ func makefileCaseAliases(dir *os.Root, entries []os.DirEntry, base string) (bool
 		}
 	}
 	return listed < 2 && os.SameFile(original, alias), nil
+}
+
+// makefileRevisionDirectoryVisible checks Make's lookup spellings when base has no case variant.
+func makefileRevisionDirectoryVisible(dir *os.Root) (bool, error) {
+	for _, name := range makefileRevisionDirectories {
+		_, err := dir.Lstat(name)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("look up %s: %w", name, err)
+		}
+	}
+	return false, nil
 }

@@ -6,6 +6,8 @@ package forge
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -196,12 +198,17 @@ func TestParseTargetLineDelimiter(t *testing.T) {
 	}{
 		{`aux\:tag verify-all: ui-gates`, true},
 		{"verify-all:: ui-gates", true},
+		{"NAME := aux\n$(NAME) verify-all: ui-gates", true},
+		{"$(NAME) verify-all: ui-gates\nNAME := aux", false},
 		{"verify-all ::= ui-gates", false},
 		{"$(UNKNOWN) verify-all: ui-gates", false},
 		{"$(SRCS:.c=.o) verify-all: ui-gates", false},
 	} {
-		targets := make(map[string]*makeTargetDef)
-		parseTargetLine(tc.line, nil, targets)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(tc.line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		targets := readRootMakefile(t.Context(), dir)
 		def, found := targets["verify-all"]
 		if found != tc.want {
 			t.Errorf("%q: found verify-all = %v, want %v", tc.line, found, tc.want)

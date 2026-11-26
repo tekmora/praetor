@@ -62,3 +62,11 @@ func TestMakefileReadVariablesStopsPastComputedRunBound(t *testing.T) {
 		t.Fatal("past the run bound $(GATE) was resolved")
 	}
 }
+
+// TestEvidenceDeclarationRequiresRule rejects directive text at the rule-reading boundary.
+func TestEvidenceDeclarationRequiresRule(t *testing.T) {
+	var reader makefileEvidenceReader
+	if reader.declaration("export check: ; @true", "check") {
+		t.Fatalf("export directive supplied rule evidence: %v", reader.status)
+	}
+}

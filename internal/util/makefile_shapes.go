@@ -129,9 +129,8 @@ func makefileTrackedLiteralShapes(lines []makefileTrackedLine, followed []string
 		if kind == makefileRecipeLine {
 			continue
 		}
-		trimmed := strings.TrimSpace(tl.text)
-		if !makefileAllowedLine(trimmed, operands) {
-			shape := makefileRefusedShape(trimmed, kind, false, operands)
+		if !makefileAllowedLine(tl.text, operands) {
+			shape := makefileRefusedShape(tl.text, kind, false, operands)
 			return false, tl.file, tl.line, shape
 		}
 	}
@@ -151,7 +150,7 @@ func makefileTrackedLiteralShapes(lines []makefileTrackedLine, followed []string
 //
 // The only exception is the exact lines of util.MakefileCLIVariable.
 func makefileAllowedLine(line string, operands map[string]struct{}) bool {
-	if makefileBlankCommentOrCLI(line) || makefileAllowedInclude(line) {
+	if makefileBlankCommentOrCLI(strings.TrimSpace(line)) || makefileAllowedInclude(line) {
 		return true
 	}
 	fields := strings.Fields(line)
@@ -183,16 +182,13 @@ func makefileAllowedInclude(line string) bool {
 	return true
 }
 
+// makefileAllowedGrammar accepts an ordinary literal binding or a single-colon literal rule.
 func makefileAllowedGrammar(line string, operands map[string]struct{}) bool {
-	assign, colon, _ := makefileSplit(line)
-	switch {
-	case assign >= 0 && (colon < 0 || assign < colon):
+	if assign := makefileLeadingAssignment(line); assign >= 0 {
 		return makefileAllowedAssignment(line, assign)
-	case colon >= 0 && assign < 0:
-		return len(makefileAllowedRuleTargets(line, colon, operands)) > 0
-	default:
-		return false
 	}
+	_, _, names := makefileAllowedRule(line, operands)
+	return len(names) > 0
 }
 
 // makefileAllowedAssignment accepts an ordinary binding with no reference in its value.
@@ -269,33 +265,25 @@ func makefileMatchesIdentifier(name string) bool {
 	return true
 }
 
-// makefileAllowedRuleTargets returns the names of an allowed literal rule for the shape and evidence readers.
-func makefileAllowedRuleTargets(line string, colon int, operands map[string]struct{}) []string {
-	head := line[:colon]
-	if strings.HasPrefix(line[colon:], "::") || strings.ContainsAny(head, "&$%") {
-		return nil
+// makefileAllowedRule applies the literal allow-list to a rule read by MakefileRuleParts.
+func makefileAllowedRule(line string, operands map[string]struct{}) (head, tail string, names []string) {
+	head, tail, ok := MakefileRuleParts(line)
+	if !ok || len(line)-len(head)-len(tail) != 1 || strings.ContainsAny(head, "&$%") {
+		return "", "", nil
 	}
-	if !makefileAllowedPrerequisites(line, colon, operands) {
-		return nil
+	prereqs, _ := makefileRuleTailParts(tail)
+	if !makefileAllowedPrerequisites(prereqs, operands) {
+		return "", "", nil
 	}
-	names := MakefileTargetWords(head)
+	names = MakefileTargetWords(head)
 	if !makefileAllowedTargets(names, operands) {
-		return nil
+		return "", "", nil
 	}
-	return names
+	return head, tail, names
 }
 
-func makefileAllowedPrerequisites(line string, colon int, operands map[string]struct{}) bool {
-	endPrereq := len(line)
-	for i := colon + 1; i < len(line); {
-		kind, width := makefileOperatorAt(line, i)
-		if kind == makefileEndToken {
-			endPrereq = i
-			break
-		}
-		i += width
-	}
-	prereqs := line[colon+1 : endPrereq]
+// makefileAllowedPrerequisites rejects computed prerequisites and possible remake sources.
+func makefileAllowedPrerequisites(prereqs string, operands map[string]struct{}) bool {
 	if strings.ContainsAny(prereqs, "$%=") || strings.Contains(prereqs, "&:") || strings.Contains(prereqs, "::") {
 		return false
 	}
@@ -365,9 +353,13 @@ func MakefileImplicitSourceName(name, base string) bool {
 	return base != "" && norm != base && strings.Contains(norm, base)
 }
 
+// makefileRevisionDirectories are the directory spellings used by Make's built-in remake rules.
+var makefileRevisionDirectories = [...]string{"RCS", "SCCS"}
+
+// makefileHasRCSSCCS reports whether a normalized path contains a revision directory.
 func makefileHasRCSSCCS(norm string) bool {
 	for _, part := range strings.Split(norm, "/") {
-		if part == "RCS" || part == "SCCS" {
+		if slices.Contains(makefileRevisionDirectories[:], part) {
 			return true
 		}
 	}
@@ -458,13 +450,13 @@ func makefileDirectiveShape(fields []string) string {
 	return ""
 }
 
+// makefileGrammarShape describes the assignment or rule refused by the allow-list.
 func makefileGrammarShape(line string, operands map[string]struct{}) string {
-	assign, colon, _ := makefileSplit(line)
-	if assign >= 0 && (colon < 0 || assign < colon) {
+	if assign := makefileLeadingAssignment(line); assign >= 0 {
 		return makefileAssignmentShape(line, assign)
 	}
-	if colon >= 0 {
-		return makefileRuleShape(line[:colon], line[colon:], operands)
+	if head, tail, ok := MakefileRuleParts(line); ok {
+		return makefileRuleShape(head, tail, len(line)-len(head)-len(tail), operands)
 	}
 	if strings.Contains(line, "$") {
 		return "bare expansion"
@@ -497,8 +489,8 @@ func makefileAssignmentShape(line string, assign int) string {
 }
 
 // makefileRuleShape describes the delimiter, target or prerequisite that excludes a rule.
-func makefileRuleShape(head, rest string, operands map[string]struct{}) string {
-	if strings.HasPrefix(rest, "::") {
+func makefileRuleShape(head, tail string, delimiterWidth int, operands map[string]struct{}) string {
+	if delimiterWidth > 1 {
 		return "double-colon rule"
 	}
 	if strings.Contains(head, "&:") || strings.Contains(head, "&") {
@@ -512,23 +504,15 @@ func makefileRuleShape(head, rest string, operands map[string]struct{}) string {
 			return shape
 		}
 	}
-	if shape := makefilePrerequisiteShape(rest, operands); shape != "" {
+	prereqs, _ := makefileRuleTailParts(tail)
+	if shape := makefilePrerequisiteShape(prereqs, operands); shape != "" {
 		return shape
 	}
 	return "rule"
 }
 
-func makefilePrerequisiteShape(rest string, operands map[string]struct{}) string {
-	endPrereq := len(rest)
-	for i := 1; i < len(rest); {
-		kind, width := makefileOperatorAt(rest, i)
-		if kind == makefileEndToken {
-			endPrereq = i
-			break
-		}
-		i += width
-	}
-	prereqs := rest[1:endPrereq]
+// makefilePrerequisiteShape names the syntax or remake source that excluded the prerequisites.
+func makefilePrerequisiteShape(prereqs string, operands map[string]struct{}) string {
 	switch {
 	case strings.Contains(prereqs, "$"):
 		return "computed prerequisite"

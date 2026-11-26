@@ -480,3 +480,26 @@ func includeDocsSession(t *testing.T, files map[string]string, opts AdoptOptions
 	s.verification = &VerificationPlan{Status: verificationDeclared, Build: [][]string{{"go", "build", "./..."}}, Test: [][]string{{"go", "test", "./..."}}}
 	return s
 }
+
+// TestTrackedNumericIncludeCase checks the actual RCS and SCCS spellings beside a caseless operand.
+func TestTrackedNumericIncludeCase(t *testing.T) {
+	for _, name := range [...]string{"rcs", "sCcS", "RCS", "SCCS"} {
+		t.Run(name, func(t *testing.T) {
+			s := includeRepo(t, map[string]string{"123": "help:\n"}, "123")
+			if err := os.Mkdir(filepath.Join(s.repoPath, name), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			_, statErr := os.Lstat(filepath.Join(s.repoPath, strings.ToUpper(name)))
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatal(statErr)
+			}
+			_, err := mergeWithIncludes(s, "include 123\n")
+			if statErr == nil && (err == nil || !strings.Contains(err.Error(), name)) {
+				t.Errorf("visible remake source %q: merge error = %v", name, err)
+			}
+			if statErr != nil && err != nil {
+				t.Errorf("tracked numeric include beside %q: %v", name, err)
+			}
+		})
+	}
+}

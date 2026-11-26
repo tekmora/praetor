@@ -63,7 +63,7 @@ func verificationParagraph(head string) string {
 func stripGeneratedVerifyText(para string) string {
 	generated := [...]string{
 		repositoryOwnedVerifySummary, generatedVerifySummary, noVerifyTargetSummary,
-		unavailableVerifySummary, harnessReceiptLine, legacyGeneratedVerifyParagraph,
+		unavailableVerifySummary, ambiguousVerifySummary, harnessReceiptLine, legacyGeneratedVerifyParagraph,
 	}
 	for i := 0; i < len(generated); i++ {
 		para = strings.ReplaceAll(para, strings.TrimSpace(generated[i]), "")

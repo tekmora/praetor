@@ -9,6 +9,8 @@ title: >-
   Every `make:` pointer is unresolved when the selected makefile has a possible built-in remake source beside it or its directory cannot be read within the 4096-entry limit.
   Variable references in Make rule and assignment comments no longer invalidate a literal recipe.
   When a computed Make rule head cannot be resolved in full to plain path words, every target in it is unresolved, including a literal `verify-all`. Literal heads retain their quoted blanks and backslashes.
+  Adoption keeps ambiguous rules in place and credits only confirmed targets. UI and workflow checks resolve fixed target bindings and read prerequisites from the complete logical rule.
+  Tracked numeric Makefile includes follow the directory’s actual RCS and SCCS spellings.
   When the audit finds an invalid declaration and cannot write the report, the command returns both errors.
   The computed assignment at `Makefile:8` affects all seven declarations in this repository, including `make:secrets`.
   Migrate affected rules by pointing them at independently verifiable evidence.

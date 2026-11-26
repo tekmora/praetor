@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"iter"
 	"slices"
 	"strings"
 )
@@ -177,6 +178,15 @@ func makefileBindsVariable(text string) bool {
 	return binds
 }
 
+// makefileLeadingAssignment returns the assignment operator offset when it precedes any rule delimiter.
+func makefileLeadingAssignment(line string) int {
+	assign, colon, _ := makefileSplit(line)
+	if colon >= 0 && colon < assign {
+		return -1
+	}
+	return assign
+}
+
 // makefileAssignment reports whether Make reaches an assignment operator in text before any rule
 // colon, and if so whether it binds a variable (binds) or not, because its name side holds two or
 // more words after the modifiers (unnamed). GNU Make takes no blank inside a variable name, so
@@ -184,8 +194,8 @@ func makefileBindsVariable(text string) bool {
 // rules declaring docs-lint, "$(R) x = y" is a bare expansion, and "export foo bar = ..." stays an
 // export directive.
 func makefileAssignment(text string) (binds, unnamed bool) {
-	assign, colon, _ := makefileSplit(text)
-	if assign < 0 || colon >= 0 && colon < assign {
+	assign := makefileLeadingAssignment(text)
+	if assign < 0 {
 		return false, false
 	}
 	named := len(makefileNameWords(text[:assign])) <= 1
@@ -470,8 +480,8 @@ func makefileJoinText(parts []string) string {
 // MakefileMayDefineTarget reports the files where Make may still declare the target some other
 // way. Lines may end in "\n" or "\r\n"; the reading stops where makefileLogicalLines does.
 func MakefileHasTarget(data, target string) bool {
-	lines, _ := makefileLogicalLines(data)
-	return makefileTargetLine(lines, makefileReadVariables(lines), target) >= 0
+	_, found := makefileFindRule(MakefileRules(data), target)
+	return found
 }
 
 // makefileNamesRecipePrefix reports whether line, unless it is a comment line, names .RECIPEPREFIX.
@@ -495,43 +505,90 @@ func makefileMayBindRecipePrefix(line string) bool {
 	return binds && makefileNameMayBe(name, ".RECIPEPREFIX")
 }
 
-// makefileTargetLine returns the index of the first logical line that declares a rule for target,
-// or -1 when none does or the Makefile names .RECIPEPREFIX. A tab-prefixed line outside a recipe
-// declares nothing: Make stops at it with "recipe commences before first target". The reading
-// stops at a line the scanner cannot resolve, such as a tab-indented "define X" whose recipe state
-// depends on a branch Make takes: a rule after it may be define body text. A computed target name
-// counts with the value variables fixes for it (makefileVariables.targets).
-func makefileTargetLine(lines []string, variables makefileVariables, target string) int {
-	if slices.ContainsFunc(lines, makefileNamesRecipePrefix) {
-		return -1
-	}
-	var scanner makefileScanner
-	for index := 0; index < len(lines) && index < MaxMakefileLines; index++ {
-		kind := scanner.next(lines[index])
-		if scanner.lost {
-			return -1
-		}
-		if kind != makefileSyntaxLine {
-			continue
-		}
-		if makefileDeclaresTarget(lines[index], index, variables, target) {
-			return index
-		}
-	}
-	return -1
+// MakefileRule describes a confirmed logical rule. Recipe holds the adjacent tab-prefixed
+// commands in source order, including continuations. InlineRecipe is the separate semicolon command.
+type MakefileRule struct {
+	Targets       []string
+	Prerequisites string
+	InlineRecipe  string
+	Recipe        []string
 }
 
-// makefileDeclaresTarget reports whether line, a syntax line at index, unambiguously declares target.
-func makefileDeclaresTarget(line string, index int, variables makefileVariables, target string) bool {
-	if makefileConditionalLine(line, strings.Fields(line)) {
-		return false
+// MakefileRules yields declarations in source order up to the reader's logical-line and scanner
+// bounds. It resolves each complete head with the bindings fixed by this file.
+func MakefileRules(data string) iter.Seq[MakefileRule] {
+	lines, _ := makefileLogicalLines(data)
+	return makefileRules(lines, makefileReadVariables(lines))
+}
+
+// makefileRules visits syntax lines with the file's fixed bindings and stops where parsing is lost.
+func makefileRules(lines []string, variables makefileVariables) iter.Seq[MakefileRule] {
+	return func(yield func(MakefileRule) bool) {
+		if slices.ContainsFunc(lines, makefileNamesRecipePrefix) {
+			return
+		}
+		var scanner makefileScanner
+		for index := 0; index < len(lines) && index < MaxMakefileLines; index++ {
+			kind := scanner.next(lines[index])
+			if scanner.lost {
+				return
+			}
+			if kind != makefileSyntaxLine {
+				continue
+			}
+			rule := makefileResolvedRule(lines, index, variables)
+			if len(rule.Targets) > 0 && !yield(rule) {
+				return
+			}
+		}
 	}
-	head, prerequisites, ok := MakefileRuleParts(line)
-	if !ok || makefileUncertainRule(line, prerequisites) {
-		return false
+}
+
+// makefileResolvedRule reads a syntax line and the adjacent recipe lines belonging to its targets.
+func makefileResolvedRule(lines []string, index int, variables makefileVariables) MakefileRule {
+	line := lines[index]
+	if makefileConditionalLine(line, strings.Fields(line)) {
+		return MakefileRule{}
+	}
+	head, tail, ok := MakefileRuleParts(line)
+	if !ok || makefileUncertainRule(line, tail) {
+		return MakefileRule{}
 	}
 	names, _ := variables.targets(head, index)
-	return slices.Contains(names, target)
+	if len(names) == 0 {
+		return MakefileRule{}
+	}
+	end := index + 1
+	for end < len(lines) && end < MaxMakefileLines && strings.HasPrefix(lines[end], "\t") {
+		end++
+	}
+	prereqs, inline := makefileRuleTailParts(tail)
+	return MakefileRule{Targets: names, Prerequisites: prereqs, InlineRecipe: inline, Recipe: slices.Clone(lines[index+1 : end])}
+}
+
+// makefileRuleTailParts separates prerequisites from a comment or inline recipe at the first Make terminator.
+func makefileRuleTailParts(tail string) (prereqs, inline string) {
+	for i := 0; i < len(tail) && i < MaxMakefileLineBytes; {
+		kind, width := makefileOperatorAt(tail, i)
+		if kind == makefileEndToken {
+			if tail[i] == ';' {
+				return tail[:i], tail[i+1:]
+			}
+			return tail[:i], ""
+		}
+		i += width
+	}
+	return tail, ""
+}
+
+// makefileFindRule returns the first declaration that contains target.
+func makefileFindRule(rules iter.Seq[MakefileRule], target string) (MakefileRule, bool) {
+	for rule := range rules {
+		if slices.Contains(rule.Targets, target) {
+			return rule, true
+		}
+	}
+	return MakefileRule{}, false
 }
 
 // MakefileTargetRecipe returns the tab-prefixed recipe lines, each ending in "\n", that follow
@@ -540,17 +597,11 @@ func makefileDeclaresTarget(line string, index int, variables makefileVariables,
 // recipe line continued with a backslash is returned with its continuation lines.
 // data holds "\n" line endings: a caller normalizes a CRLF file first.
 func MakefileTargetRecipe(data, target string) (string, bool) {
-	lines, _ := makefileLogicalLines(data)
-	index := makefileTargetLine(lines, makefileReadVariables(lines), target)
-	if index < 0 {
-		return "", false
+	rule, found := makefileFindRule(MakefileRules(data), target)
+	if len(rule.Recipe) == 0 {
+		return "", found
 	}
-	var recipe strings.Builder
-	for next := index + 1; next < len(lines) && next < MaxMakefileLines && strings.HasPrefix(lines[next], "\t"); next++ {
-		recipe.WriteString(lines[next])
-		recipe.WriteByte('\n')
-	}
-	return recipe.String(), true
+	return strings.Join(rule.Recipe, "\n") + "\n", true
 }
 
 // makefileDirective returns the first word of a Makefile line that carries meaning, skipping the
@@ -642,7 +693,7 @@ func MakefileMayDefineTarget(data, target string) bool {
 		return true
 	}
 	variables := makefileReadVariables(lines)
-	if makefileTargetLine(lines, variables, target) >= 0 {
+	if _, found := makefileFindRule(makefileRules(lines, variables), target); found {
 		return true
 	}
 	var scanner makefileScanner
