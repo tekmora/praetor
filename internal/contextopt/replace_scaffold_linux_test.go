@@ -5,11 +5,15 @@
 package contextopt
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestReconcileExecutableIn_KeepsXattr checks a user attribute across a byte-identical mode repair.
@@ -63,7 +67,6 @@ func TestReconcileExecutableIn_RefusesStaleBytesAndSymlinks(t *testing.T) {
 	for _, tc := range [...]struct{ name, expected string }{
 		{"run", "#!/different\n"},
 		{"link", string(data)},
-		{"run", "no shebang\n"},
 	} {
 		for _, dryRun := range [...]bool{true, false} {
 			changed, err := ReconcileExecutableIn(t.Context(), root, tc.name, []byte(tc.expected), dryRun)
@@ -72,8 +75,89 @@ func TestReconcileExecutableIn_RefusesStaleBytesAndSymlinks(t *testing.T) {
 			}
 		}
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode() != 0o600 || readFileOrEmpty(t, path) != string(data) {
-		t.Fatalf("refused repair changed the script: %v, %v", info, err)
+	requireRepairFile(t, path, data, 0o600)
+}
+
+// TestReconcileExecutableIn_RefusesMatchingNonShebang isolates the shebang requirement
+// with matching, bounded bytes on a single ordinary inode.
+func TestReconcileExecutableIn_RefusesMatchingNonShebang(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "run")
+	data := []byte("no shebang\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dryRun := range [...]bool{true, false} {
+		changed, err := ReconcileExecutableIn(t.Context(), root, "run", data, dryRun)
+		if changed || err == nil || !strings.Contains(err.Error(), "shebang") {
+			t.Errorf("preview=%t: got changed=%t, err=%v, want shebang refusal", dryRun, changed, err)
+		}
+		requireRepairFile(t, path, data, 0o600)
+	}
+}
+
+// TestReconcileExecutableIn_RefusesReplacedParent exchanges two directories with
+// identical scripts during a real lock wait, before the validator can inspect the leaf.
+func TestReconcileExecutableIn_RefusesReplacedParent(t *testing.T) {
+	const checkoutMode os.FileMode = 0o644
+	data := []byte("#!/bin/sh\n")
+	for _, dryRun := range [...]bool{true, false} {
+		t.Run(fmt.Sprintf("preview=%t", dryRun), func(t *testing.T) {
+			root := t.TempDir()
+			parent := filepath.Join(root, "scripts")
+			replacement := filepath.Join(root, "replacement")
+			moved := filepath.Join(root, "moved")
+			for _, dir := range [...]string{parent, replacement} {
+				plantRepairFile(t, dir, data, checkoutMode)
+			}
+			ctx := replaceParentDuringWait(t, parent, replacement, moved)
+			changed, err := ReconcileExecutableIn(ctx, root, filepath.Join("scripts", "run"), data, dryRun)
+			if changed || err == nil || !strings.Contains(err.Error(), "parent changed: scripts") {
+				t.Errorf("got changed=%t, err=%v, want refusal naming the replaced parent", changed, err)
+			}
+			requireRepairFile(t, filepath.Join(moved, "run"), data, checkoutMode)
+			requireRepairFile(t, filepath.Join(parent, "run"), data, checkoutMode)
+		})
+	}
+}
+
+// replaceParentDuringWait holds the original directory lock until the repair tries to acquire it.
+func replaceParentDuringWait(t *testing.T, parent, replacement, moved string) context.Context {
+	t.Helper()
+	release := holdPlatformLock(t, snapshotDirectory(t, parent))
+	pause := lockPause(func(context.Context, time.Duration) bool {
+		if err := os.Rename(parent, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, parent); err != nil {
+			t.Fatal(err)
+		}
+		release()
+		return false
+	})
+	return context.WithValue(t.Context(), lockPauseKey{}, pause)
+}
+
+// plantRepairFile creates an ordinary script with an exact checkout mode despite the process umask.
+func plantRepairFile(t *testing.T, dir string, data []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "run")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireRepairFile checks the mode and bytes left at one name after a refusal.
+func requireRepairFile(t *testing.T, path string, data []byte, mode os.FileMode) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode() != mode || readFileOrEmpty(t, path) != string(data) {
+		t.Errorf("expected unchanged bytes and mode %04o at %s: %v, %v", mode, path, info, err)
 	}
 }

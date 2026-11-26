@@ -3,4 +3,6 @@
 type: fixed
 title: >-
   Adoption installs checkpoint scripts that start with a shebang as executable on POSIX
-  and repairs the mode of matching single-link copies in place.
+  and repairs matching copies in place. Preview and adoption both refuse symlinked
+  checkpoint parents, parents replaced during the lock wait, and scripts with multiple
+  hard links or special permission bits, including already-executable scripts.

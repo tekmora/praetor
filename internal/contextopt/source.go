@@ -266,13 +266,7 @@ func snapshotRootBytes(ctx context.Context, root *os.Root, name string) ([]byte,
 // directory into dst, rejecting symlinks, non-regular files and any change to the
 // file's identity, size or modification time during the copy. dst may hold a partial
 // copy when an error is returned; callers discard it.
-func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64) (int64, error) {
-	return inspectSnapshot(ctx, root, name, dst, limit, nil)
-}
-
-// inspectSnapshot copies the bounded snapshot and optionally inspects its still-open
-// descriptor after verifying that the name continues to refer to it.
-func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64, inspect func(*os.File) error) (size int64, err error) {
+func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Writer, limit int64) (size int64, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -299,9 +293,6 @@ func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Wri
 	if err != nil || !os.SameFile(before, linked) {
 		return 0, errors.Join(fmt.Errorf("source replaced during snapshot"), err)
 	}
-	if inspect != nil {
-		return size, inspect(file)
-	}
 	return size, nil
 }
 
@@ -313,9 +304,6 @@ func inspectSnapshot(ctx context.Context, root *os.Root, name string, dst io.Wri
 func ReconcileExecutableIn(ctx context.Context, root, rel string, expected []byte, dryRun bool) (changed bool, err error) {
 	if ctx == nil {
 		return false, errors.New("executable mode repair requires a context")
-	}
-	if len(expected) > MaxSourceBytes || !bytes.HasPrefix(expected, []byte("#!")) {
-		return false, errors.New("executable mode repair requires a bounded shebang script")
 	}
 	if err := validateSources([]string{filepath.ToSlash(rel)}); err != nil {
 		return false, err
@@ -333,36 +321,14 @@ func ReconcileExecutableIn(ctx context.Context, root, rel string, expected []byt
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
 
-	var current bytes.Buffer
-	_, err = inspectSnapshot(ctx, dir, filepath.Base(rel), &current, MaxSourceBytes, func(file *os.File) error {
-		if !bytes.Equal(current.Bytes(), expected) {
-			return errors.New("script changed before mode repair")
-		}
-		var modeErr error
-		changed, modeErr = reconcileExecutableMode(ctx, file, dryRun)
-		return modeErr
-	})
-	return changed, err
-}
-
-// reconcileExecutableMode checks the verified inode before previewing or applying chmod.
-func reconcileExecutableMode(ctx context.Context, file *os.File, dryRun bool) (bool, error) {
-	const executableMode os.FileMode = 0o755
-	info, err := file.Stat()
+	file, mode, err := validateExecutableIn(ctx, root, rel, dir, expected)
 	if err != nil {
 		return false, err
 	}
-	if info.Mode() == executableMode {
+	defer func() { err = errors.Join(err, file.Close()) }()
+	const executableMode os.FileMode = 0o755
+	if mode == executableMode {
 		return false, nil
-	}
-	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
-		return false, fmt.Errorf("refusing to change special mode bits: %s", info.Name())
-	}
-	if !singleLink(info) {
-		return false, fmt.Errorf("refusing to change mode of shared or unverified inode: %s", info.Name())
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
 	}
 	if dryRun {
 		return true, nil
@@ -371,6 +337,84 @@ func reconcileExecutableMode(ctx context.Context, file *os.File, dryRun bool) (b
 		return false, err
 	}
 	return true, file.Sync()
+}
+
+// validateExecutableIn returns the verified descriptor and its mode to the lock holder.
+// The parent must still have its pre-lock identity both at open and after the bounded read.
+func validateExecutableIn(ctx context.Context, root, rel string, dir *os.Root, expected []byte) (_ *os.File, _ os.FileMode, err error) {
+	before, err := namedExecutableInfo(ctx, root, rel, dir)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("script must be a regular file: %s", rel)
+	}
+	file, err := openExecutable(filepath.Join(dir.Name(), filepath.Base(rel)))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, file.Close())
+		}
+	}()
+	actual, err := stableRead(ctx, file, before)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := namedExecutableInfo(ctx, root, rel, dir)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := validateExecutableSnapshot(before, info, actual, expected); err != nil {
+		return nil, 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	return file, info.Mode(), nil
+}
+
+// namedExecutableInfo walks the requested parent again and observes the leaf without following links.
+func namedExecutableInfo(ctx context.Context, root, rel string, pinned *os.Root) (_ os.FileInfo, err error) {
+	parent := filepath.Dir(rel)
+	named, err := OpenDirectoryIn(ctx, root, parent)
+	if err != nil {
+		return nil, fmt.Errorf("revalidate checkpoint parent %s: %w", parent, err)
+	}
+	defer func() { err = errors.Join(err, named.Close()) }()
+	original, err := pinned.Stat(".")
+	if err != nil {
+		return nil, err
+	}
+	current, err := named.Stat(".")
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(original, current) {
+		return nil, fmt.Errorf("checkpoint parent changed: %s", parent)
+	}
+	return named.Lstat(filepath.Base(rel))
+}
+
+// validateExecutableSnapshot checks the final named inode and its mode before accepting the bytes.
+func validateExecutableSnapshot(before, info os.FileInfo, actual, expected []byte) error {
+	if !os.SameFile(before, info) {
+		return fmt.Errorf("script replaced during mode repair: %s", before.Name())
+	}
+	if !singleLink(info) {
+		return fmt.Errorf("refusing to change mode of shared or unverified inode: %s", info.Name())
+	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("refusing to change special mode bits: %s", info.Name())
+	}
+	if len(expected) > MaxSourceBytes || !bytes.HasPrefix(expected, []byte("#!")) {
+		return errors.New("executable mode repair requires a bounded shebang script")
+	}
+	if !bytes.Equal(actual, expected) {
+		return errors.New("script changed before mode repair")
+	}
+	return nil
 }
 
 func validateText(data []byte) error {

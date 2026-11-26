@@ -203,7 +203,11 @@ func (s *adoptSession) scaffoldFile(ctx context.Context, sc scaffold) (scaffoldS
 	if err != nil {
 		return 0, err
 	}
-	if fileExists(full) {
+	exists, err := s.scaffoldExists(ctx, full, sc)
+	if err != nil {
+		return 0, err
+	}
+	if exists {
 		refreshed, err := s.refreshPriorScaffold(ctx, full, sc)
 		if err != nil || refreshed {
 			return scaffoldWritten, err
@@ -218,6 +222,19 @@ func (s *adoptSession) scaffoldFile(ctx context.Context, sc scaffold) (scaffoldS
 	}
 	s.report.recordCreated(sc.rel, sc.created)
 	return scaffoldWritten, nil
+}
+
+// scaffoldExists checks the root-relative checkpoint path before deciding whether to
+// create, refresh or verify it, including when a dry run will only record the decision.
+func (s *adoptSession) scaffoldExists(ctx context.Context, full string, sc scaffold) (bool, error) {
+	if !sc.sourceMode {
+		return fileExists(full), nil
+	}
+	_, exists, err := contextopt.ObserveSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel))
+	if err != nil {
+		return false, fmt.Errorf("observe checkpoint %s: %w", sc.rel, err)
+	}
+	return exists, nil
 }
 
 // refreshPriorScaffold replaces an existing file holding an earlier Praetor text of sc with

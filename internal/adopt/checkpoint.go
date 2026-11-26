@@ -174,11 +174,7 @@ const maxCheckpointSources = 8
 // text of it (priorCheckpointDigests), line endings aside, or one that cannot be read to tell.
 func keptCheckpointSource(ctx context.Context, s *adoptSession, sources []checkpointSource) (int, error) {
 	for i := 0; i < len(sources) && i < maxCheckpointSources; i++ {
-		full, err := repoFile(s.repoPath, sources[i].path)
-		if err != nil {
-			return 0, err
-		}
-		actual, exists, readErr := contextopt.ObserveSnapshot(ctx, full)
+		actual, exists, readErr := contextopt.ObserveSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sources[i].path))
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr
 		}
