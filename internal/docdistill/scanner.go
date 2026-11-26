@@ -179,11 +179,12 @@ func scanWorkflowActions(ctx context.Context, repoPath string) ([]PackageRef, er
 		return nil, err
 	}
 	entries, err := os.ReadDir(workflowDir)
-	if util.DirectoryAbsent(workflowDir, err) {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("read workflow directory: %w", err)
+		absent, inspectErr := util.DirectoryAbsentContext(ctx, workflowDir, err)
+		if absent {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workflow directory: %w", inspectErr)
 	}
 	if len(entries) > 500 {
 		return nil, fmt.Errorf("workflow directory exceeds 500 entries")

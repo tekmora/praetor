@@ -49,10 +49,11 @@ func ExtractMemoryInsights(ctx context.Context, transcriptsRoot string) ([]Memor
 
 	entries, err := os.ReadDir(transcriptsRoot)
 	if err != nil {
-		if util.DirectoryAbsent(transcriptsRoot, err) {
+		absent, inspectErr := util.DirectoryAbsentContext(ctx, transcriptsRoot, err)
+		if absent {
 			return insights, nil
 		}
-		return nil, fmt.Errorf("read transcripts root %s: %w", transcriptsRoot, err)
+		return nil, fmt.Errorf("read transcripts root %s: %w", transcriptsRoot, inspectErr)
 	}
 
 	for i := 0; i < len(entries) && i < MaxTranscriptsScan; i++ {

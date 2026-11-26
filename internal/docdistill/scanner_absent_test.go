@@ -4,10 +4,21 @@
 package docdistill
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestScanWorkflowActionsCanceledMissingDirectory(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := scanWorkflowActions(ctx, t.TempDir())
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing workflow directory under cancellation: %v", err)
+	}
+}
 
 // TestScanWorkflowActionsDistinguishesAbsentFromMisplaced: an absent workflow directory yields
 // no references, while a regular file where the directory belongs is an error on every host.

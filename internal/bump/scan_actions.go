@@ -115,11 +115,12 @@ func ScanWorkflowActions(ctx context.Context, repoPath string) ([]ActionCandidat
 		return nil, nil, err
 	}
 	entries, err := os.ReadDir(workflowDir)
-	if util.DirectoryAbsent(workflowDir, err) {
-		return nil, nil, nil
-	}
 	if err != nil {
-		return nil, nil, err
+		absent, inspectErr := util.DirectoryAbsentContext(ctx, workflowDir, err)
+		if absent {
+			return nil, nil, nil
+		}
+		return nil, nil, inspectErr
 	}
 
 	var candidates []ActionCandidate

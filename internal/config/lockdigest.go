@@ -267,10 +267,14 @@ func optionalArchetypeIndex(ctx context.Context, root, rel string) (map[string]s
 		return nil, err
 	}
 	index, err := indexArchetypesWithSnapshots(ctx, root, path, nil, false)
-	if util.DirectoryAbsent(path, err) {
-		return nil, nil
+	if err != nil {
+		absent, inspectErr := util.DirectoryAbsentContext(ctx, path, err)
+		if absent {
+			return nil, nil
+		}
+		return nil, inspectErr
 	}
-	return index, err
+	return index, nil
 }
 
 // readLockSource refuses nonregular inputs before opening them, bounds the read,
