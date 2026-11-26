@@ -60,6 +60,9 @@ func renderRenovateBody(template string, notes []string) (string, error) {
 	return body.String(), nil
 }
 
+// TestRenovatePRBody renders renovate.json's prBodyTemplate and notes and checks the body's headings and
+// checkboxes against the repository PR template, that it has no receipt fence, and that its receipt
+// section holds the takeover sentence.
 func TestRenovatePRBody(t *testing.T) {
 	var config struct {
 		Template string   `yaml:"prBodyTemplate"`
@@ -100,6 +103,7 @@ func TestRenovatePRBody(t *testing.T) {
 	}
 }
 
+// TestRenovatePRBodyMissingControls refuses a body template that drops Renovate's own controls part.
 func TestRenovatePRBodyMissingControls(t *testing.T) {
 	if _, err := renderRenovateBody("{{{header}}}{{{table}}}{{{warnings}}}{{{notes}}}{{{changelogs}}}{{{configDescription}}}{{{footer}}}", nil); err == nil {
 		t.Fatal("body template missing Renovate's controls was accepted")
