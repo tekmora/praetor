@@ -15,7 +15,7 @@ import (
 type DirectoryIdentity struct{}
 
 // Identity reports that this platform cannot identify a pinned directory.
-func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
+func (dir *SnapshotDirectory) Identity(_ context.Context) (DirectoryIdentity, error) {
 	return DirectoryIdentity{}, ErrSourceIdentityUnavailable
 }
 
@@ -30,6 +30,6 @@ func (dir *SnapshotDirectory) statListedName(_ context.Context, _ string) (os.Fi
 }
 
 // checkIdentity refuses unsupported descriptor-relative observations.
-func (listed pinnedListing) checkIdentity(_ *os.File, _ os.FileInfo) error {
+func (listed pinnedListing) checkIdentity(_ context.Context, _ *os.File, _ os.FileInfo) error {
 	return ErrSourceIdentityUnavailable
 }

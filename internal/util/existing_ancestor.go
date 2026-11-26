@@ -35,7 +35,7 @@ func walkToExistingAncestor(path string, stat func(string) (fs.FileInfo, error))
 		if err == nil {
 			return ancestorWalk{existing: current, info: info, rest: rest}, nil
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		if !SoleNotExist(err) {
 			return ancestorWalk{}, fmt.Errorf("util: inspect %q: %w", current, err)
 		}
 		parent := filepath.Dir(current)

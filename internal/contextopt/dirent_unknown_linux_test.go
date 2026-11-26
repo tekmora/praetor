@@ -21,6 +21,16 @@ import (
 // valid inode on Linux. Only the relative metadata lookup can supply the child's kind.
 func decodeUnknownChild(t *testing.T, ctx context.Context, dir *SnapshotDirectory) listedName {
 	t.Helper()
+	record := unknownChildRecord()
+	listed, err := dir.decodeDirents(ctx, record[:])
+	if err != nil || len(listed) != 1 || listed[0].name != "child" {
+		t.Fatalf("decode DT_UNKNOWN: %v, %v", listed, err)
+	}
+	return listed[0]
+}
+
+// unknownChildRecord builds the single native record used by the unknown-kind cases.
+func unknownChildRecord() [32]byte {
 	var record [32]byte
 	// SAFETY: All three compile-time offsets lie within the 32-byte Linux dirent.
 	const (
@@ -31,11 +41,7 @@ func decodeUnknownChild(t *testing.T, ctx context.Context, dir *SnapshotDirector
 	binary.NativeEndian.PutUint16(record[sizeOffset:], uint16(len(record)))
 	record[typeOffset] = unix.DT_UNKNOWN
 	copy(record[nameOffset:], "child")
-	listed, err := dir.decodeDirents(ctx, record[:])
-	if err != nil || len(listed) != 1 || listed[0].name != "child" {
-		t.Fatalf("decode DT_UNKNOWN: %v, %v", listed, err)
-	}
-	return listed[0]
+	return record
 }
 
 // TestUnknownDirentObservesKind feeds the native decoder the same untyped
@@ -103,4 +109,60 @@ func resolvedChildInfo(t *testing.T, ctx context.Context, dir *SnapshotDirectory
 		t.Fatal(err)
 	}
 	return info
+}
+
+// TestLastLookupCancellationKeepsBothCauses cancels at the first status check
+// after a missing final fstatat, both during resolution and during DT_UNKNOWN decoding.
+func TestLastLookupCancellationKeepsBothCauses(t *testing.T) {
+	dir, err := OpenSnapshotDirectoryIn(t.Context(), t.TempDir(), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := dir.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	t.Run("final resolution", func(t *testing.T) {
+		ctx := cancelAtLookupBoundary(t, 2)
+		entries, err := dir.resolveEntries(ctx, []listedName{{name: "child"}})
+		if entries != nil || !errors.Is(err, os.ErrNotExist) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("final entry: entries=%v err=%v", entries, err)
+		}
+	})
+	t.Run("unknown type", func(t *testing.T) {
+		ctx := cancelAtLookupBoundary(t, 3)
+		record := unknownChildRecord()
+		names, err := CollectDirectoryEntries(ctx, 1, func(int) ([]listedName, error) {
+			return dir.decodeDirents(ctx, record[:])
+		})
+		if names != nil || !errors.Is(err, os.ErrNotExist) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("unknown type: names=%v err=%v", names, err)
+		}
+	})
+}
+
+// lookupBoundaryContext counts synchronous status checks on the listing goroutine.
+type lookupBoundaryContext struct {
+	context.Context
+	cancel    context.CancelFunc
+	remaining int
+}
+
+// Err delivers cancellation at the designated listing boundary.
+func (c *lookupBoundaryContext) Err() error {
+	c.remaining--
+	if c.remaining == 0 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// cancelAtLookupBoundary installs a deadline before the listing starts so each
+// native call shares the context used to deliver the boundary cancellation.
+func cancelAtLookupBoundary(t *testing.T, checks int) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	t.Cleanup(cancel)
+	return &lookupBoundaryContext{Context: ctx, cancel: cancel, remaining: checks}
 }

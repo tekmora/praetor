@@ -23,22 +23,20 @@ const maxNativeAttempts = 8
 // the next syscall on cancellation. A partial read retains its byte count and error.
 func retryInterrupted(ctx context.Context, call func() (int, error)) (int, error) {
 	var n int
-	var err error
+	var last error
 	for range maxNativeAttempts {
-		select {
-		case <-ctx.Done():
-			return n, errors.Join(err, ctx.Err())
-		default:
+		called, err := util.CheckedIO(ctx, func() (bool, error) {
+			n, last = call()
+			return true, last
+		})
+		if !called {
+			return n, errors.Join(last, err)
 		}
-		n, err = call()
 		if n < -1 || n > 0 || !errors.Is(util.SoleCause(err), unix.EINTR) {
 			return n, err
 		}
 	}
-	if canceled := ctx.Err(); canceled != nil {
-		err = errors.Join(err, canceled)
-	}
-	return n, err
+	return n, last
 }
 
 // openNativeLeaf acquires a flat leaf relative to a live descriptor. A directory lookup
@@ -59,10 +57,18 @@ func openUnixLeaf(ctx context.Context, parent uintptr, parentName, name string, 
 		return nil, &os.PathError{Op: "openat", Path: name, Err: unix.EBADF}
 	}
 	parentFD := int(parent)
+	owned := -1
 	fd, err := retryInterrupted(ctx, func() (int, error) {
-		return openat(parentFD, name, flags, 0)
+		fd, err := openat(parentFD, name, flags, 0)
+		if err == nil {
+			owned = fd
+		}
+		return fd, err
 	})
 	if err != nil {
+		if owned >= 0 {
+			err = errors.Join(err, unix.Close(owned))
+		}
 		pathErr := &os.PathError{Op: "openat", Path: name, Err: err}
 		if errors.Is(err, unix.ELOOP) {
 			return nil, refusedSourceLink{pathErr}

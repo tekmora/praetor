@@ -36,10 +36,11 @@ func (store *fixtureStore) openCorpusSnapshot(ctx context.Context, rootDir strin
 	corpus := make(corpusSnapshot)
 	root, err := contextopt.OpenSnapshotDirectoryIn(ctx, rootDir, filepath.FromSlash(FixtureDir))
 	if err != nil {
-		if util.DirectoryAbsent(filepath.Join(rootDir, filepath.FromSlash(FixtureDir)), err) {
+		absent, inspectErr := util.DirectoryAbsentContext(ctx, filepath.Join(rootDir, filepath.FromSlash(FixtureDir)), err)
+		if absent {
 			return corpus, nil
 		}
-		return nil, fmt.Errorf("open fixture corpus: %w", err)
+		return nil, fmt.Errorf("open fixture corpus: %w", inspectErr)
 	}
 	defer func() { err = errors.Join(err, root.Close()) }()
 	for i := 0; i < len(catalog.Rules); i++ {
@@ -85,7 +86,7 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.S
 type languageDirectories map[contextopt.DirectoryIdentity]string
 
 // register rejects a second spelling before its buckets can be listed again.
-func (seen languageDirectories) register(ctx context.Context, stage fixtureStage, identify func() (contextopt.DirectoryIdentity, error)) error {
+func (seen languageDirectories) register(ctx context.Context, stage fixtureStage, identify func(context.Context) (contextopt.DirectoryIdentity, error)) error {
 	if seen == nil {
 		return nil // A rule with one language cannot alias a previous claim.
 	}
@@ -94,7 +95,7 @@ func (seen languageDirectories) register(ctx context.Context, stage fixtureStage
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	id, err := identify()
+	id, err := identify(ctx)
 	if err := errors.Join(err, ctx.Err()); err != nil {
 		return fmt.Errorf("identify fixture directory for rule %s language %q: %w", stage.ruleID, stage.language, err)
 	}

@@ -44,7 +44,7 @@ func requireInterruptedBlock(t *testing.T, ctx context.Context, root string, int
 		if calls == 1 {
 			return interrupted, unix.EINTR
 		}
-		return readNativeDirents(fd, buf)
+		return readNativeDirents(ctx, fd, buf)
 	}
 	names, err := dir.readDirentBlock(ctx, read)
 	if err != nil || calls != 2 {
@@ -94,5 +94,26 @@ func TestDirentReadPreservesTerminalErrors(t *testing.T) {
 		if calls != 1 || n != tc.n || !errors.Is(err, tc.err) || errors.Is(err, context.Canceled) != tc.cancel {
 			t.Fatalf("interrupted read: n=%d err=%v calls=%d, case %+v", n, err, calls, tc)
 		}
+	}
+}
+
+// TestCanceledNameCollectionRetainsSlots cancels at the second cursor return,
+// after both observations have already been stored in their respective chunks.
+func TestCanceledNameCollectionRetainsSlots(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	first := fmt.Errorf("first observation: %w", unix.EINTR)
+	last := fmt.Errorf("last observation: %w", unix.EIO)
+	calls := 0
+	names, err := collectSnapshotNames(ctx, 2, func(int) ([]listedName, error) {
+		calls++
+		if calls == 1 {
+			return []listedName{{name: "first", err: first}}, nil
+		}
+		cancel()
+		return []listedName{{name: "last", err: last}}, nil
+	})
+	if names != nil || calls != 2 || !errors.Is(err, context.Canceled) || !errors.Is(err, first) || !errors.Is(err, last) {
+		t.Fatalf("canceled short reads: names=%v calls=%d err=%v", names, calls, err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt/winfileid"
 	"golang.org/x/sys/windows"
 )
 
@@ -120,4 +121,49 @@ func restrictListedDirectory(t *testing.T, path string) {
 			t.Error(err)
 		}
 	})
+}
+
+// TestLateWindowsStatSkipsFileID cancels as the checked stat of a regular file
+// returns. Any subsequent FileIdInfo request would observe the planted query error.
+func TestLateWindowsStatSkipsFileID(t *testing.T) {
+	root := snapshotDirectory(t, contextFixture(t, map[string][]byte{"regular": nil}))
+	file, err := root.Open("regular")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	original := winfileid.ReadRecord
+	t.Cleanup(func() { winfileid.ReadRecord = original })
+	queries := 0
+	winfileid.ReadRecord = func(context.Context, windows.Handle, *winfileid.Record) error {
+		queries++
+		return os.ErrPermission
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	boundary := &cancelAfterWindowsStat{Context: ctx, cancel: cancel}
+	info, err := statWindowsFixture(boundary, file)
+	if info != nil || queries != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("late Windows stat: info=%v queries=%d err=%v", info, queries, err)
+	}
+}
+
+// cancelAfterWindowsStat delivers cancellation at the post-call check of the real stat.
+type cancelAfterWindowsStat struct {
+	context.Context
+	cancel context.CancelFunc
+	checks int
+}
+
+// Done keeps the pre-call check live and closes the context after file.Stat returns.
+func (c *cancelAfterWindowsStat) Done() <-chan struct{} {
+	c.checks++
+	if c.checks == 2 {
+		c.cancel()
+	}
+	return c.Context.Done()
 }

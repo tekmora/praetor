@@ -12,6 +12,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // ErrUnionDirectory identifies a Darwin MNT_UNION cursor that can switch directory layers.
@@ -41,7 +43,7 @@ func OpenSnapshotDirectoryIn(ctx context.Context, root, rel string) (*SnapshotDi
 	if err != nil {
 		return nil, err
 	}
-	current, err := base.Open(".")
+	current, err := util.CheckedIO(ctx, func() (*os.File, error) { return base.Open(".") })
 	err = errors.Join(err, base.Close(), ctx.Err())
 	if err != nil {
 		if current != nil {
@@ -64,7 +66,7 @@ func OpenChildDirectory(ctx context.Context, dir *SnapshotDirectory, name string
 	if err != nil {
 		return nil, errors.Join(err, ctx.Err())
 	}
-	info, err := child.Stat()
+	info, err := statDescriptor(ctx, child)
 	if err == nil && !info.IsDir() {
 		err = fmt.Errorf("fixture component %q must be a directory", name)
 	}
@@ -103,7 +105,7 @@ func (dir *SnapshotDirectory) ReadEntries(ctx context.Context, n int) ([]os.DirE
 	}
 	dir.listingMu.Lock()
 	defer dir.listingMu.Unlock()
-	names, err := CollectDirectoryEntries(ctx, n, func(remaining int) ([]listedName, error) {
+	names, err := collectSnapshotNames(ctx, n, func(remaining int) ([]listedName, error) {
 		return dir.readNames(ctx, remaining)
 	})
 	if err != nil {
@@ -115,19 +117,55 @@ func (dir *SnapshotDirectory) ReadEntries(ctx context.Context, n int) ([]os.DirE
 	return dir.resolveEntries(ctx, names)
 }
 
+// collectSnapshotNames retains failed observations if the collector discards a
+// chunk on cancellation, including failures returned in an earlier short read.
+func collectSnapshotNames(ctx context.Context, n int, next func(int) ([]listedName, error)) ([]listedName, error) {
+	var failures []error
+	names, err := CollectDirectoryEntries(ctx, n, func(remaining int) ([]listedName, error) {
+		chunk, err := next(remaining)
+		for _, name := range chunk {
+			if name.err != nil {
+				failures = append(failures, name.err)
+			}
+		}
+		return chunk, err
+	})
+	if err != nil && len(failures) != 0 {
+		return nil, errors.Join(err, errors.Join(failures...))
+	}
+	return names, err
+}
+
 // resolveEntries checks the descriptor-relative identity of every counted name before returning.
 func (dir *SnapshotDirectory) resolveEntries(ctx context.Context, names []listedName) ([]os.DirEntry, error) {
 	entries := make([]os.DirEntry, len(names))
 	for i, listed := range names {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if canceled := ctx.Err(); canceled != nil {
+			return nil, resolutionError(canceled, entries[:i], names[i:])
 		}
 		entries[i] = dir.resolveEntry(ctx, listed)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if canceled := ctx.Err(); canceled != nil {
+		return nil, resolutionError(canceled, entries, nil)
 	}
 	return entries, nil
+}
+
+// resolutionError preserves errors from resolved slots and any earlier DT_UNKNOWN
+// observations in the remaining slots. It only inspects already frozen metadata.
+func resolutionError(canceled error, resolved []os.DirEntry, remaining []listedName) error {
+	failures := []error{canceled}
+	for _, entry := range resolved {
+		if failed, ok := entry.(failedEntry); ok {
+			failures = append(failures, failed.err)
+		}
+	}
+	for _, name := range remaining {
+		if name.err != nil {
+			failures = append(failures, name.err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // CollectDirectoryEntries fills a bounded allowance through short reads. Each successful
@@ -259,7 +297,10 @@ func openLeafAt(ctx context.Context, parent *os.File, name string, access leafAc
 	if err := conn.Control(func(fd uintptr) {
 		child, openErr = openNativeLeaf(ctx, fd, parent.Name(), name, access)
 	}); err != nil {
-		return nil, err
+		if child != nil {
+			err = errors.Join(err, child.Close())
+		}
+		return nil, errors.Join(openErr, err)
 	}
 	return child, openErr
 }

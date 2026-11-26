@@ -5,12 +5,15 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 // readDirError returns the error the host itself produces reading dir, so every case below
@@ -102,4 +105,25 @@ func TestSoleCause(t *testing.T) {
 	if !errors.Is(SoleCause(deep), change) || SoleCause(errors.Join(deep)) != nil {
 		t.Fatal("expected a single leaf within 64 inspected errors only")
 	}
+}
+
+// TestMissingDirectoryWalkHasSharedDeadline spends most of the budget at the
+// leaf, then expires it at the parent. The third stat must never start.
+func TestMissingDirectoryWalkHasSharedDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		missing := fmt.Errorf("open corpus: %w", fs.ErrNotExist)
+		last := fmt.Errorf("stat parent: %w", fs.ErrNotExist)
+		calls := 0
+		absent, err := directoryAbsentContext(t.Context(), "missing/parent/leaf", missing, func(string) (os.FileInfo, error) {
+			calls++
+			time.Sleep(MaxIODuration/2 + time.Second)
+			return nil, last
+		})
+		if absent || calls != 2 || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ancestor walk: absent=%v calls=%d err=%v", absent, calls, err)
+		}
+		if !errors.Is(err, missing) || !errors.Is(err, last) || t.Context().Err() != nil {
+			t.Fatalf("ancestor walk lost a cause or canceled its parent: %v", err)
+		}
+	})
 }

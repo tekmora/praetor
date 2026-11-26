@@ -8,6 +8,7 @@ package contextopt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -259,5 +260,63 @@ func releaseBlockedBucket(t *testing.T, path string, done <-chan error) {
 		t.Logf("released directory opener returned %v", err)
 	case <-time.After(time.Second):
 		t.Error("directory opener still running after FIFO release")
+	}
+}
+
+// TestCanceledSuccessfulOpenClosesChild cancels after a real openat acquires a
+// descriptor. The next operation must see cancellation and the descriptor must be closed.
+func TestCanceledSuccessfulOpenClosesChild(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	parent := snapshotDirectory(t, t.TempDir())
+	file, err := parent.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	acquired := -1
+	child, err := openUnixLeaf(ctx, file.Fd(), file.Name(), ".", listDirectory, func(fd int, name string, flags int, mode uint32) (int, error) {
+		var openErr error
+		acquired, openErr = unix.Openat(fd, name, flags, mode)
+		cancel()
+		return acquired, openErr
+	})
+	if child != nil {
+		if closeErr := child.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+		t.Fatal("returned a child acquired after cancellation")
+	}
+	if acquired < 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("late open: fd=%d err=%v", acquired, err)
+	}
+	if err := unix.Fstat(acquired, &unix.Stat_t{}); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("late child descriptor still live: %v", err)
+	}
+}
+
+// TestFinalNativeAttemptCancellation preserves the exact last error whether
+// attempt eight is interrupted or returns a different terminal failure.
+func TestFinalNativeAttemptCancellation(t *testing.T) {
+	for _, final := range [...]error{unix.EINTR, unix.EIO} {
+		ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+		calls := 0
+		last := fmt.Errorf("final native response: %w", final)
+		_, err := retryInterrupted(ctx, func() (int, error) {
+			calls++
+			if calls == 8 {
+				cancel()
+				return -1, last
+			}
+			return -1, unix.EINTR
+		})
+		cancel()
+		if calls != 8 || !errors.Is(err, last) || !errors.Is(err, context.Canceled) {
+			t.Errorf("attempt eight returning %v: calls=%d err=%v", final, calls, err)
+		}
 	}
 }

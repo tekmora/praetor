@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // OpenDirectory pins a directory without following symlinks in any component.
@@ -23,7 +25,7 @@ func OpenDirectory(ctx context.Context, path string) (*os.Root, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := util.CheckedIO(ctx, func() (string, error) { return filepath.Abs(path) })
 	if err != nil {
 		return nil, err
 	}

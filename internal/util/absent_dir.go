@@ -5,6 +5,7 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -26,27 +27,37 @@ import (
 // A walk that exhausts its bound, or meets any error other than fs.ErrNotExist, reports
 // false, so the caller surfaces the original error instead of assuming there was nothing.
 func DirectoryAbsent(dir string, err error) bool {
-	if dir == "" || !SoleNotExist(err) {
-		return false
+	absent, inspectErr := DirectoryAbsentContext(context.Background(), dir, err)
+	return inspectErr == nil && absent
+}
+
+// DirectoryAbsentContext bounds the entire ancestor walk, including when the
+// caller has no deadline. A failed inspection accompanies the original open error.
+func DirectoryAbsentContext(ctx context.Context, dir string, err error) (bool, error) {
+	return directoryAbsentContext(ctx, dir, err, os.Stat)
+}
+
+// directoryAbsentContext takes each observation under the same walk deadline.
+func directoryAbsentContext(ctx context.Context, dir string, openErr error, stat func(string) (os.FileInfo, error)) (bool, error) {
+	if ctx == nil {
+		return false, errors.Join(openErr, os.ErrInvalid)
 	}
-	current := filepath.Clean(dir)
-	for i := 0; i < maxPathAncestorWalk; i++ {
-		info, statErr := os.Stat(current)
-		if statErr == nil {
-			// dir itself existing means the read failed for another reason: a file, or a
-			// directory that appeared after the read. Neither is absence.
-			return info.IsDir() && current != filepath.Clean(dir)
-		}
-		if !errors.Is(statErr, fs.ErrNotExist) {
-			return false
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return false
-		}
-		current = parent
+	if dir == "" || !SoleNotExist(openErr) {
+		return false, openErr
 	}
-	return false
+	ctx, cancel := context.WithTimeout(ctx, MaxIODuration)
+	defer cancel()
+	path := filepath.Clean(dir)
+	walk, err := walkToExistingAncestor(path, func(current string) (os.FileInfo, error) {
+		return CheckedIO(ctx, func() (os.FileInfo, error) { return stat(current) })
+	})
+	if err != nil {
+		return false, errors.Join(openErr, err)
+	}
+	if walk.existing == path || !walk.info.IsDir() {
+		return false, openErr
+	}
+	return true, nil
 }
 
 // SoleNotExist reports one missing-file cause through ordinary wrappers and singleton

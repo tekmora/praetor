@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt/winfileid"
+	"github.com/cordanaLLM/praetor/internal/util"
 	"golang.org/x/sys/windows"
 )
 
@@ -22,14 +23,14 @@ const readLeafAttributes leafAccess = listDirectory + 1
 type DirectoryIdentity = winfileid.Info
 
 // Identity queries the directory's retained handle for its full Windows identity.
-func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
-	return readFileID(dir.File)
+func (dir *SnapshotDirectory) Identity(ctx context.Context) (DirectoryIdentity, error) {
+	return readFileID(ctx, dir.File)
 }
 
 // openNativeLeaf opens the reparse point itself relative to the pinned parent handle.
 // Directory type is checked on the handle so a misplaced regular leaf stays distinct
 // from a missing bucket, including on Windows filesystems with ambiguous path errors.
-func openNativeLeaf(_ context.Context, parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
+func openNativeLeaf(ctx context.Context, parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
 	leaf, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return nil, err
@@ -48,23 +49,32 @@ func openNativeLeaf(_ context.Context, parent uintptr, parentName, name string, 
 		// A synchronous open would also require SYNCHRONIZE for an attribute query.
 		options = windows.FILE_OPEN_REPARSE_POINT
 	}
-	var handle windows.Handle
-	err = windows.NtCreateFile(&handle, rights, &attrs, &windows.IO_STATUS_BLOCK{},
-		nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		windows.FILE_OPEN, options, 0, 0)
+	file, err := util.CheckedIO(ctx, func() (*os.File, error) {
+		var handle windows.Handle
+		err := windows.NtCreateFile(&handle, rights, &attrs, &windows.IO_STATUS_BLOCK{},
+			nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			windows.FILE_OPEN, options, 0, 0)
+		if err != nil {
+			var status windows.NTStatus
+			if errors.As(err, &status) {
+				err = status.Errno()
+			}
+			return nil, err
+		}
+		return os.NewFile(uintptr(handle), filepath.Join(parentName, name)), nil
+	})
 	if err != nil {
-		var status windows.NTStatus
-		if errors.As(err, &status) {
-			err = status.Errno()
+		if file != nil {
+			err = errors.Join(err, file.Close())
 		}
 		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
 	}
-	return os.NewFile(uintptr(handle), filepath.Join(parentName, name)), nil
+	return file, nil
 }
 
 // readNames keeps each Windows directory record's kind for the later relative lookup.
-func (dir *SnapshotDirectory) readNames(_ context.Context, n int) ([]listedName, error) {
-	infos, readErr := dir.Readdir(n)
+func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
+	infos, readErr := util.CheckedIO(ctx, func() ([]os.FileInfo, error) { return dir.Readdir(n) })
 	names := make([]listedName, len(infos))
 	for i, info := range infos {
 		names[i] = listedName{name: info.Name(), kind: info.Mode().Type()}
@@ -88,19 +98,19 @@ func (dir *SnapshotDirectory) statListedName(ctx context.Context, name string) (
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
-	return statWindowsFixture(file)
+	return statWindowsFixture(ctx, file)
 }
 
 // statWindowsFixture obtains the current kind and, for regular files, FILE_ID_INFO on the same handle.
-func statWindowsFixture(file *os.File) (os.FileInfo, error) {
-	info, err := file.Stat()
+func statWindowsFixture(ctx context.Context, file *os.File) (os.FileInfo, error) {
+	info, err := statDescriptor(ctx, file)
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return info, nil
 	}
-	id, err := readFileID(file)
+	id, err := readFileID(ctx, file)
 	if err != nil {
 		return nil, err
 	}
@@ -108,12 +118,12 @@ func statWindowsFixture(file *os.File) (os.FileInfo, error) {
 }
 
 // checkIdentity compares the full listing identity with the handle used to copy the bytes.
-func (listed pinnedListing) checkIdentity(file *os.File, _ os.FileInfo) error {
+func (listed pinnedListing) checkIdentity(ctx context.Context, file *os.File, _ os.FileInfo) error {
 	before, ok := listed.FileInfo.(windowsListedInfo)
 	if !ok {
 		return ErrSourceIdentityUnavailable
 	}
-	opened, err := readFileID(file)
+	opened, err := readFileID(ctx, file)
 	if err != nil {
 		return err
 	}
@@ -124,13 +134,13 @@ func (listed pinnedListing) checkIdentity(file *os.File, _ os.FileInfo) error {
 }
 
 // readFileID retains the file handle for the duration of the FileIdInfo query.
-func readFileID(file *os.File) (winfileid.Info, error) {
+func readFileID(ctx context.Context, file *os.File) (winfileid.Info, error) {
 	var id winfileid.Info
 	conn, err := file.SyscallConn()
 	if err == nil {
 		var queryErr error
 		err = conn.Control(func(fd uintptr) {
-			queryErr = winfileid.Query(windows.Handle(fd), &id)
+			queryErr = winfileid.Query(ctx, windows.Handle(fd), &id)
 		})
 		err = errors.Join(err, queryErr)
 	}

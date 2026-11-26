@@ -1,11 +1,13 @@
 package hisscoverage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -44,4 +46,34 @@ func TestCorpusOpenFailurePreservesCleanup(t *testing.T) {
 	if util.DirectoryAbsent(path, err) {
 		t.Fatalf("accepted an empty fixture corpus after failed cleanup: %v", err)
 	}
+}
+
+// TestMissingCorpusSharesParentCancellation cancels the unbounded parent when
+// absence inspection requests its own deadline after the failed open.
+func TestMissingCorpusSharesParentCancellation(t *testing.T) {
+	requireNativeReplay(t)
+	parent, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx := &cancelOnAbsenceCheck{Context: parent, cancel: cancel}
+	var store fixtureStore
+	corpus, err := store.openCorpusSnapshot(ctx, t.TempDir(), catalogFor("HISS-01", "go", StateEnforced))
+	if corpus != nil || !errors.Is(err, os.ErrNotExist) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("missing corpus after cancellation: corpus=%v err=%v", corpus, err)
+	}
+}
+
+// cancelOnAbsenceCheck models an unbounded parent at the two independent I/O scopes.
+type cancelOnAbsenceCheck struct {
+	context.Context
+	cancel context.CancelFunc
+	scopes int
+}
+
+// Deadline admits the open and cancels when the ancestor walk derives its bound.
+func (c *cancelOnAbsenceCheck) Deadline() (time.Time, bool) {
+	c.scopes++
+	if c.scopes == 2 {
+		c.cancel()
+	}
+	return time.Time{}, false
 }

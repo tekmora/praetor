@@ -8,6 +8,7 @@ package contextopt
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,7 +36,9 @@ func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedNam
 			return nil, ctx.Err()
 		default:
 		}
-		batch, err := dir.readDirentBlock(ctx, readNativeDirents)
+		batch, err := dir.readDirentBlock(ctx, func(fd uintptr, buf []byte) (int, error) {
+			return readNativeDirents(ctx, fd, buf)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -62,7 +65,7 @@ func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context, read func(uin
 	if err := conn.Control(func(fd uintptr) {
 		size, readErr = retryInterrupted(ctx, func() (int, error) { return read(fd, buf[:]) })
 	}); err != nil {
-		return nil, err
+		return nil, errors.Join(err, readErr)
 	}
 	if readErr != nil {
 		return nil, &os.PathError{Op: "readdirent", Path: dir.Name(), Err: readErr}
@@ -101,7 +104,11 @@ func (dir *SnapshotDirectory) decodeDirents(ctx context.Context, buf []byte) ([]
 		if len(parsed) == 0 { // Native dot entries and unused directory slots.
 			continue
 		}
-		names = append(names, dir.observeDirent(ctx, parsed[0], record[typeOffset]))
+		listed := dir.observeDirent(ctx, parsed[0], record[typeOffset])
+		if listed.err != nil && ctx.Err() != nil {
+			return nil, errors.Join(listed.err, ctx.Err())
+		}
+		names = append(names, listed)
 	}
 	return names, nil
 }

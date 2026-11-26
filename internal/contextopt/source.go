@@ -104,23 +104,33 @@ func openDirectory(ctx context.Context, absolute string) (*os.Root, error) {
 	parent, leaf := filepath.Dir(absolute), filepath.Base(absolute)
 	if parent == absolute {
 		// The filesystem root has no ancestry to resolve and no leaf to check.
-		return os.OpenRoot(absolute)
+		return openCheckedRoot(ctx, absolute)
 	}
-	resolvedParent, err := filepath.EvalSymlinks(parent)
+	resolvedParent, err := util.CheckedIO(ctx, func() (string, error) { return filepath.EvalSymlinks(parent) })
 	if err != nil {
 		return nil, err
 	}
 	if err := validatePath(resolvedParent); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(filepath.Join(resolvedParent, leaf))
+	resolved := filepath.Join(resolvedParent, leaf)
+	info, err := util.CheckedIO(ctx, func() (os.FileInfo, error) { return os.Lstat(resolved) })
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("confinement root must be a directory, never a symlink: %s", absolute)
 	}
-	return os.OpenRoot(filepath.Join(resolvedParent, leaf))
+	return openCheckedRoot(ctx, resolved)
+}
+
+// openCheckedRoot releases the confinement root if its acquisition finishes late.
+func openCheckedRoot(ctx context.Context, path string) (*os.Root, error) {
+	root, err := util.CheckedIO(ctx, func() (*os.Root, error) { return os.OpenRoot(path) })
+	if err != nil && root != nil {
+		return nil, errors.Join(err, root.Close())
+	}
+	return root, err
 }
 
 // OpenDirectoryIn pins root/rel, with root as the confinement boundary.
@@ -355,16 +365,15 @@ func validateText(data []byte) error {
 	return nil
 }
 
+// contextReader applies the capture deadline to each synchronous byte read.
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
 }
 
+// Read preserves the byte count and both causes when a read finishes late.
 func (r contextReader) Read(buffer []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(buffer)
+	return util.CheckedIO(r.ctx, func() (int, error) { return r.reader.Read(buffer) })
 }
 
 // stableRead allocates only the observed payload size. A growing file cannot enlarge
@@ -398,14 +407,14 @@ func (dst *snapshotDestination) Write(p []byte) (int, error) {
 // exactly the size observed before opening was read and the file kept its identity,
 // size and modification time throughout.
 func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.FileInfo, limit int64) (int64, error) {
-	if err := checkOpenedSource(before, file); err != nil {
+	if err := checkOpenedSource(ctx, before, file); err != nil {
 		return 0, err
 	}
 	count, err := io.Copy(dst, io.LimitReader(contextReader{ctx, file}, limit+1))
 	if err != nil {
 		return 0, err
 	}
-	after, err := file.Stat()
+	after, err := statCopySource(ctx, file, before)
 	if err != nil {
 		return 0, err
 	}
@@ -427,9 +436,17 @@ var ErrSourceIdentityUnavailable = errors.New("source identity unavailable")
 // errSourceChangedWhileOpening identifies a mismatch between listing and copy handles.
 var errSourceChangedWhileOpening = errors.New("source changed while opening")
 
+// statCopySource preserves standard Go metadata for the os.Root snapshot identity check.
+func statCopySource(ctx context.Context, file *os.File, listed os.FileInfo) (os.FileInfo, error) {
+	if _, ok := listed.(pinnedListing); ok {
+		return statDescriptor(ctx, file)
+	}
+	return util.CheckedIO(ctx, file.Stat)
+}
+
 // checkOpenedSource checks the open handle against the observation supplied by its caller.
-func checkOpenedSource(listed os.FileInfo, file *os.File) error {
-	opened, err := file.Stat()
+func checkOpenedSource(ctx context.Context, listed os.FileInfo, file *os.File) error {
+	opened, err := statCopySource(ctx, file, listed)
 	if err != nil {
 		return err
 	}
@@ -437,7 +454,7 @@ func checkOpenedSource(listed os.FileInfo, file *os.File) error {
 		return ErrSourceNotRegular
 	}
 	if pinned, ok := listed.(pinnedListing); ok {
-		return pinned.checkIdentity(file, opened)
+		return pinned.checkIdentity(ctx, file, opened)
 	}
 	return checkStatIdentity(listed, opened)
 }

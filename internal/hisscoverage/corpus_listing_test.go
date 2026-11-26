@@ -44,7 +44,7 @@ func TestLanguageIdentityDeadline(t *testing.T) {
 }
 
 // delayedLanguageIdentity opens a distinct directory and delays its query result on the test clock.
-func delayedLanguageIdentity(t *testing.T, delay time.Duration, nativeErr error) func() (contextopt.DirectoryIdentity, error) {
+func delayedLanguageIdentity(t *testing.T, delay time.Duration, nativeErr error) func(context.Context) (contextopt.DirectoryIdentity, error) {
 	t.Helper()
 	dir, err := contextopt.OpenSnapshotDirectoryIn(t.Context(), t.TempDir(), ".")
 	if err != nil {
@@ -55,8 +55,11 @@ func delayedLanguageIdentity(t *testing.T, delay time.Duration, nativeErr error)
 			t.Error(err)
 		}
 	})
-	return func() (contextopt.DirectoryIdentity, error) {
-		id, err := dir.Identity()
+	return func(ctx context.Context) (contextopt.DirectoryIdentity, error) {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > contextopt.MaxDuration {
+			t.Fatal("descriptor query did not receive the identity deadline")
+		}
+		id, err := dir.Identity(ctx)
 		time.Sleep(delay)
 		return id, errors.Join(err, nativeErr)
 	}
@@ -67,7 +70,7 @@ func TestLanguageIdentitySkipsCanceledLookup(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	seen := make(languageDirectories)
-	err := seen.register(ctx, fixtureStage{}, func() (contextopt.DirectoryIdentity, error) {
+	err := seen.register(ctx, fixtureStage{}, func(context.Context) (contextopt.DirectoryIdentity, error) {
 		t.Fatal("identity lookup started after cancellation")
 		return contextopt.DirectoryIdentity{}, nil
 	})

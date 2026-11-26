@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // maxRetainedFixtureBytes caps backing arrays retained between fixture reads across a corpus.
@@ -51,18 +52,17 @@ func (s *fixtureStore) save(ctx context.Context, name string, data []byte) (capt
 		return file, nil
 	}
 	if s.spill == nil {
-		spill, err := os.CreateTemp("", "hiss-corpus-*")
-		if err != nil {
-			return file, fmt.Errorf("create fixture spill: %w", errors.Join(err, ctx.Err()))
+		spill, err := util.CheckedIO(ctx, func() (*os.File, error) { return os.CreateTemp("", "hiss-corpus-*") })
+		if spill != nil {
+			s.spill = spill // The store also owns a spill acquired after cancellation.
 		}
-		s.spill = spill
-	}
-	if err := ctx.Err(); err != nil {
-		return capturedFixture{}, err
+		if err != nil {
+			return file, fmt.Errorf("create fixture spill: %w", err)
+		}
 	}
 	file.offset = s.end
-	n, writeErr := s.spill.WriteAt(data, file.offset)
-	if err := errors.Join(writeErr, ctx.Err()); err != nil {
+	n, err := util.CheckedIO(ctx, func() (int, error) { return s.spill.WriteAt(data, file.offset) })
+	if err != nil {
 		return capturedFixture{}, fmt.Errorf("spill fixture: %w", err)
 	}
 	s.end += int64(n)
@@ -88,8 +88,8 @@ func (file capturedFixture) readSpill(ctx context.Context, spill io.ReaderAt) ([
 		return nil, err
 	}
 	data := make([]byte, file.size)
-	_, readErr := spill.ReadAt(data, file.offset)
-	if err := errors.Join(readErr, ctx.Err()); err != nil {
+	_, err := util.CheckedIO(ctx, func() (int, error) { return spill.ReadAt(data, file.offset) })
+	if err != nil {
 		return nil, fmt.Errorf("read spilled fixture: %w", err)
 	}
 	return data, nil

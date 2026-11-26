@@ -11,16 +11,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"time"
 
 	"github.com/cordanaLLM/praetor/internal/agentcontext"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 const (
 	MaxSources     = 64
 	MaxSourceBytes = 1 << 20
 	MaxTotalBytes  = 8 << 20
-	MaxDuration    = 30 * time.Second
+	MaxDuration    = util.MaxIODuration
 	MaxPathBytes   = 4096
 	MaxPathDepth   = 128
 )

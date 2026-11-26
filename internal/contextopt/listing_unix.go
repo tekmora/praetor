@@ -7,6 +7,7 @@ package contextopt
 
 import (
 	"context"
+	"errors"
 	"math"
 	"os"
 	"syscall"
@@ -22,17 +23,26 @@ type DirectoryIdentity struct {
 }
 
 // Identity returns the directory's identity from its retained descriptor.
-func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
-	info, err := dir.Stat()
+func (dir *SnapshotDirectory) Identity(ctx context.Context) (DirectoryIdentity, error) {
+	info, err := statUnixDescriptor(ctx, dir.File, unix.Fstat)
 	if err != nil {
 		return DirectoryIdentity{}, err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return DirectoryIdentity{}, ErrSourceIdentityUnavailable
+	return info.identity(), nil
+}
+
+// statDescriptor reads a pinned handle without the unbounded EINTR loop in os.File.Stat.
+func statDescriptor(ctx context.Context, file *os.File) (os.FileInfo, error) {
+	info, err := statUnixDescriptor(ctx, file, unix.Fstat)
+	if err != nil {
+		return nil, err
 	}
-	// Device numbers are opaque identifiers, including on platforms with a signed dev_t.
-	return DirectoryIdentity{uint64(stat.Dev), uint64(stat.Ino)}, nil //#nosec G115 -- preserves all device and inode bits
+	return info, nil
+}
+
+// statUnixDescriptor holds the handle while issuing individually checked fstat attempts.
+func statUnixDescriptor(ctx context.Context, file *os.File, fstat func(int, *unix.Stat_t) error) (*listedUnixInfo, error) {
+	return statUnixFD(ctx, file, file.Name(), "fstat", fstat)
 }
 
 // statListedName inspects one kernel-listed component relative to the retained descriptor.
@@ -45,7 +55,18 @@ func (dir *SnapshotDirectory) statListedName(ctx context.Context, name string) (
 func (dir *SnapshotDirectory) statUnixListedName(ctx context.Context, name string,
 	fstatat func(int, string, *unix.Stat_t, int) error,
 ) (os.FileInfo, error) {
-	conn, err := dir.SyscallConn()
+	info, err := statUnixFD(ctx, dir.File, name, "fstatat", func(fd int, stat *unix.Stat_t) error {
+		return fstatat(fd, name, stat, unix.AT_SYMLINK_NOFOLLOW)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// statUnixFD keeps the descriptor live across a bounded metadata lookup.
+func statUnixFD(ctx context.Context, file *os.File, name, op string, lookup func(int, *unix.Stat_t) error) (*listedUnixInfo, error) {
+	conn, err := file.SyscallConn()
 	if err != nil {
 		return nil, err
 	}
@@ -58,14 +79,11 @@ func (dir *SnapshotDirectory) statUnixListedName(ctx context.Context, name strin
 		}
 		parentFD := int(fd)
 		_, statErr = retryInterrupted(ctx, func() (int, error) {
-			return 0, fstatat(parentFD, name, &info.stat, unix.AT_SYMLINK_NOFOLLOW)
+			return 0, lookup(parentFD, &info.stat)
 		})
 	})
-	if err != nil {
-		return nil, err
-	}
-	if statErr != nil {
-		return nil, &os.PathError{Op: "fstatat", Path: name, Err: statErr}
+	if err := errors.Join(err, statErr); err != nil {
+		return nil, &os.PathError{Op: op, Path: name, Err: err}
 	}
 	return info, nil
 }
@@ -91,17 +109,32 @@ func (i *listedUnixInfo) IsDir() bool { return i.Mode().IsDir() }
 // Sys returns the native metadata used for the listing.
 func (i *listedUnixInfo) Sys() any { return &i.stat }
 
-// checkIdentity compares the fstatat device and inode to the opened descriptor's stat.
-func (listed pinnedListing) checkIdentity(_ *os.File, opened os.FileInfo) error {
-	info, ok := listed.FileInfo.(*listedUnixInfo)
+// identity treats device and inode numbers as opaque bit patterns.
+func (i *listedUnixInfo) identity() DirectoryIdentity {
+	return DirectoryIdentity{uint64(i.stat.Dev), uint64(i.stat.Ino)} //#nosec G115 -- preserves all device and inode bits
+}
+
+// checkIdentity compares native metadata with either a relative or a standard Go listing.
+func (listed pinnedListing) checkIdentity(_ context.Context, _ *os.File, opened os.FileInfo) error {
+	current, ok := opened.(*listedUnixInfo)
 	if !ok {
-		return checkStatIdentity(listed.FileInfo, opened)
+		return ErrSourceIdentityUnavailable
 	}
-	stat, ok := opened.Sys().(*syscall.Stat_t)
-	if !ok || info.stat.Dev != stat.Dev || info.stat.Ino != stat.Ino {
+	if before, ok := listed.FileInfo.(*listedUnixInfo); ok {
+		if before.identity() == current.identity() {
+			return nil
+		}
 		return errSourceChangedWhileOpening
 	}
-	return nil
+	// SameFile accepts only metadata issued by os. Preserve that requirement
+	// before comparing a standard listing to the native descriptor observation.
+	if !os.SameFile(listed.FileInfo, listed.FileInfo) {
+		return errSourceChangedWhileOpening
+	}
+	if stat, ok := listed.Sys().(*syscall.Stat_t); ok && stat.Dev == current.stat.Dev && stat.Ino == current.stat.Ino {
+		return nil
+	}
+	return errSourceChangedWhileOpening
 }
 
 // unixFileTypes maps the file kind bits returned by fstatat to Go file kinds.

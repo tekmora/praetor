@@ -6,17 +6,20 @@
 package contextopt
 
 import (
+	"context"
 	"math"
 
+	"github.com/cordanaLLM/praetor/internal/util"
 	"golang.org/x/sys/unix"
 )
 
 // readNativeDirents advances the existing descriptor by one native directory block.
-func readNativeDirents(fd uintptr, buf []byte) (int, error) {
+func readNativeDirents(ctx context.Context, fd uintptr, buf []byte) (int, error) {
 	if fd > math.MaxInt {
 		return 0, unix.EBADF
 	}
-	return unix.ReadDirent(int(fd), buf)
+	descriptor := int(fd)
+	return util.CheckedIO(ctx, func() (int, error) { return unix.ReadDirent(descriptor, buf) })
 }
 
 // direntNameFits follows from the checked d_reclen, which bounds the Linux name payload.

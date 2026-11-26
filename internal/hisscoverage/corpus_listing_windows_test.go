@@ -6,6 +6,7 @@
 package hisscoverage
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,13 +67,13 @@ func verifyWindowsFileID(t *testing.T, outcome string) {
 	var reads [2]int
 	readRecord := winfileid.ReadRecord
 	t.Cleanup(func() { winfileid.ReadRecord = readRecord })
-	winfileid.ReadRecord = func(handle windows.Handle, record *winfileid.Record) error {
+	winfileid.ReadRecord = func(ctx context.Context, handle windows.Handle, record *winfileid.Record) error {
 		if listed {
 			reads[1]++
 		} else {
 			reads[0]++
 		}
-		if err := readRecord(handle, record); err != nil {
+		if err := readRecord(ctx, handle, record); err != nil {
 			return err
 		}
 		return modelVolumeResponse(outcome, listed, record)
