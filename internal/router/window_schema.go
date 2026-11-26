@@ -25,7 +25,10 @@ func windowSnapshotDocument(data []byte) (any, error) {
 		Names:      strictjson.ExactNames,
 		UseNumber:  true,
 		ArrayLimit: &strictjson.ArrayLimit{Member: "records", MaxItems: catalog.MaxSnapshotRecords},
-		Messages:   strictjson.Messages{Items: "record count before decode: snapshot has %d records, exceeds %d"},
+		Messages: strictjson.Messages{
+			Items:     "record count before decode: snapshot has %d records, exceeds %d",
+			Duplicate: "duplicate JSON member %q",
+		},
 	}
 	var document any
 	if err := strictjson.Decode(data, &document, options); err != nil {

@@ -75,7 +75,7 @@ type Options struct {
 	MaxBytes   int       // input bytes accepted; a bound below 1 accepts nothing
 	MaxDepth   int       // array and object nesting accepted; a bound below 1 accepts no container
 	MaxTokens  int       // tokens accepted; below 1 the input length bounds them
-	Names      NameMatch // when two member names of one object are the same name
+	Names      NameMatch // member-name matching outside the root member named by ArrayLimit
 	Dialect    Dialect   // the syntax accepted; the zero value is strict JSON
 	RejectNull bool      // refuse every null literal
 	UseNumber  bool      // Decode keeps a number held in an interface value as json.Number
@@ -85,7 +85,8 @@ type Options struct {
 }
 
 // ArrayLimit bounds an array belonging to a named member of the root object. Member matches
-// case-insensitively so every spelling encoding/json can decode into the same field is bounded.
+// case-insensitively so every spelling encoding/json can decode into the same field is bounded
+// and a second such spelling is a duplicate even under ExactNames.
 type ArrayLimit struct {
 	Member   string
 	MaxItems int64
@@ -246,12 +247,15 @@ func (s *scan) member(text string, depth int) error {
 	if kind != jsontext.KindBeginObject || length%2 == 0 {
 		return nil
 	}
-	if depth == 1 && s.opts.ArrayLimit != nil {
-		s.bounded = strings.EqualFold(text, s.opts.ArrayLimit.Member)
-	}
 	name := text
 	if s.opts.Names == FoldedNames {
 		name = foldName(text)
+	}
+	if limit := s.opts.ArrayLimit; depth == 1 && limit != nil {
+		s.bounded = strings.EqualFold(text, limit.Member)
+		if s.bounded {
+			name = limit.Member
+		}
 	}
 	names := s.names[depth-1]
 	if names[name] {

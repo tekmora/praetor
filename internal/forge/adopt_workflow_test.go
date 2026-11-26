@@ -523,7 +523,7 @@ func runHeadLookup(t *testing.T, number, answer string, code int) stepOutcome {
 // its commit on the next.
 func headAnswer(repository, sha string) string { return repository + "\n" + sha }
 
-// TestAdoptWorkflowGoRelease exercises the shipped fallback with the pull request's go.mod.
+// TestAdoptWorkflowGoRelease exercises the shipped release resolver with the pull request's go.mod.
 func TestAdoptWorkflowGoRelease(t *testing.T) {
 	job := adoptJob(t, parseAdoptWorkflow(t), adoptCommentJob)
 	index := mustStepIndex(t, job, func(step workflowStep) bool { return step.ID == "go-release" })
@@ -537,6 +537,15 @@ func TestAdoptWorkflowGoRelease(t *testing.T) {
 		{"multiple", "go 1.27.3\ngo 1.27.4", "", "multiple go directives"},
 		{"missing", "// go 1.27.4", "", "no go directive"},
 		{"toolchain", "go 1.27.3\ntoolchain go1.27.4", "1.27.4", ""},
+		{"toolchain-comment", "go 1.27.3\ntoolchain go1.27.4 // preferred", "1.27.4", ""},
+		{"toolchain-whitespace", "\ttoolchain\tgo1.28rc1\r\ngo 1.27.3", "1.28rc1", ""},
+		{"toolchain-in-block", "go 1.27.3\nreplace (\n toolchain => ./local\n)", "1.27.3", ""},
+		{"multiple-toolchains", "go 1.27.3\ntoolchain go1.27.4\ntoolchain go1.27.5", "", "multiple toolchain directives"},
+		{"malformed-duplicate", "toolchain go1.27.4\ntoolchain", "", "multiple toolchain directives"},
+		{"toolchain-version", "toolchain go1.027.4", "", "invalid toolchain directive"},
+		{"toolchain-prefix", "go 1.27.3\ntoolchain 1.27.4", "", "invalid toolchain directive"},
+		{"toolchain-extra-field", "go 1.27.3\ntoolchain go1.27.4 extra", "", "invalid toolchain directive"},
+		{"multiple-go-with-toolchain", "go 1.27.3\ntoolchain go1.27.4\ngo 1.27.3", "", "multiple go directives"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

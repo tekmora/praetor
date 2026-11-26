@@ -80,6 +80,31 @@ func TestWindowRecordCountStopsAtFirstExcessToken(t *testing.T) {
 	}
 }
 
+// TestWindowDuplicateRecordsBeforeDecode splits 25,001 items across two spellings. The
+// truncated cases require a refusal at the second name, before the walk reads its value.
+func TestWindowDuplicateRecordsBeforeDecode(t *testing.T) {
+	full := strings.Repeat("{},", 24999) + "{}"
+	cases := [...]struct{ name, body, duplicate string }{
+		{"split-limit", `{"records":[` + full + `],"RECORDS":[{}]}`, "RECORDS"},
+		{"exact", `{"records":[],"records":[]}`, "records"},
+		{"folded-first", `{"RECORDS":[],"records":[`, "records"},
+		{"unicode-fold", `{"records":[],"record\u017f":[`, "record\u017f"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requireWindowReadError(t, routingInput(t, tc.body), "duplicate JSON member "+strconv.Quote(tc.duplicate))
+		})
+	}
+}
+
+// TestWindowRecordBoundKeepsMapKeys checks that the bound leaves case-sensitive map data intact.
+func TestWindowRecordBoundKeepsMapKeys(t *testing.T) {
+	data := []byte(`{"records":[{"absent":{"rate":"unknown","RATE":"unsupported"}}]}`)
+	if _, err := windowSnapshotDocument(data); err != nil {
+		t.Fatalf("distinct absent keys refused: %v", err)
+	}
+}
+
 // checkWindowByteLimit pads valid JSON with spaces so only the file's size changes.
 func checkWindowByteLimit(t *testing.T, seed string) {
 	t.Helper()
