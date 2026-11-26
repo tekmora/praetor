@@ -420,7 +420,10 @@ governance:
       max-a: {window_record: claude-code/five_hour}
 ```
 
-Readings come from a tribunus snapshot (`tribunusctl sync --out`): a record with
+Readings come from version 1 of the Epitrop catalog snapshot. To migrate an
+unversioned Tribunus file, use Epitrop v0.3.0-rc.1 to run
+`epitropctl sync --out <window-file>`, then pass that file to `--windows`.
+The router accepts up to 25,000 records and 64 MiB. A window reading is a record with
 `access_path: subscription_cli` and a `usage_window` (`used_percent`, `resets_at`, and,
 when the source measures them, `burn_percent_per_hour` and `active_agents`). The
 record's `provenance` gives the source and the age. `praetorctl models route --windows
@@ -428,7 +431,7 @@ record's `provenance` gives the source and the age. `praetorctl models route --w
 
 | Level | When | Admission |
 | :--- | :--- | :--- |
-| `unknown` | no snapshot, no record, a reading older than the maximum age or dated in the future, no `used_percent`, or a reset already past | refused |
+| `unknown` | no snapshot, no record, a reading older than the maximum age or more than one minute in the future, no `used_percent`, or a reset already past | refused |
 | `stop` | used at or above the stop line, or the projected burn reaches it within the horizon and before the reset | refused |
 | `warn` | used at or above the warn line, or the projected burn reaches the stop line before the reset | admitted, with advice to finish the unit and checkpoint |
 | `ok` | otherwise | admitted |
@@ -445,10 +448,8 @@ reaches the stop line no earlier than the reset.
 
 The tests in `internal/router/window_test.go` replay the acceptance cases of #1142, the
 warn and stop boundaries, and the agent-scaling fixture from the issue thread.
-Two sources write window records today: `codex-local`
-(`tribunus/internal/sources/codexlocal`), which copies the provider's own
-`used_percent`, and `claude-local` (`tribunus/internal/sources/claudelocal`), which
-derives one from the Claude Code session logs (`tribunusctl sync --sources=claude-local
+Epitrop's `codex-local` source copies the provider's own `used_percent`. Its
+`claude-local` source derives usage from Claude Code session logs (`epitropctl sync --sources=claude-local
 [--claude-projects-dir <dir>]`). A lane on any other client stays `unknown` until a
 source writes its records.
 
@@ -473,7 +474,7 @@ read.
 
 A ceiling outlives the logs it came from. `sync` keeps one store per account,
 `claude-ceilings/<account>.json` below `--claude-state-dir`. The default state dir is
-`praetor/tribunus` under the user's state folder: `$XDG_STATE_HOME` or
+`epitrop` under the user's state folder: `$XDG_STATE_HOME` or
 `~/.local/state`, `%LOCALAPPDATA%` on Windows. The store records each window's
 ceiling, the rejection that set it (time and log file), the reset it reported, and
 when it was recorded.
@@ -485,13 +486,11 @@ when it was recorded.
 - A store that does not decode or validate fails the source; it is never repaired or
   overwritten.
 
-`tribunusctl claude-limits` prints how often each `rateLimitType` and `quotaLimits`
+`epitropctl claude-limits` prints how often each `rateLimitType` and `quotaLimits`
 status value occurs in all session logs, and nothing else. On the office workstation
 on 2026-10-13 it found `five_hour` 148 times, all `rejected`, across 742 files; the
-weekly names (`seven_day`, `seven_day_<family>`) were not observed there. The tests in
-`tribunus/internal/sources/claudelocal` use synthetic logs only;
-`tribunus/cmd/tribunusctl/sync_windows_test.go` runs a produced snapshot through the
-governor.
+weekly names (`seven_day`, `seven_day_<family>`) were not observed there. The router replays the producer's tagged fixtures through the governor in
+`internal/router/window_contract_test.go`.
 
 `praetorctl models outcome --task <label> --target <t> --result ok|fail|timeout
 [--lane <name>] [--duration-ms n] [--note text] [identity flags]` appends one

@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// TestRoutingInputRejectsReplacementFIFOWithoutBlocking replaces a routing input with a FIFO after it
+// was inspected and expects the read to refuse it without blocking on the open.
 func TestRoutingInputRejectsReplacementFIFOWithoutBlocking(t *testing.T) {
 	path := routingInput(t, routingFixture)
 	inspected, err := os.Lstat(path)
@@ -26,7 +28,7 @@ func TestRoutingInputRejectsReplacementFIFOWithoutBlocking(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, err := readInspectedRoutingFile(ctx, path, inspected)
+		_, err := readInspectedRoutingFile(ctx, path, inspected, MaxRoutingFileBytes)
 		result <- err
 	}()
 	select {

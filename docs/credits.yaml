@@ -249,9 +249,22 @@ entries:
       - "go.mod"
     packages:
       - "go:github.com/pelletier/go-toml/v2"
+  - name: "Epitrop (eh-PEE-trop, from Greek epitropos, appointed trustee)"
+    url: "https://github.com/tekmora/epitrop"
+    detail: "(`github.com/tekmora/epitrop` v0.3.0-rc.1)"
+    section: "shipped"
+    kind: "dependency"
+    relation: "shipped"
+    license: "EUPL-1.2"
+    notice: "© 2026 lusoris"
+    use: "Defines the catalog snapshot and schema used by the subscription window governor"
+    paths:
+      - "go.mod"
+    packages:
+      - "go:github.com/tekmora/epitrop"
   - name: "go-yaml v3"
     url: "https://github.com/yaml/go-yaml"
-    detail: "(`go.yaml.in/yaml/v3` v3.0.5)"
+    detail: "(`go.yaml.in/yaml/v3` v3.0.6)"
     section: "shipped"
     kind: "dependency"
     relation: "shipped"
@@ -259,7 +272,7 @@ entries:
     notice: >-
       MIT for the files ported from libyaml, © 2006–2011 Kirill Simonov; Apache-2.0 for the rest, © 2011–2019
       Canonical Ltd
-    use: "YAML decoding and encoding; the only Go module the binaries link"
+    use: "YAML decoding and encoding"
     paths:
       - "go.mod"
     packages:
@@ -368,6 +381,19 @@ entries:
       - "tools/schemacheck/go.mod"
     packages:
       - "go:github.com/pelletier/go-toml/v2"
+  - name: "Epitrop (eh-PEE-trop, from Greek epitropos, appointed trustee)"
+    url: "https://github.com/tekmora/epitrop"
+    detail: "(`github.com/tekmora/epitrop` v0.3.0-rc.1)"
+    section: "shipped"
+    kind: "dependency"
+    relation: "shipped"
+    license: "EUPL-1.2"
+    notice: "© 2026 lusoris"
+    use: "Defines the catalog snapshot and schema used by the subscription window governor"
+    paths:
+      - "go.mod"
+    packages:
+      - "go:github.com/tekmora/epitrop"
   - name: "go-yaml v3"
     url: "https://github.com/go-yaml/yaml"
     detail: "(`gopkg.in/yaml.v3` v3.0.1)"

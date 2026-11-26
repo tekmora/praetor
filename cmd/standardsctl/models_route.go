@@ -36,6 +36,8 @@ type modelRouteReport struct {
 	RegisterManifestSHA256 string `json:"register_manifest_sha256"`
 }
 
+// addModelRouteFlags registers the models route flags on fs (task, capabilities, token estimates,
+// usage snapshot and the Epitrop window snapshot) and returns their pointers.
 func addModelRouteFlags(fs *flag.FlagSet) modelRouteFlags {
 	return modelRouteFlags{
 		task:         fs.String("task", "", "Declared target_tasks label for models route"),
@@ -43,7 +45,7 @@ func addModelRouteFlags(fs *flag.FlagSet) modelRouteFlags {
 		input:        fs.Int64("input-tokens", 0, "Optional estimated input tokens for cost and projected quota checks; with neither estimate the route ranks by configured rates"),
 		output:       fs.Int64("output-tokens", 0, "Optional estimated output tokens for cost and projected quota checks"),
 		usage:        fs.String("usage", "", "Optional bounded JSON capacity snapshot; requires an observation and positive RPM/TPM limits for the selected model"),
-		windows:      fs.String("windows", "", "Tribunus snapshot (tribunusctl sync --out) holding subscription window readings; without it every lane naming a governance.window account is refused as unknown"),
+		windows:      fs.String("windows", "", "Epitrop version 1 snapshot (epitropctl sync --out) holding subscription window readings; without it every lane naming a governance.window account is refused as unknown"),
 	}
 }
 
@@ -166,7 +168,7 @@ func modelRouteRequest(flags modelRouteFlags) (router.TaskRequest, error) {
 	return request, nil
 }
 
-// modelRouteWindows builds the subscription window governor from a tribunus snapshot read
+// modelRouteWindows builds the subscription window governor from an Epitrop snapshot read
 // now; no path leaves it nil, and governed lanes then refuse as unknown.
 func modelRouteWindows(ctx context.Context, cfg *router.RoutingConfig, path string) (*router.WindowGovernor, error) {
 	if path == "" {

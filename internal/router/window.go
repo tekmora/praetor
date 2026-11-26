@@ -1,17 +1,18 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math"
 	"time"
 
-	"github.com/cordanaLLM/praetor/tribunus/catalog"
+	"github.com/tekmora/epitrop/catalog"
 )
 
 // Subscription window governor (#1142). A subscription lane shares one rolling usage window
-// with every session and agent on its account; the governor reads that window from a tribunus
+// with every session and agent on its account; the governor reads that window from an Epitrop
 // snapshot and refuses new work on the lane before the window runs out. A reading without a
 // fresh source is unknown, and unknown refuses.
 const (
@@ -164,16 +165,23 @@ func checkLaneAccount(cfg *RoutingConfig, lane, account string) error {
 	return nil
 }
 
-// LoadWindowSnapshot reads a tribunus snapshot (tribunusctl sync --out) with the routing
-// reader's size and time bounds.
+// LoadWindowSnapshot reads an Epitrop catalog file and validates its pinned wire contract.
 func LoadWindowSnapshot(ctx context.Context, path string) (catalog.Snapshot, error) {
-	data, err := readRoutingFile(ctx, path)
+	data, err := readRoutingFile(ctx, path, maxWindowSnapshotBytes)
 	if err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
 	}
+	// Whitespace counts toward the file limit but carries no snapshot fields.
+	data = bytes.Trim(data, " \t\r\n")
 	snapshot, err := catalog.ParseSnapshot(data)
 	if err != nil {
+		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w; re-run epitropctl sync --out <window-file> to write a fresh version %d snapshot", path, err, catalog.SnapshotSchemaVersion)
+	}
+	if err := validateWindowSnapshotSchema(data); err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return catalog.Snapshot{}, err
 	}
 	return snapshot, nil
 }

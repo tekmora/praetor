@@ -12,6 +12,7 @@ import (
 	"regexp"
 
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/strictjson"
 	"github.com/cordanaLLM/praetor/internal/util"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -98,9 +99,9 @@ func ValidateUIScreenMatrix(data, schema []byte) error {
 	if schema == nil {
 		return nil
 	}
-	compiled, err := compileScreenMatrixSchema(schema)
+	compiled, err := strictjson.CompileSchema("https://schemas.praetor.invalid/a11y-check1.json", schema)
 	if err != nil {
-		return err
+		return fmt.Errorf("A11Y-CHECK1: %w", err)
 	}
 	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
 	if err != nil {
@@ -110,25 +111,6 @@ func ValidateUIScreenMatrix(data, schema []byte) error {
 		return fmt.Errorf("A11Y-CHECK1 schema validation: %w", err)
 	}
 	return nil
-}
-
-func compileScreenMatrixSchema(raw []byte) (*jsonschema.Schema, error) {
-	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-	if err != nil {
-		return nil, fmt.Errorf("decode A11Y-CHECK1 schema: %w", err)
-	}
-	compiler := jsonschema.NewCompiler()
-	compiler.DefaultDraft(jsonschema.Draft2020)
-	compiler.UseLoader(jsonschema.SchemeURLLoader{})
-	const identity = "https://schemas.praetor.invalid/a11y-check1.json"
-	if err := compiler.AddResource(identity, document); err != nil {
-		return nil, fmt.Errorf("add A11Y-CHECK1 schema: %w", err)
-	}
-	compiled, err := compiler.Compile(identity)
-	if err != nil {
-		return nil, fmt.Errorf("compile A11Y-CHECK1 schema: %w", err)
-	}
-	return compiled, nil
 }
 
 func checkScreenMatrixSpec(root, rel string) error {

@@ -6,12 +6,13 @@ languages:
     - typescript
     - svelte
     - python
-go_version: "1.27"
+go_version: 1.27.4
 capabilities:
     required:
         - telemetry.logging
         - config.toml
         - custom.github_com_santhosh_tekuri_jsonschema_v6
+        - custom.github_com_tekmora_epitrop
         - config.yaml
         - python.external.mkdocs
         - python.external.mkdocs_material
@@ -117,8 +118,15 @@ dependencies:
       capability: custom.github_com_santhosh_tekuri_jsonschema_v6
       status: gap
       notes: Third-party package without a target framework equivalent
+    - package: github.com/tekmora/epitrop
+      version: v0.3.0-rc.1
+      language: go
+      ecosystem: go
+      capability: custom.github_com_tekmora_epitrop
+      status: gap
+      notes: Third-party package without a target framework equivalent
     - package: go.yaml.in/yaml/v3
-      version: v3.0.5
+      version: v3.0.6
       language: go
       ecosystem: go
       capability: config.yaml
@@ -708,7 +716,7 @@ standard_library_imports:
 readiness:
     basis: not-configured
     score: 0
-    total_third_party_deps: 85
+    total_third_party_deps: 86
     covered_deps: 0
-    gap_deps: 85
-updated_at: 2026-11-15T21:35:35.768635607Z
+    gap_deps: 86
+updated_at: 2026-11-25T23:29:57.964806583Z
