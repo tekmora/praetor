@@ -89,9 +89,10 @@ func (d WindowDecision) Admits() bool {
 // WindowGovernor decides from one snapshot of readings at one instant. It keeps no counters:
 // a new snapshot makes a new governor.
 type WindowGovernor struct {
-	policy   WindowPolicy
-	readings map[string]catalog.Record
-	now      time.Time
+	policy        WindowPolicy
+	readings      map[string]catalog.Record
+	now           time.Time
+	emptySnapshot bool
 }
 
 // resolved returns the policy with its defaults filled in.
@@ -209,7 +210,12 @@ func NewWindowGovernor(cfg *RoutingConfig, snapshot catalog.Snapshot, now time.T
 	if err := snapshot.Validate(); err != nil {
 		return nil, fmt.Errorf("window snapshot: %w", err)
 	}
-	return &WindowGovernor{policy: cfg.Governance.Window.resolved(), readings: indexWindowReadings(snapshot), now: now}, nil
+	return &WindowGovernor{
+		policy:        cfg.Governance.Window.resolved(),
+		readings:      indexWindowReadings(snapshot),
+		now:           now,
+		emptySnapshot: len(snapshot.Records) == 0,
+	}, nil
 }
 
 // indexWindowReadings keys the subscription_cli records with a usage window by model_id,
@@ -244,7 +250,11 @@ func (g *WindowGovernor) Decide(account string) WindowDecision {
 	decision.Record = entry.WindowRecord
 	reading, ok := g.readings[entry.WindowRecord]
 	if !ok {
-		return decision.explain("no subscription_cli reading with a usage window for this record")
+		reason := "no subscription_cli reading with a usage window for this record"
+		if g.emptySnapshot {
+			reason += " (window snapshot is empty)"
+		}
+		return decision.explain(reason)
 	}
 	decision.Source = reading.Provenance.Source
 	age := int64(g.now.Sub(reading.Provenance.FetchedAt) / time.Second)

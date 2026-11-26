@@ -18,6 +18,29 @@ import (
 
 const contractSubscription = "codex-cli/codex"
 
+// TestWindowSnapshotZeroRecords checks the wire representations of a skip-only sync
+// and the route refusal when the task's only lane needs a subscription reading.
+func TestWindowSnapshotZeroRecords(t *testing.T) {
+	const snapshot = `{
+		"schema_version": 1,
+		"generated_at": "2026-10-13T12:00:00Z",
+		"records": [],
+		"source_runs": [{"source": "gateway", "status": "skip", "count": 0}]
+	}`
+	path := routingInput(t, snapshot)
+	t.Run("empty-array", func(t *testing.T) {
+		requireWindowRoute(t, path, windowRecordID, windowNow, WindowUnknown, "window snapshot is empty")
+	})
+	t.Run("null", func(t *testing.T) {
+		bad := mutateWindowFixture(t, path, `"records": []`, `"records": null`)
+		requireWindowReadError(t, bad, "at '/records': got null, want array")
+	})
+	t.Run("missing", func(t *testing.T) {
+		bad := mutateWindowFixture(t, path, `"records": [],`, "")
+		requireWindowReadError(t, bad, "missing property 'records'")
+	})
+}
+
 // windowContractCase selects one file or generation recipe and its producer expectations.
 type windowContractCase struct {
 	ID, File string
