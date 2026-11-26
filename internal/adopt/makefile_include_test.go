@@ -486,20 +486,27 @@ func TestTrackedNumericIncludeCase(t *testing.T) {
 	for _, name := range [...]string{"rcs", "sCcS", "RCS", "SCCS"} {
 		t.Run(name, func(t *testing.T) {
 			s := includeRepo(t, map[string]string{"123": "help:\n"}, "123")
-			if err := os.Mkdir(filepath.Join(s.repoPath, name), 0o750); err != nil {
-				t.Fatal(err)
-			}
-			_, statErr := os.Lstat(filepath.Join(s.repoPath, strings.ToUpper(name)))
-			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatal(statErr)
-			}
+			visible := makeRemakeDir(t, s.repoPath, name)
 			_, err := mergeWithIncludes(s, "include 123\n")
-			if statErr == nil && (err == nil || !strings.Contains(err.Error(), name)) {
+			if visible && (err == nil || !strings.Contains(err.Error(), name)) {
 				t.Errorf("visible remake source %q: merge error = %v", name, err)
 			}
-			if statErr != nil && err != nil {
+			if !visible && err != nil {
 				t.Errorf("tracked numeric include beside %q: %v", name, err)
 			}
 		})
 	}
+}
+
+// makeRemakeDir creates the directory and reports whether its uppercase spelling is visible.
+func makeRemakeDir(t *testing.T, repoPath, name string) bool {
+	t.Helper()
+	if err := os.Mkdir(filepath.Join(repoPath, name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Lstat(filepath.Join(repoPath, strings.ToUpper(name)))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return err == nil
 }
