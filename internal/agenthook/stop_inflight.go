@@ -40,13 +40,16 @@ func evaluateStopInflight(ctx context.Context, client string, stop Canonical, st
 	if err := visitClaudeMainTranscript(ctx, stop.TranscriptPath, work.visit); err != nil {
 		return inflightSkip(err.Error())
 	}
-	verdict := work.verdict(ctx, status)
-	verdict.Notice = appendLaneNotice(verdict.Notice, work.launchNotice)
-	return verdict
+	return work.verdict(ctx, status)
 }
 
 // verdict checks the live state of the known launches when the transcript has no pending waiter.
 func (work *inflightTranscript) verdict(ctx context.Context, status func(context.Context, []string) ([]string, error)) Verdict {
+	for _, unit := range work.units {
+		if !work.confirmed[unit] {
+			return inflightSkip("unconfirmed systemd-run launch of " + unit)
+		}
+	}
 	if len(work.units) == 0 || len(work.tasks) > 0 {
 		return Verdict{Outcome: Allow}
 	}

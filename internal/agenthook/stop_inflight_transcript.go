@@ -8,19 +8,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 )
 
 // inflightTranscript tracks background tool-use IDs until their receipts identify the actual task IDs.
 type inflightTranscript struct {
-	session      string
-	units        []string
-	calls        map[string]int
-	tasks        map[string]bool
-	sequence     int
-	ended        map[string]int
-	launchNotice string
+	session     string
+	units       []string
+	calls       map[string]int
+	tasks       map[string]bool
+	sequence    int
+	ended       map[string]int
+	confirmed   map[string]bool
+	launchCalls map[string][]string
 }
 
 // inflightBlock projects only the Claude tool and text fields used by the Stop check.
@@ -32,7 +32,7 @@ type inflightBlock struct {
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
 	IsError   bool            `json:"is_error"`
-	Text      string          `json:"text"`
+	Text      *string         `json:"text"`
 }
 
 // inflightRow keeps tool results opaque because Claude tools return different shapes.
@@ -52,8 +52,6 @@ type inflightRow struct {
 
 const maxInflightBlocks = 1024
 
-var backgroundReceiptID = regexp.MustCompile(`^Command running in background with ID: ([A-Za-z0-9_-]+)(?:[.[:space:]]|$)`)
-
 // visit consumes one JSONL record in order. Sidechain and foreign-session work cannot keep this session awake.
 func (w *inflightTranscript) visit(line []byte) error {
 	if len(line) > maxClaudeTranscriptLineBytes {
@@ -66,23 +64,29 @@ func (w *inflightTranscript) visit(line []byte) error {
 	if err := json.Unmarshal(line, &row); err != nil {
 		return fmt.Errorf("decode Claude transcript row: %w", err)
 	}
-	if !row.inSession(w.session) {
+	if row.Sidechain {
 		return nil
 	}
+	if row.SessionID != "" && w.session == "" {
+		return errors.New("missing Stop session_id for a session-tagged transcript row")
+	}
+	if row.SessionID != "" && row.SessionID != w.session {
+		return nil
+	}
+	return w.visitRow(&row)
+}
+
+// visitRow dispatches main-transcript records after checking their session tags.
+func (w *inflightTranscript) visitRow(row *inflightRow) error {
 	switch row.Type {
 	case "queue-operation":
-		return w.queuedNotification(&row)
+		return w.queuedNotification(row)
 	case "tool_use":
 		return w.toolUse(row.inflightBlock)
 	case "assistant", "user":
-		return w.message(&row)
+		return w.message(row)
 	}
 	return nil
-}
-
-// inSession excludes subagent traffic and rows explicitly belonging to a different conversation.
-func (row *inflightRow) inSession(session string) bool {
-	return !row.Sidechain && (session == "" || row.SessionID == "" || session == row.SessionID)
 }
 
 // queuedNotification reads task envelopes already enqueued for delivery to the session.
@@ -103,12 +107,26 @@ func (w *inflightTranscript) message(row *inflightRow) error {
 	if err != nil {
 		return err
 	}
+	if len(row.ToolUseResult) > 0 && !hasSingleInflightResult(blocks) {
+		row.ToolUseResult = nil
+	}
 	for _, block := range blocks {
 		if err := w.consume(row, block); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// hasSingleInflightResult checks whether the row's structured receipt has one possible owner.
+func hasSingleInflightResult(blocks []inflightBlock) bool {
+	results := 0
+	for _, block := range blocks {
+		if block.Type == "tool_result" {
+			results++
+		}
+	}
+	return results == 1
 }
 
 // inflightContentBlocks normalizes the two Claude content shapes and bounds the array before allocation.
@@ -156,7 +174,10 @@ func (w *inflightTranscript) consume(row *inflightRow, block inflightBlock) erro
 	}
 	switch block.Type {
 	case "text":
-		return w.notifications(row.Origin.Kind, block.Text)
+		if block.Text == nil {
+			return errors.New("Claude text block is missing text")
+		}
+		return w.notifications(row.Origin.Kind, *block.Text)
 	case "tool_result":
 		return w.toolResult(row.ToolUseResult, block)
 	}
@@ -180,10 +201,7 @@ func (w *inflightTranscript) toolUse(block inflightBlock) error {
 			return err
 		}
 	}
-	if err := w.launches(input.Command); err != nil && w.launchNotice == "" {
-		w.launchNotice = "In-flight unit check could not identify every launch: " + err.Error()
-	}
-	return nil
+	return w.launches(input.Command, block.ID)
 }
 
 // startCall records when the background request starts, pending its task-ID receipt.
@@ -205,46 +223,29 @@ func (w *inflightTranscript) startCall(id string) error {
 // toolResult binds a task only to the matching background call. A synchronous or failed result retires the request.
 func (w *inflightTranscript) toolResult(result json.RawMessage, block inflightBlock) error {
 	start, requested := w.calls[block.ToolUseID]
-	if !requested {
+	units := w.launchCalls[block.ToolUseID]
+	if !requested && len(units) == 0 {
 		return nil
 	}
+	receipt, err := readInflightReceipt(result, block.Content)
+	if err != nil {
+		if len(units) > 0 {
+			return fmt.Errorf("unconfirmed systemd-run launch of %s: %w", units[0], err)
+		}
+		return err
+	}
 	delete(w.calls, block.ToolUseID)
+	delete(w.launchCalls, block.ToolUseID)
 	if block.IsError {
 		return nil
 	}
-	id, err := backgroundTaskID(result, block.Content)
-	if err != nil {
-		return err
+	if len(units) > 0 {
+		w.confirmLaunches(units, receipt.output)
 	}
-	if id != "" && w.ended[id] < start {
-		w.tasks[id] = true
+	if requested && receipt.taskID != "" && w.ended[receipt.taskID] < start {
+		w.tasks[receipt.taskID] = true
 	}
 	return nil
-}
-
-// backgroundTaskID reads the structured Bash receipt, then the client-generated receipt text.
-func backgroundTaskID(result, content json.RawMessage) (string, error) {
-	var receipt struct {
-		TaskID string `json:"backgroundTaskId"`
-	}
-	if len(result) > 0 && result[0] == '{' {
-		if err := json.Unmarshal(result, &receipt); err != nil {
-			return "", fmt.Errorf("decode Claude background receipt: %w", err)
-		}
-	}
-	if receipt.TaskID != "" {
-		return receipt.TaskID, nil
-	}
-	blocks, err := inflightContentBlocks(content)
-	if err != nil {
-		return "", err
-	}
-	for _, block := range blocks {
-		if match := backgroundReceiptID.FindStringSubmatch(block.Text); block.Type == "text" && match != nil {
-			return match[1], nil
-		}
-	}
-	return "", nil
 }
 
 // notifications consumes consecutive terminal envelopes at the start of a user message, including older rows without origin.

@@ -1583,25 +1583,35 @@ Claude Code runs the command through its shell tool with `run_in_background: tru
 
 For Claude Code, `stop` reads the session transcript the stop event names and refuses a turn end
 while a systemd user unit the session launched still runs and nothing will wake the session when
-it ends (`internal/agenthook/stop_inflight.go`, `stop_inflight_launch.go`,
-`stop_inflight_transcript.go`):
+it ends. The check reads the transcript without executing its commands
+(`internal/agenthook/stop_inflight.go`, `stop_inflight_launch.go`,
+`stop_inflight_transcript.go`, `stop_inflight_receipt.go`).
 
-- **Launched units**: Bash commands that run `systemd-run --user --unit NAME` (or `--unit=NAME`),
-  at most 128 names; scope runs end with their call and are not counted, and command text is never
-  executed.
-- **Waiters**: background Bash tasks (`run_in_background`) with no later completed, failed or
-  killed notification for their task id.
-- **Live units**: one `systemctl --user is-active` call for all names, with a two-second deadline;
-  `active`, `activating` and `reloading` count as live.
+- **Launched units.** The check tracks up to 128 literal names from Bash calls to
+  `systemd-run --user --unit NAME` (or `--unit=NAME`). It excludes scope runs. A conditional
+  launch or one after an earlier command in a list needs a start line naming the unit in the
+  same Bash call's result.
+- **Waiters.** A background Bash request with a task ID in its receipt counts as a waiter until
+  a completed, failed or killed notification for that task arrives. When a message contains
+  several tool results, each supplies its own receipt. Row-level metadata applies only when the
+  message has exactly one result.
+- **Live units.** One `systemctl --user is-active` call checks all names with a two-second
+  deadline. The live states are `active`, `activating` and `reloading`.
 
 Live units and no waiter deny the stop, naming up to five units and asking for one background
 wait on them or for stopping them. The transcript read is bounded (64 MiB per file, 100,000
-lines, 8 MiB per row) and ignores sidechain and foreign-session rows. Whatever the check cannot
-know allows the stop with a named note: other clients, non-Linux hosts, a repeated stop
-(`stop_hook_active`), a missing, unreadable or oversized transcript, an unresolved background
-request, and a missing, slow or unreadable `systemctl` (`TestStopInflight`,
-`TestStopInflightStatusFailure`, `TestStopInflightUnavailable`, `TestStopInflightBatch`,
-`TestStopInflightNotifications`).
+lines, 8 MiB per row). The check ignores sidechains and rows tagged with a different session.
+Untagged rows use the transcript path from Stop. A tagged row requires the Stop event's
+`session_id` to establish ownership.
+
+The check allows Stop and names the reason when a launch cannot be parsed, exceeds the
+unit limit, or lacks required start evidence. The same applies when session ownership is
+unresolved or a pending Bash request has a missing, malformed or ambiguous receipt.
+Other named skips cover unsupported clients or hosts, repeated stops (`stop_hook_active`),
+missing, unreadable or oversized transcripts, and unavailable, timed-out or unreadable
+`systemctl` results. The Linux status and transcript fixtures are in
+`internal/agenthook/stop_inflight_status_test.go`. The native Stop fixtures are in
+`internal/agenthook/stop_inflight_test.go`.
 
 ### Prose-question check
 
