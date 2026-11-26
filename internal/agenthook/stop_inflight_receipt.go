@@ -39,7 +39,7 @@ func readInflightReceipt(result, content json.RawMessage) (inflightReceipt, erro
 		}
 	}
 	if receipt.taskID == "" && len(receipt.output) == 0 {
-		return receipt, errors.New("Claude Bash receipt has no result evidence")
+		return receipt, errors.New("no result evidence in Claude Bash receipt")
 	}
 	return receipt, nil
 }
@@ -74,7 +74,7 @@ func (r *inflightReceipt) addText(text string) error {
 		return nil
 	}
 	if r.taskID != "" && r.taskID != match[1] {
-		return errors.New("Claude Bash receipt has conflicting background task IDs")
+		return errors.New("conflicting background task IDs in Claude Bash receipt")
 	}
 	r.taskID = match[1]
 	return nil

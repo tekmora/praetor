@@ -175,7 +175,7 @@ func (w *inflightTranscript) consume(row *inflightRow, block inflightBlock) erro
 	switch block.Type {
 	case "text":
 		if block.Text == nil {
-			return errors.New("Claude text block is missing text")
+			return errors.New("missing text in Claude text block")
 		}
 		return w.notifications(row.Origin.Kind, *block.Text)
 	case "tool_result":
