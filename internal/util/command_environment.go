@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -103,4 +104,18 @@ func commandEnvironment(ctx context.Context, cmd *exec.Cmd) []string {
 		return append([]string{}, environment...)
 	}
 	return FilterEnvironment(cmd.Environ(), isGitRepositoryVariable)
+}
+
+// WithCommandEnvironmentEntry sets one variable on the effective child environment,
+// preserving an explicitly isolated environment installed by WithCommandEnvironment.
+func WithCommandEnvironmentEntry(ctx context.Context, name, value string) (context.Context, error) {
+	if ctx == nil || name == "" || strings.ContainsAny(name, "=\x00") || strings.ContainsRune(value, 0) {
+		return nil, fmt.Errorf("invalid command environment entry %q", name)
+	}
+	entry := name + "=" + value
+	if env, ok := ctx.Value(commandEnvironmentKey{}).([]string); ok {
+		key := foldEnvironmentName(name)
+		return WithCommandEnvironment(ctx, append(FilterEnvironment(env, func(n string) bool { return n == key }), entry))
+	}
+	return WithCommandEnvironment(ctx, InheritedEnvironment([]string{entry}))
 }

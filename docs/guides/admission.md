@@ -38,6 +38,18 @@ ends:
 An agent runs `praetorctl admit` as a background command. Its client then reports the step's end,
 and the admission line in the output shows when the step started.
 
+Local admission allows three concurrent builders by default. Set
+`PRAETOR_ADMIT_MAX_LOCAL_BUILDERS` to change the default or pass `--max-local-builders N`
+for one invocation. Both accept positive integers. When all slots are occupied the caller
+polls until a lease is released or `--wait` expires. The refusal names the occupancy,
+for example `admit: local builders 3 of 3 busy`.
+
+A nested `praetorctl admit` inside a local step rechecks host headroom and runs in the
+outer step’s scope using its slot. The child environment carries the lease holder’s PID in
+`PRAETOR_ADMIT_LOCAL_LEASE_PID`. Admission verifies that an ancestor with that PID holds
+a live local lease. The lease check uses the same Unix advisory locks as remote executor
+accounting. An exited holder releases its lock even if its file survives.
+
 ## Remote executor inventory
 
 Publish a JSON array of 1–32 entries in a regular file of at most 64 KiB. Each object requires

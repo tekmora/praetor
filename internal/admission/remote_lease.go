@@ -7,6 +7,7 @@
 package admission
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -17,15 +18,27 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
+
+// leaseIOTimeout bounds an attempt to inspect the local runtime directory and its locks.
+const leaseIOTimeout = 5 * time.Second
 
 // AdmitExecutorLease creates and locks a per-step lease file under the user's runtime directory
 // (<dir>/praetor-admit-leases/<executor>/<pid>-<random>.lock) and returns the inclusive count of
 // live steps holding a flock lease on that executor across processes, along with a release
-// closure that unlocks and removes the lease file when the step ends.
-func AdmitExecutorLease(name string) (concurrent int, release func() error, resultErr error) {
+// closure that unlocks and removes the lease file when the step ends. A positive limit
+// makes the reservation atomic with the cap decision. When full, the result is the
+// number of other live builders and a nil release. Zero requests an uncapped count.
+func AdmitExecutorLease(ctx context.Context, name string, limit int) (concurrent int, release func() error, resultErr error) {
+	ctx, cancel := context.WithTimeout(ctx, leaseIOTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	dir, err := executorLeaseDir(name)
 	if err != nil {
 		return 0, nil, err
@@ -36,21 +49,43 @@ func AdmitExecutorLease(name string) (concurrent int, release func() error, resu
 	}
 	defer func() {
 		resultErr = errors.Join(resultErr, root.Close())
+		if resultErr != nil && release != nil {
+			resultErr = errors.Join(resultErr, release())
+			concurrent, release = 0, nil
+		}
 	}()
-	ownName, releaseLease, err := createExecutorLease(name, dir, root)
+	// Serialize local publication and counting so simultaneous contenders cannot
+	// all count one another's tentative leases and turn away from an empty host.
+	if limit > 0 {
+		unlock, err := contextopt.LockDirectory(ctx, root)
+		if err != nil {
+			return 0, nil, fmt.Errorf("admit: local builder reservation: %w", err)
+		}
+		defer func() { resultErr = errors.Join(resultErr, unlock()) }()
+	}
+	return reserveExecutorLease(ctx, name, root, limit)
+}
+
+// reserveExecutorLease retains an accepted lease and withdraws an over-cap candidate
+// before the next contender can count it.
+func reserveExecutorLease(ctx context.Context, name string, root *os.Root, limit int) (int, func() error, error) {
+	ownName, releaseLease, err := createExecutorLease(name, root.Name(), root)
 	if err != nil {
 		return 0, nil, err
 	}
-	count, err := countExecutorLeases(name, ownName, root)
+	count, err := countExecutorLeases(ctx, name, ownName, root)
 	if err != nil {
 		return 0, nil, errors.Join(err, releaseLease())
 	}
-	return count, releaseLease, nil
+	if limit > 0 && count > limit {
+		return count - 1, nil, releaseLease()
+	}
+	return count, releaseLease, ctx.Err()
 }
 
 // executorLeaseDir returns the private local runtime directory path used for holding executor lease files.
 func executorLeaseDir(name string) (string, error) {
-	if !validExecutorName(name) {
+	if name != localExecutor && !validExecutorName(name) {
 		return "", fmt.Errorf("executor %s: invalid or reserved executor name", name)
 	}
 	base := os.Getenv("XDG_RUNTIME_DIR")
@@ -125,14 +160,14 @@ const maxExecutorLeaseDirEntries = 1024
 
 // countExecutorLeases tallies the active advisory file locks currently held for the specified
 // executor, refusing admission when lock files exceed maxExecutorLeaseFiles.
-func countExecutorLeases(name, ownName string, root *os.Root) (int, error) {
+func countExecutorLeases(ctx context.Context, name, ownName string, root *os.Root) (int, error) {
 	peers, err := peerExecutorLeaseNames(name, ownName, root)
 	if err != nil {
 		return 0, err
 	}
 	concurrent := 1
 	for i := 0; i < len(peers) && i < maxExecutorLeaseFiles; i++ {
-		held, err := probeExecutorLease(name, root, peers[i])
+		held, err := probeExecutorLease(ctx, name, root, peers[i])
 		if err != nil {
 			return 0, err
 		}
@@ -187,7 +222,10 @@ func readExecutorLeaseEntries(name string, root *os.Root) ([]os.DirEntry, error)
 }
 
 // probeExecutorLease tests whether a lease file is actively locked, removing stale unheld lock files.
-func probeExecutorLease(name string, root *os.Root, entryName string) (bool, error) {
+func probeExecutorLease(ctx context.Context, name string, root *os.Root, entryName string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("executor %s: lease scan: %w", name, err)
+	}
 	unlock, busy, err := util.LockPrivateFile(root, entryName, os.O_RDONLY, "executor "+name+" lease")
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

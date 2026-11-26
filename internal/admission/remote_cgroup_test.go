@@ -188,7 +188,7 @@ func TestAdmitExecutorLease_Positive_TwoConcurrentSteps(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	leaseDir, stale := plantStaleExecutorLease(t, runtimeDir, "home")
 	stopOther := startSubprocessLeaseHolder(t, "home", "TestAdmitExecutorLease_Positive_TwoConcurrentSteps")
-	concurrent, release, err := AdmitExecutorLease("home")
+	concurrent, release, err := AdmitExecutorLease(t.Context(), "home", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func assertSingleStepAfterRelease(t *testing.T, leaseDir string) {
 // assertSingleLeaseRound acquires and immediately releases an executor lease to verify clean state.
 func assertSingleLeaseRound(t *testing.T) {
 	t.Helper()
-	concurrent, release, err := AdmitExecutorLease("home")
+	concurrent, release, err := AdmitExecutorLease(t.Context(), "home", 0)
 	if err != nil || concurrent != 1 || StepParallelismJobs(12, concurrent) != 12 {
 		t.Fatalf("single step lease round: concurrent=%d err=%v", concurrent, err)
 	}
@@ -260,7 +260,7 @@ func TestAdmitExecutorLease_Negative_UnreadableLeaseDirectoryRefused(t *testing.
 			t.Error(err)
 		}
 	})
-	_, release, err := AdmitExecutorLease("home")
+	_, release, err := AdmitExecutorLease(t.Context(), "home", 0)
 	if release != nil {
 		if closeErr := release(); closeErr != nil {
 			t.Error(closeErr)
@@ -287,7 +287,7 @@ func runSubprocessLeaseHolder(t *testing.T) bool {
 	if name == "" {
 		return false
 	}
-	_, release, err := AdmitExecutorLease(name)
+	_, release, err := AdmitExecutorLease(t.Context(), name, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestAdmitExecutorLease_Boundary_TempDirFallbackAndExactCap(t *testing.T) {
 	leaseDir := filepath.Join(tmpDir, "praetor-admit-"+strconv.Itoa(os.Getuid()), executorLeasesDir, "home")
 	stopOther := startSubprocessLeaseHolder(t, "home", "TestAdmitExecutorLease_Boundary_TempDirFallbackAndExactCap")
 	plantStaleLockCount(t, leaseDir, maxExecutorLeaseFiles-2)
-	concurrent, release, err := AdmitExecutorLease("home")
+	concurrent, release, err := AdmitExecutorLease(t.Context(), "home", 0)
 	if err != nil || concurrent != 2 {
 		t.Fatalf("at 256 lock files: concurrent=%d err=%v, want 2 nil", concurrent, err)
 	}
@@ -398,7 +398,7 @@ func TestAdmitExecutorLease_Negative_PastCapRefused(t *testing.T) {
 // assertRefusedAtLeaseCap verifies that AdmitExecutorLease refuses with ErrExecutorLeaseCap and removes its own lock file.
 func assertRefusedAtLeaseCap(t *testing.T, leaseDir string, wantRemaining int) {
 	t.Helper()
-	concurrent, release, err := AdmitExecutorLease("home")
+	concurrent, release, err := AdmitExecutorLease(t.Context(), "home", 0)
 	if !errors.Is(err, ErrExecutorLeaseCap) || !strings.Contains(err.Error(), "executor home:") ||
 		concurrent != 0 || release != nil {
 		t.Fatalf("past cap (%d existing + own): concurrent=%d release=%v err=%v", wantRemaining, concurrent, release != nil, err)

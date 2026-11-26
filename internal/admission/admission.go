@@ -12,6 +12,7 @@ package admission
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -121,27 +122,59 @@ const maxPolls = 100000
 // Wait reads the host until Judge admits, writing one line per held reading. A failed reading
 // refuses at once (fail closed); a wait past MaxWait refuses with the last reason.
 func (w Waiter) Wait(ctx context.Context, label string) (Verdict, error) {
+	return w.wait(ctx, label, w.readHost)
+}
+
+// readHost evaluates the host policy once, failing closed on a missing reading.
+func (w Waiter) readHost() (Verdict, error) {
+	stats, err := w.Read()
+	if err != nil {
+		return Verdict{}, fmt.Errorf("host reading failed, refused: %w", err)
+	}
+	return Judge(stats, w.Policy), nil
+}
+
+// wait polls one admission decision until it succeeds or the wait budget expires.
+func (w Waiter) wait(ctx context.Context, label string, read func() (Verdict, error)) (Verdict, error) {
 	deadline := time.Now().Add(w.MaxWait)
-	for i := 0; i < maxPolls; i++ {
-		stats, err := w.Read()
-		if err != nil {
-			return Verdict{}, fmt.Errorf("admission %s: host reading failed, refused: %w", label, err)
+	var verdict Verdict
+	for range maxPolls {
+		if err := ctx.Err(); err != nil {
+			return verdict, fmt.Errorf("admission %s: %w (%s)", label, err, verdict.Reason)
 		}
-		verdict := Judge(stats, w.Policy)
+		current, err := read()
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && verdict.Reason != "" {
+				return verdict, fmt.Errorf("admission %s: still held (%s): %w", label, verdict.Reason, err)
+			}
+			return current, fmt.Errorf("admission %s: %w", label, err)
+		}
+		verdict = current
 		if verdict.Admit {
 			return verdict, nil
 		}
-		if !time.Now().Add(w.Poll).Before(deadline) {
-			return verdict, fmt.Errorf("admission %s: still held after %s (%s), refused", label, w.MaxWait, verdict.Reason)
-		}
-		if _, err := fmt.Fprintf(w.Log, "%s admission wait %s: %s\n", time.Now().Format("15:04:05"), label, verdict.Reason); err != nil {
+		if err := w.waitHeld(ctx, label, verdict, deadline); err != nil {
 			return verdict, err
 		}
-		if err := w.Sleep(ctx, w.Poll); err != nil {
-			return verdict, fmt.Errorf("admission %s: %w", label, err)
+	}
+	return verdict, fmt.Errorf("admission %s: more than %d readings, refused (%s)", label, maxPolls, verdict.Reason)
+}
+
+// waitHeld sleeps at most the remaining budget and keeps the last refusal reason on timeout.
+func (w Waiter) waitHeld(ctx context.Context, label string, verdict Verdict, deadline time.Time) error {
+	if remaining := time.Until(deadline); remaining > 0 {
+		if _, err := fmt.Fprintf(w.Log, "%s admission wait %s: %s\n", time.Now().Format("15:04:05"), label, verdict.Reason); err != nil {
+			return err
+		}
+		err := w.Sleep(ctx, min(w.Poll, remaining))
+		if err != nil {
+			return fmt.Errorf("admission %s: still held (%s): %w", label, verdict.Reason, err)
+		}
+		if time.Now().Before(deadline) {
+			return nil
 		}
 	}
-	return Verdict{}, fmt.Errorf("admission %s: more than %d readings, refused", label, maxPolls)
+	return fmt.Errorf("admission %s: still held after %s (%s), refused", label, w.MaxWait, verdict.Reason)
 }
 
 // HostReader reads the live host through internal/sentinel; path names the disk sentinel reads.

@@ -289,7 +289,7 @@ func runAdmitSubprocessLeaseHolder(t *testing.T) bool {
 	if name == "" {
 		return false
 	}
-	_, release, err := admission.AdmitExecutorLease(name)
+	_, release, err := admission.AdmitExecutorLease(t.Context(), name, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

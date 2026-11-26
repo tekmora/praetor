@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
+
+type: fixed
+title: Limit concurrent local builders to three by default and reuse the parent slot for nested admissions
+breaking: false

@@ -5,22 +5,27 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/admission"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // admitUsage is the usage line `admit` prints on a malformed call.
-const admitUsage = "usage: praetorctl admit [--local] [--fallback MODE] [--label L] [--memory-high 16G] [--memory-max 24G] [--memory-swap-max 4G] [--min-available-gib 12] " +
+const admitUsage = "usage: praetorctl admit [--local] [--max-local-builders N] [--fallback MODE] [--label L] [--memory-high 16G] [--memory-max 24G] [--memory-swap-max 4G] [--min-available-gib 12] " +
 	"[--min-swap-free-gib 15] [--max-load N] [--wait 6h] [--timeout 6h] -- <command> [args...]"
 
 const admitExecutorEnv = "PRAETOR_ADMIT_EXECUTOR"
 const admitExecutorsEnv = "PRAETOR_ADMIT_EXECUTORS"
+const admitBuilderLimitEnv = "PRAETOR_ADMIT_MAX_LOCAL_BUILDERS"
+const admitLocalLeaseEnv = "PRAETOR_ADMIT_LOCAL_LEASE_PID"
 
 // maxAdmitGiB bounds the memory thresholds a call may ask for, far above any workstation.
 const maxAdmitGiB = 1 << 20
@@ -35,6 +40,7 @@ type admitOptions struct {
 	argv         []string
 	local        bool
 	defaultLoad  bool
+	maxBuilders  int
 	fallbackMode string
 }
 
@@ -48,32 +54,66 @@ func runAdmit(args []string) error {
 		return err
 	}
 	mode := os.Getenv(admitExecutorEnv)
-	if opts.local || mode == "local" {
-		return runLocalAdmit(opts)
-	}
-	if mode != "" {
+	if !opts.local && mode != "" && mode != "local" {
 		return fmt.Errorf("invalid %s=%q, use local or leave it unset", admitExecutorEnv, mode)
+	}
+	ctx, cancel := commandContext(opts.wait)
+	defer cancel()
+	nested, err := admission.InheritedLocalLease(ctx, os.Getenv(admitLocalLeaseEnv))
+	if err != nil {
+		return err
+	}
+	if nested || opts.local || mode == "local" {
+		return runLocalAdmit(opts, nested)
 	}
 	return runRemoteAdmit(opts, os.Getenv(admitExecutorsEnv))
 }
 
-// runLocalAdmit waits for local host admission and runs the step on the workstation.
-func runLocalAdmit(opts admitOptions) error {
+// runLocalAdmit waits for local host admission and holds the slot until the step exits.
+func runLocalAdmit(opts admitOptions, nested bool) (resultErr error) {
 	ctx, cancel := commandContext(opts.wait)
 	defer cancel()
 	label := opts.label + " on local (named)"
 	waiter := admission.Waiter{Policy: opts.policy, MaxWait: opts.wait, Poll: opts.poll,
 		Read: admission.HostReader("."), Sleep: admission.SleepContext, Log: os.Stderr}
-	verdict, err := waiter.Wait(ctx, label)
+	var verdict admission.Verdict
+	var err error
+	if nested {
+		verdict, err = waiter.Wait(ctx, label)
+	} else {
+		var release func() error
+		verdict, release, err = waiter.WaitLocal(ctx, label, opts.maxBuilders)
+		if release != nil {
+			defer func() { resultErr = errors.Join(resultErr, release()) }()
+		}
+	}
 	if err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("admission %s: %w", label, err)
 	}
 	if err := logAdmitted(label, verdict); err != nil {
 		return err
 	}
 	stepCtx, stepCancel := commandContext(opts.timeout)
 	defer stepCancel()
-	return childExitStatus(admission.Run(stepCtx, admission.DefaultStep(label, opts.argv, opts.limits)))
+	step := admission.DefaultStep(label, opts.argv, opts.limits)
+	return runLocalStep(stepCtx, step, nested)
+}
+
+// runLocalStep publishes the lease owner only to its child. Nested steps retain the
+// original owner and execute directly so their processes remain in the outer scope.
+func runLocalStep(ctx context.Context, step admission.Step, nested bool) error {
+	step.InheritScope = nested
+	if !nested {
+		marked, err := util.WithCommandEnvironmentEntry(ctx, admitLocalLeaseEnv, strconv.Itoa(os.Getpid()))
+		if err != nil {
+			return err
+		}
+		ctx = marked
+	}
+	return childExitStatus(admission.Run(ctx, step))
 }
 
 // runRemoteAdmit loads the remote executor list, waits for an admitted host, and executes the step remotely.
@@ -100,7 +140,7 @@ func runRemoteAdmit(opts admitOptions, path string) error {
 
 // runAdmittedRemoteStep acquires an executor lease, calculates job parallelism, and executes the step on the admitted remote host.
 func runAdmittedRemoteStep(opts admitOptions, executor admission.Executor, info admission.RemoteAdmitInfo, verdict admission.Verdict) (resultErr error) {
-	concurrent, releaseLease, err := admission.AdmitExecutorLease(executor.Name)
+	concurrent, releaseLease, err := admission.AdmitExecutorLease(rootContext(), executor.Name, 0)
 	if err != nil {
 		return err
 	}
@@ -122,7 +162,7 @@ func runAdmittedRemoteStep(opts admitOptions, executor admission.Executor, info 
 			time.Now().Format("15:04:05"), executor.Name); werr != nil {
 			return werr
 		}
-		return errors.Join(releaseLease(), runLocalAdmit(opts))
+		return errors.Join(releaseLease(), runLocalAdmit(opts, false))
 	}
 	return admitStatus(code, err)
 }
@@ -160,6 +200,7 @@ func parseAdmit(args []string) (admitOptions, error) {
 	fs := flag.NewFlagSet("admit", flag.ContinueOnError)
 	label := fs.String("label", "", "name of the step in admission lines and its scope (default: the command's name)")
 	local := fs.Bool("local", false, "run on the workstation explicitly; otherwise use "+admitExecutorsEnv)
+	limitText := fs.String("max-local-builders", localBuilderDefault(), "maximum concurrent local builders (default from "+admitBuilderLimitEnv+")")
 	fallback := fs.String("fallback", "", "when a remote executor loses a step mid-run, run on the workstation if MODE is local")
 	high := fs.String("memory-high", "16G", "MemoryHigh of the step's scope: above it the kernel reclaims from the step")
 	limit := fs.String("memory-max", "24G", "MemoryMax of the step's scope: above it the kernel swaps the step out")
@@ -185,8 +226,12 @@ func parseAdmit(args []string) (admitOptions, error) {
 	if *fallback != "" && *fallback != "local" {
 		return admitOptions{}, fmt.Errorf("--fallback %q is invalid, use local", *fallback)
 	}
+	maxBuilders, err := strconv.Atoi(*limitText)
+	if err != nil || maxBuilders < 1 {
+		return admitOptions{}, fmt.Errorf("--max-local-builders (%s) requires a positive integer, got %q", admitBuilderLimitEnv, *limitText)
+	}
 	opts := admitOptions{label: *label, policy: policy, limits: admission.Limits{MemoryHigh: *high, MemoryMax: *limit, MemorySwapMax: *swapMax},
-		wait: *wait, poll: *poll, timeout: *timeout, argv: argv, local: *local, defaultLoad: true, fallbackMode: *fallback}
+		maxBuilders: maxBuilders, wait: *wait, poll: *poll, timeout: *timeout, argv: argv, local: *local, defaultLoad: true, fallbackMode: *fallback}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "max-load" {
 			opts.defaultLoad = false
@@ -196,6 +241,14 @@ func parseAdmit(args []string) (admitOptions, error) {
 		opts.label = argv[0]
 	}
 	return opts, opts.validate()
+}
+
+// localBuilderDefault supplies the fleet cap unless the operator configured a default.
+func localBuilderDefault() string {
+	if value, exists := os.LookupEnv(admitBuilderLimitEnv); exists {
+		return value
+	}
+	return "3"
 }
 
 // admitPolicy constructs an admission policy from GiB thresholds and load average, refusing values exceeding maxAdmitGiB or negative loads.
