@@ -938,8 +938,7 @@ func TestPraetorAdoptAction_Positive_CacheInputReachesSetupGo(t *testing.T) {
 	}
 }
 
-// goDirectiveOfEngine returns the major.minor of the go directive in praetor's own go.mod, read
-// with gomanifest.GoDirective, the parser AuditGoToolchain compares every other pin against.
+// goDirectiveOfEngine returns the full go directive the action default must mirror.
 func goDirectiveOfEngine(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(engineRoot, "go.mod")) //nolint:gosec // the module under test
@@ -950,11 +949,7 @@ func goDirectiveOfEngine(t *testing.T) string {
 	if !declared {
 		t.Fatal("go.mod declares no go directive")
 	}
-	parts := strings.Split(directive, ".")
-	if len(parts) < 2 {
-		t.Fatalf("go.mod declares an unreadable go directive %q", directive)
-	}
-	return parts[0] + "." + parts[1]
+	return directive
 }
 
 // TestPraetorAdoptBuild_Boundary_WindowsRunnerGetsAnExeSuffix keeps the published path executable

@@ -94,7 +94,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The head's go.mod toolchain directive names the Go release, as in the adopt job above.
+      # Use the head's preferred toolchain when specified, otherwise its required Go release.
       # The action runs its own setup-go with check-latest, which resolves a range through the
       # lagging setup-go manifest; an exact release missing there is downloaded from go.dev.
       # This job keeps no Go cache, so it reads the release from go.mod instead of running a
@@ -107,7 +107,10 @@ jobs:
           set -euo pipefail
           release="$(sed -n 's/^toolchain go\([0-9][0-9a-z.]*\)$/\1/p' go.mod)"
           if [ -z "$release" ]; then
-            echo "adopt: go.mod at the pull request head names no toolchain directive" >&2
+            release="$(sed -n 's/^go \([0-9][0-9a-z.]*\)$/\1/p' go.mod)"
+          fi
+          if [ -z "$release" ]; then
+            echo "adopt: go.mod at the pull request head names no Go release" >&2
             exit 1
           fi
           echo "go-version=$release" >> "$GITHUB_OUTPUT"
