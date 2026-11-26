@@ -1,0 +1,3 @@
+type: security
+title: 'Security: drop the console OSV-Scanner exception and the in-tree deepmerge 4.3.1 patch for GHSA-gcqx-w48m-w2h4: GitHub withdrew that advisory on 2026-11-16 as not describing a security vulnerability (OSV marks it withdrawn), so OSV-Scanner reports nothing for console/pnpm-lock.yaml without the exception; the patch, its pinning test, the pnpm patchedDependencies entry, its REUSE annotation and its HISS-19 exception go with it'
+breaking: false
