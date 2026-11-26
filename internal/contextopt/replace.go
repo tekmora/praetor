@@ -26,6 +26,9 @@ type ReplaceOptions struct {
 // errSnapshotChanged identifies a readable file whose bytes differ from the expected snapshot.
 var errSnapshotChanged = errors.New("snapshot changed before replacement")
 
+// errSnapshotExists identifies a name found occupied after an absence observation.
+var errSnapshotExists = errors.New("snapshot already exists")
+
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
 // Cooperative writers serialize on that directory (LockDirectory: the writers of one process
 // take turns, and another process's writer is waited for within DirectoryLockBudget);
@@ -85,7 +88,7 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
 	mode, err := verifyReplacement(ctx, root, name, options)
-	if options.AcceptCurrent && errors.Is(err, errSnapshotChanged) {
+	if options.AcceptCurrent && (errors.Is(err, errSnapshotChanged) || errors.Is(err, errSnapshotExists)) {
 		return confirmConcurrentReplacement(ctx, root, name, data, options.Mode, err)
 	}
 	if err != nil {
@@ -221,7 +224,7 @@ func verifyReplacement(ctx context.Context, root *os.Root, name string, options 
 		return 0, err
 	}
 	if !options.Exists {
-		return 0, fmt.Errorf("snapshot already exists: %s", name)
+		return 0, fmt.Errorf("%w: %s", errSnapshotExists, name)
 	}
 	var current bytes.Buffer
 	_, err = snapshotRootCopy(ctx, root, name, &current, replacementReadLimit(options))
@@ -264,7 +267,7 @@ func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, fil
 		return err
 	}
 	if !created {
-		return fmt.Errorf("snapshot already exists: %s", name)
+		return fmt.Errorf("%w: %s", errSnapshotExists, name)
 	}
 	return nil
 }
