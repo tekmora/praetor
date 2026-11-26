@@ -1,8 +1,6 @@
 module github.com/cordanaLLM/praetor/tools/schemacheck
 
-go 1.27
-
-toolchain go1.27.4
+go 1.27.4
 
 require (
 	github.com/cordanaLLM/praetor v0.0.0
@@ -12,8 +10,9 @@ require (
 )
 
 require (
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	github.com/tekmora/epitrop v0.3.0-rc.1 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )
 
 replace github.com/cordanaLLM/praetor => ../..

@@ -381,19 +381,6 @@ entries:
       - "tools/schemacheck/go.mod"
     packages:
       - "go:github.com/pelletier/go-toml/v2"
-  - name: "Epitrop (eh-PEE-trop, from Greek epitropos, appointed trustee)"
-    url: "https://github.com/tekmora/epitrop"
-    detail: "(`github.com/tekmora/epitrop` v0.3.0-rc.1)"
-    section: "shipped"
-    kind: "dependency"
-    relation: "shipped"
-    license: "EUPL-1.2"
-    notice: "© 2026 lusoris"
-    use: "Defines the catalog snapshot and schema used by the subscription window governor"
-    paths:
-      - "go.mod"
-    packages:
-      - "go:github.com/tekmora/epitrop"
   - name: "go-yaml v3"
     url: "https://github.com/go-yaml/yaml"
     detail: "(`gopkg.in/yaml.v3` v3.0.1)"
