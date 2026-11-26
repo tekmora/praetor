@@ -50,6 +50,7 @@ func bucketPath(root, rule, lang, bucket string) string {
 // replays all count regular files and certifies the claim.
 func verifyPassingBucketCount(t *testing.T, count int) {
 	t.Helper()
+	requireNativeReplay(t)
 	root := t.TempDir()
 	stageNumberedFixtures(t, bucketPath(root, "HISS-01", "go", bucketPositive), "rec", recursiveGo, count)
 
@@ -81,6 +82,7 @@ func TestVerifyBucketBoundaryAt256RegularFilesPasses(t *testing.T) {
 // regular file exceeds maxFixturesPerBucket and must fail Verify with a visible incomplete
 // replay finding naming the bucket rather than certifying a truncated scan.
 func TestVerifyBucketPast256RegularFilesIsIncomplete(t *testing.T) {
+	requireNativeReplay(t)
 	root := t.TempDir()
 	stageNumberedFixtures(t, bucketPath(root, "HISS-01", "go", bucketPositive), "rec", recursiveGo, 257)
 
@@ -292,6 +294,7 @@ func TestVerifyBucketNonRegularEntryIsSkippedAndNamed(t *testing.T) {
 // TestVerifyBucketUnknownTypeRegularFilesRespectBound verifies that regular files whose
 // directory entries report fs.ModeIrregular still count toward maxFixturesPerBucket.
 func TestVerifyBucketUnknownTypeRegularFilesRespectBound(t *testing.T) {
+	requireNativeReplay(t)
 	root := t.TempDir()
 	posDir := bucketPath(root, "HISS-01", "go", bucketPositive)
 	stageNumberedFixtures(t, posDir, "rec", recursiveGo, 257)

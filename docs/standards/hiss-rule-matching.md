@@ -769,7 +769,8 @@ dependency tooling as one of the repository's own manifests; inside an archive i
 archive with no file, more than 16 files, a repeated name or a path that leaves the fixture root
 fails the replay (`TestParseArchive_*` in `internal/hisscoverage/archive_test.go`).
 
-On every other GOOS, Verify skips the corpus and records an incomplete replay for each
+On every other GOOS, the CLI refuses verification before loading the catalog. Given a
+catalog, `hisscoverage.Verify` skips the corpus and records an incomplete replay for each
 catalog bucket, including absent buckets and claims attributed to another runner. Each finding
 names the host GOOS and gives the reason `fixture replay is verified on linux, darwin and windows only (HISS-21)`.
 These findings fail verification. The Platform Neutrality workflow exercises the native readers
@@ -781,6 +782,7 @@ bucket once and captures regular fixture bytes before replay. The verdict covers
 in those listings. The verifier counts names before looking up individual entries. A failed lookup
 produces an incomplete-replay finding naming the entry. After lookup, capture compares
 each regular file with the identity in the listing. On Linux and macOS, capture compares the device and inode.
+For a directory record with unknown kind, the first lookup supplies both the kind and the identity.
 On Windows, listing and capture each open the file relative to the pinned parent and call
 `GetFileInformationByHandleEx(FileIdInfo)` on that handle. Capture requires the same
 64-bit volume serial number and all 128 file ID bits from `FILE_ID_INFO`. Failure to read

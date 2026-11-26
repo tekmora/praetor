@@ -228,8 +228,8 @@ func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, err
 	return verifyForPlatform(ctx, rootDir, catalog, runtime.GOOS)
 }
 
-// fixtureReplayPlatform checks the GOOS against the native CI replay platforms.
-func fixtureReplayPlatform(goos string) error {
+// FixtureReplayPlatform returns the HISS-21 refusal for a GOOS without verified native replay.
+func FixtureReplayPlatform(goos string) error {
 	switch goos {
 	case "linux", "darwin", "windows":
 		return nil
@@ -246,7 +246,7 @@ func verifyForPlatform(ctx context.Context, rootDir string, catalog *Catalog, go
 	if err := catalog.Validate(); err != nil {
 		return nil, err
 	}
-	if err := fixtureReplayPlatform(goos); err != nil {
+	if err := FixtureReplayPlatform(goos); err != nil {
 		return catalog.verifyClaims(ctx, nil, err)
 	}
 	var store fixtureStore

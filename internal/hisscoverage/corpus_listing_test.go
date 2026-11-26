@@ -21,6 +21,7 @@ import (
 // TestVerifyShortBucketReadsPreserveOverflow supplies 4096 entries followed by the sentinel
 // through the same cursor. Each call must request only the remaining entry allowance.
 func TestVerifyShortBucketReadsPreserveOverflow(t *testing.T) {
+	requireNativeReplay(t)
 	root := t.TempDir()
 	bucket := bucketPath(root, "HISS-01", "go", bucketNegative)
 	if err := contextopt.EnsureDirectory(t.Context(), bucket, 0o700); err != nil {
@@ -186,6 +187,7 @@ func (c *cancelAfterRead) Err() error {
 // TestNativeListingPreservesTerminalEOF reads an empty directory with the platform's
 // native reader. Returning only cancellation from that reader loses the observed EOF.
 func TestNativeListingPreservesTerminalEOF(t *testing.T) {
+	requireNativeReplay(t)
 	dir := listingCursor(t, t.TempDir())
 	ctx, cancel := context.WithTimeout(t.Context(), contextopt.MaxDuration)
 	defer cancel()
@@ -273,7 +275,8 @@ func (r failedCapture) ReadListedSnapshot(context.Context, string, os.FileInfo) 
 // the same change joined to a close failure at the fixture reader boundary.
 func TestCaptureFailurePreservesClose(t *testing.T) {
 	const name = "child.go"
-	root := corpusRoot(t, "HISS-01", "go", bucketNegative, name, cleanGo)
+	root := t.TempDir()
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketNegative, name, cleanGo)
 	listed, err := os.Stat(filepath.Join(bucketPath(root, "HISS-01", "go", bucketNegative), name))
 	if err != nil {
 		t.Fatal(err)

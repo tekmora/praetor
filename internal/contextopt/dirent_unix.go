@@ -166,7 +166,7 @@ func (dir *SnapshotDirectory) observeUntypedName(ctx context.Context, name strin
 		return listedName{name: name, err: err}
 	}
 	info, err := dir.statListedName(name)
-	listed := listedName{name: name, err: err}
+	listed := listedName{name: name, observed: info, err: err}
 	if err == nil {
 		listed.kind = info.Mode().Type()
 	}

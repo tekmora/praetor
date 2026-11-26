@@ -82,11 +82,12 @@ func validateSnapshotLeaf(ctx context.Context, dir *SnapshotDirectory, name stri
 	return errors.Join(ctx.Err(), ValidateLeafName(name))
 }
 
-// listedName retains the kind from enumeration, or the error from its first observation.
+// listedName retains the enumerated kind and any metadata obtained to determine it.
 type listedName struct {
-	name string
-	kind os.FileMode
-	err  error
+	name     string
+	kind     os.FileMode
+	observed os.FileInfo
+	err      error
 }
 
 // ReadEntries counts up to n names on the pinned cursor before resolving their identities.
@@ -187,6 +188,9 @@ func (dir *SnapshotDirectory) resolveEntry(listed listedName) os.DirEntry {
 	if current := info.Mode().Type(); listed.kind != current {
 		return failedEntry{name: listed.name, err: fmt.Errorf("listed kind %s changed to %s", listed.kind, current)}
 	}
+	if listed.observed != nil {
+		info = listed.observed
+	}
 	return fs.FileInfoToDirEntry(info)
 }
 
@@ -225,7 +229,7 @@ func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name strin
 	defer func() { err = errors.Join(err, file.Close()) }()
 	data, err := stableRead(ctx, file, pinnedListing{listed})
 	if err != nil {
-		return nil, err
+		return nil, &os.PathError{Op: "snapshot", Path: name, Err: err}
 	}
 	if err := validateText(data); err != nil {
 		return nil, err

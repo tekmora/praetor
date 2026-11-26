@@ -64,4 +64,43 @@ func TestUnknownDirentObservesKind(t *testing.T) {
 	if _, err := entry.Info(); entry.Name() != "child" || err == nil || !strings.Contains(err.Error(), "listed kind") {
 		t.Fatalf("directory replaced after first observation: %q, %v", entry.Name(), err)
 	}
+	checkUnknownRegularCapture(t, ctx, dir, path)
+}
+
+// checkUnknownRegularCapture changes only the identity between observation and resolution.
+func checkUnknownRegularCapture(t *testing.T, ctx context.Context, dir *SnapshotDirectory, path string) {
+	t.Helper()
+	stable := decodeUnknownChild(t, ctx, dir)
+	info := resolvedChildInfo(t, dir, stable)
+	data, err := dir.ReadListedSnapshot(ctx, info.Name(), info)
+	if err != nil || string(data) != "replacement" {
+		t.Fatalf("stable regular file: %q, %v", data, err)
+	}
+	if err := os.WriteFile(path+".new", data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path+".new", info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	listed := decodeUnknownChild(t, ctx, dir)
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	info = resolvedChildInfo(t, dir, listed)
+	data, err = dir.ReadListedSnapshot(ctx, info.Name(), info)
+	var pathErr *os.PathError
+	if data != nil || !errors.Is(err, errSourceChangedWhileOpening) ||
+		!errors.As(err, &pathErr) || pathErr.Path != "child" {
+		t.Fatalf("replaced regular file: data=%q err=%v", data, err)
+	}
+}
+
+// resolvedChildInfo retrieves the metadata that the listing passes to capture.
+func resolvedChildInfo(t *testing.T, dir *SnapshotDirectory, listed listedName) os.FileInfo {
+	t.Helper()
+	info, err := dir.resolveEntry(listed).Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }

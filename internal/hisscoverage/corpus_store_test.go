@@ -11,6 +11,7 @@ import (
 // TestSnapshotEightBucketsBoundRetainedBytes counts the actual backing arrays reachable
 // from a captured corpus. Every bucket holds a distinct, maximum-size fixture.
 func TestSnapshotEightBucketsBoundRetainedBytes(t *testing.T) {
+	requireNativeReplay(t)
 	root := t.TempDir()
 	catalog := &Catalog{Version: 1}
 	names := [...]string{bucketMeasured, bucketPositive, bucketNegative, bucketGap}

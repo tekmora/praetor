@@ -296,7 +296,7 @@ One behavior has exactly one implementation:
 
 A claim of coverage is reproducible, never merely asserted:
 
-- On Linux, macOS and Windows, `praetorctl hiss coverage --verify` replays the fixture corpus for every enforcement claim in `.config/hiss/coverage.yaml` as part of `verify-all`. On every other GOOS, each catalog bucket records an incomplete replay naming the platform and the HISS-21 restriction. The report fails even when all bucket directories are absent (`TestVerifyUnverifiedPlatform`).
+- On Linux, macOS and Windows, `praetorctl hiss coverage --verify` replays the fixture corpus for every enforcement claim in `.config/hiss/coverage.yaml` as part of `verify-all`. On every other GOOS, the CLI names the platform and the HISS-21 restriction before loading the catalog. When called with a validated catalog on such a host, `hisscoverage.Verify` reports an incomplete replay for every bucket, including absent buckets (`TestVerifyUnverifiedPlatform`).
 - The check runs in both directions: a claim of enforcement must reproduce each of its positive fixtures, and a claim of absence must leave its gap fixtures undetected.
 - A rule that silently *gains* coverage fails the gate exactly as one that silently loses it, so the catalog cannot drift in either direction undetected.
 - An incomplete (`ScanReport.Incomplete`) or zero-file fixture scan for the declared language never certifies a positive, negative, gap, measured or delegated claim (`internal/hisscoverage/verify.go`); an intentional parse or recognition gap in `gap/` must carry a `hiss-fixture: unparsed: <reason>` or `hiss-fixture: unexamined: <reason>` header comment and fails once the scanner examines it cleanly.

@@ -20,9 +20,18 @@ const recursiveGo = "package p\n\nfunc F(n int) int {\n\tif n <= 1 {\n\t\treturn
 // cleanGo is a Go source that no invariant reports.
 const cleanGo = "package p\n\nfunc F(n int) int { return n + 1 }\n"
 
-// corpusRoot builds a fixture root and returns the repository root containing it.
+// requireNativeReplay skips a test that needs the host's verified fixture reader.
+func requireNativeReplay(t *testing.T) {
+	t.Helper()
+	if err := FixtureReplayPlatform(runtime.GOOS); err != nil {
+		t.Skip(err)
+	}
+}
+
+// corpusRoot stages one fixture for a native replay test.
 func corpusRoot(t *testing.T, rule, lang, bucket, name, body string) string {
 	t.Helper()
+	requireNativeReplay(t)
 	root := t.TempDir()
 	writeCorpusFixture(t, root, rule, lang, bucket, name, body)
 	return root
@@ -86,7 +95,7 @@ func TestVerifyAcceptsABackedClaim(t *testing.T) {
 // TestFixtureReplayPlatforms admits each native CI platform.
 func TestFixtureReplayPlatforms(t *testing.T) {
 	for _, goos := range [...]string{"linux", "darwin", "windows"} {
-		if err := fixtureReplayPlatform(goos); err != nil {
+		if err := FixtureReplayPlatform(goos); err != nil {
 			t.Errorf("%s: %v", goos, err)
 		}
 	}
@@ -95,12 +104,20 @@ func TestFixtureReplayPlatforms(t *testing.T) {
 // TestVerifyUnverifiedPlatform refuses even a backed claim before fixture capture. Both the
 // present bucket and every absent bucket of the local and delegated claims need findings.
 func TestVerifyUnverifiedPlatform(t *testing.T) {
-	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	root := t.TempDir()
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
 	catalog := catalogFor("HISS-01", "./go", StateEnforced)
 	delegated := delegatedCatalogFor("HISS-02", "go", "external")
 	catalog.Rules = append(catalog.Rules, delegated.Rules[0])
 	ctx := afterFixtureCapture(t.Context(), func() { t.Fatal("captured a corpus on an unverified platform") })
-	for _, goos := range [...]string{"android", "ios", "freebsd", "netbsd", "openbsd", "dragonfly", "aix", "solaris", "illumos", "future-os"} {
+	if FixtureReplayPlatform(runtime.GOOS) != nil {
+		report, err := Verify(ctx, root, catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requirePlatformRefusals(t, report, runtime.GOOS)
+	}
+	for _, goos := range [...]string{"android", "ios", "freebsd", "netbsd", "openbsd", "dragonfly", "aix", "solaris", "illumos", "wasip1", "future-os"} {
 		report, err := verifyForPlatform(ctx, root, catalog, goos)
 		if err != nil {
 			t.Fatalf("verify on %s: %v", goos, err)
@@ -229,6 +246,7 @@ func TestVerifyRejectsUndeclaredCoverage(t *testing.T) {
 // undemonstrated: a claim with no fixture at all is not contradicted, but it is not
 // evidence either, so it is surfaced without failing the gate while the corpus is filled in.
 func TestVerifyReportsAnUnbackedClaim(t *testing.T) {
+	requireNativeReplay(t)
 	report, err := Verify(t.Context(), t.TempDir(), catalogFor("HISS-01", "go", StateEnforced))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
@@ -319,6 +337,7 @@ func TestLoadCatalogRejectsUnknownField(t *testing.T) {
 // repository's own catalog must load and every claim must survive its fixtures, which is
 // what makes the committed file evidence rather than documentation.
 func TestRepositoryCatalogVerifies(t *testing.T) {
+	requireNativeReplay(t)
 	root := filepath.Join("..", "..")
 	catalog, err := LoadCatalog(t.Context(), root)
 	if err != nil {

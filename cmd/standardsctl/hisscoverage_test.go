@@ -4,9 +4,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -50,9 +52,39 @@ func runCoverage(t *testing.T, args ...string) (string, error) {
 	return captureStdout(t, func() error { return dispatchCommand("hiss", append([]string{"coverage"}, args...)) })
 }
 
+// runCoverageReplay exercises --verify on hosts with a verified native reader.
+func runCoverageReplay(t *testing.T, root string) (string, error) {
+	t.Helper()
+	if err := hisscoverage.FixtureReplayPlatform(runtime.GOOS); err != nil {
+		t.Skip(err)
+	}
+	return runCoverage(t, "--path="+root, "--verify")
+}
+
+// TestCoverageRefusesPlatformBeforeCatalog checks the CLI with both a present and a missing catalog.
+func TestCoverageRefusesPlatformBeforeCatalog(t *testing.T) {
+	const want = "wasip1: fixture replay is verified on linux, darwin and windows only (HISS-21)"
+	for _, root := range [...]string{coverageRepo(t, "invalid catalog"), t.TempDir()} {
+		err := runHissCoverageForPlatform([]string{"--path=" + root, "--verify"}, "wasip1")
+		if err == nil || err.Error() != want {
+			t.Fatalf("verify %s: got %v, want %q", root, err, want)
+		}
+	}
+}
+
+// TestCoverageCountsBucketFindingsSeparately pins the summary for two refused four-bucket claims.
+func TestCoverageCountsBucketFindingsSeparately(t *testing.T) {
+	report := &hisscoverage.Report{Claims: 2, Findings: make([]hisscoverage.Finding, 8)}
+	err := failContradictedCoverage(report)
+	want := hisscoverage.ErrClaimUnsupported.Error() + ": 8 finding(s) across 2 claim(s) and 0 fixture(s)"
+	if !errors.Is(err, hisscoverage.ErrClaimUnsupported) || err.Error() != want {
+		t.Fatalf("refusal summary = %v, want %q", err, want)
+	}
+}
+
 func TestRunHissCoverage_Positive_OmittedTitleRendersTheCatalogTitle(t *testing.T) {
 	root := coverageRepo(t, "version: 1\nrules:\n  - id: HISS-14\n"+coverageClaim)
-	out, err := runCoverage(t, "--path="+root, "--verify")
+	out, err := runCoverageReplay(t, root)
 	if err != nil {
 		t.Fatalf("an omitted title must pass: %v\n%s", err, out)
 	}
@@ -64,7 +96,7 @@ func TestRunHissCoverage_Positive_OmittedTitleRendersTheCatalogTitle(t *testing.
 
 func TestRunHissCoverage_Negative_DriftedTitleWarnsWithTheCatalogText(t *testing.T) {
 	root := coverageRepo(t, "version: 1\nrules:\n  - id: HISS-14\n    title: Append-Only ABI\n"+coverageClaim)
-	out, err := runCoverage(t, "--path="+root, "--verify")
+	out, err := runCoverageReplay(t, root)
 	if err != nil {
 		t.Fatalf("a drifted title must warn, not fail: %v\n%s", err, out)
 	}
@@ -100,10 +132,12 @@ func TestRunHissCoverage_Positive_SyncTitlesFixesElevenDriftedTitles(t *testing.
 	}
 	mustContain(t, out, "11 stale (rewritten)", "Rewrote 11 title(s)")
 
-	out, err = runCoverage(t, "--path="+root, "--verify")
-	if err != nil || strings.Contains(out, "[WARN]") {
-		t.Fatalf("the synced file must verify without a warning: %v\n%s", err, out)
-	}
+	t.Run("replay synced file", func(t *testing.T) {
+		out, err := runCoverageReplay(t, root)
+		if err != nil || strings.Contains(out, "[WARN]") {
+			t.Fatalf("the synced file must verify without a warning: %v\n%s", err, out)
+		}
+	})
 	out, err = runCoverage(t, "--path="+root, "--sync-titles")
 	if err != nil {
 		t.Fatalf("second sync: %v", err)
@@ -113,10 +147,12 @@ func TestRunHissCoverage_Positive_SyncTitlesFixesElevenDriftedTitles(t *testing.
 
 func TestRunHissCoverage_Negative_UnknownRuleStillFails(t *testing.T) {
 	root := coverageRepo(t, "version: 1\nrules:\n  - id: HISS-99\n    title: Invented\n"+coverageClaim)
-	for _, mode := range []string{"--verify", "--sync-titles"} {
-		_, err := runCoverage(t, "--path="+root, mode)
+	_, err := runCoverage(t, "--path="+root, "--sync-titles")
+	mustErrContain(t, err, "rule HISS-99 is not a registered invariant")
+	t.Run("verify", func(t *testing.T) {
+		_, err := runCoverageReplay(t, root)
 		mustErrContain(t, err, "rule HISS-99 is not a registered invariant")
-	}
+	})
 }
 
 func TestRunHissCoverage_Boundary_WriteBelongsToSyncTitles(t *testing.T) {
