@@ -39,15 +39,25 @@ func WithLocalLeaseTempRoot(ctx context.Context, dir string) context.Context {
 }
 
 // InheritedLocalLease accepts only a live local admission owned by an ancestor.
+// A missing or malformed marker returns false with no error.
 func InheritedLocalLease(ctx context.Context, marker string) (bool, error) {
 	if runtime.GOOS != "linux" {
 		return false, nil // Remote callers can carry a marker from another host.
 	}
-	owner, err := strconv.Atoi(marker)
-	if err != nil || owner < 1 || strconv.Itoa(owner) != marker {
+	owner, ok := localLeaseOwnerPID(marker)
+	if !ok {
 		return false, nil
 	}
 	return inheritedLocalLease(ctx, owner)
+}
+
+// localLeaseOwnerPID recognizes positive decimal ints with no sign or leading zero.
+func localLeaseOwnerPID(marker string) (int, bool) {
+	if marker == "" || marker[0] < '1' || marker[0] > '9' {
+		return 0, false
+	}
+	owner, err := strconv.Atoi(marker)
+	return owner, err == nil
 }
 
 // WaitLocal waits for host headroom and a builder slot in the same polling loop.
