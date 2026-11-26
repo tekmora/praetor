@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
 	"github.com/cordanaLLM/praetor/internal/govuln"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // govulnStream reads one of govulncheck v1.8.0's recorded streams (internal/govuln/testdata/scan).
@@ -387,15 +389,30 @@ func TestSecurityGovuln_Negative_GateJobsResolveGoFromGoMod(t *testing.T) {
 	}
 }
 
-// goReleaseSteps returns the ids of a job's steps that resolve the Go release from go.mod: a
-// setup-go step reading go-version-file: go.mod alone, or a run step reading go.mod's
-// toolchain directive (a job that keeps no Go cache runs no setup-go step of its own).
+// toolchainSelector matches an awk field comparison or an anchored directive pattern.
+const toolchainSelector = `(?:\$1[ \t]*==[ \t]*"toolchain"|\^toolchain\b)`
+
+// goModToolchainRead requires go.mod as the input to the parser that selects the directive.
+var goModToolchainRead = regexp.MustCompile(`(?m)\b(?:awk|sed)[ \t]+(?:-[a-zA-Z]+[ \t]+)*'[^']*` +
+	toolchainSelector + `[^']*'[ \t]+["']?(?:\./)?go\.mod["']?(?:[ \t)]|$)`)
+
+// goVersionWrite requires the command emitting the key to append to the runner's output file.
+var goVersionWrite = regexp.MustCompile(`(?m)^[ \t]*(?:echo|printf)[ \t]+["']?go-version=[^;&|<>\n]*>>[ \t]*` +
+	`(?:"\$GITHUB_OUTPUT"|\$GITHUB_OUTPUT|"\$\{GITHUB_OUTPUT\}"|\$\{GITHUB_OUTPUT\})[ \t]*$`)
+
+// publishesGoModRelease recognizes the module read and output write in a workflow run block.
+// TestAdoptWorkflowGoRelease in internal/forge exercises the shipped parser's actual selections.
+func publishesGoModRelease(run string) bool {
+	code, err := util.StripHashComments(run)
+	return err == nil && goModToolchainRead.MatchString(code) && goVersionWrite.MatchString(code)
+}
+
+// goReleaseSteps returns the IDs that publish a Go release through setup-go or the module parser.
 func goReleaseSteps(steps []ghworkflow.Step) map[string]bool {
 	ids := map[string]bool{}
 	for _, step := range steps {
 		fromSetup := strings.HasPrefix(step.Uses, "actions/setup-go@") && setsGoUpFromGoMod(step)
-		fromRun := strings.Contains(step.Run, "go.mod") && strings.Contains(step.Run, "toolchain go")
-		if step.ID != "" && (fromSetup || fromRun) {
+		if step.ID != "" && (fromSetup || publishesGoModRelease(step.Run)) {
 			ids[step.ID] = true
 		}
 	}
@@ -479,6 +496,49 @@ func checkAdoptWorkflowResolvedGo(t *testing.T, file string, wantCalls int) {
 	mutant := text[:last] + text[last+1+end:]
 	if _, missing := adoptCallsWithoutResolvedGo(t, []byte(mutant)); len(missing) != 1 {
 		t.Fatalf("mutant with one input dropped: missing %q; want exactly one call reported", missing)
+	}
+}
+
+// TestAdoptWorkflow_Negative_RejectsUnresolvedGoSources checks each link from module to action input.
+func TestAdoptWorkflow_Negative_RejectsUnresolvedGoSources(t *testing.T) {
+	const workflow = `jobs:
+  adopt:
+    runs-on: ubuntu-26.04
+    steps:
+      - id: release
+        run: |
+          %s
+          %s
+      - id: unrelated
+        run: echo ready
+      - name: Adopt
+        uses: ./.github/actions/praetor-adopt
+        with:
+          go-version: ${{ steps.%s.outputs.go-version }}
+`
+	const read = `release="$(sed -n 's/^toolchain go//p' go.mod)"`
+	const publish = `echo "go-version=$release" >> "$GITHUB_OUTPUT"`
+	unresolved := []string{"adopt/Adopt"}
+	cases := [...]struct {
+		name, read, publish, source string
+		wantMissing                 []string
+	}{
+		{"resolved", read, publish, "release", nil},
+		{"different input", strings.Replace(read, "go.mod", "other.mod", 1) + " # go.mod", publish, "release", unresolved},
+		{"go directive only", strings.Replace(read, "toolchain go", "go ", 1), publish, "release", unresolved},
+		{"different output file", read, strings.Replace(publish, "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", 1), "release", unresolved},
+		{"redirect printed as text", read, `echo "go-version=$release >> $GITHUB_OUTPUT"`, "release", unresolved},
+		{"different output name", read, strings.Replace(publish, "go-version", "version", 1), "release", unresolved},
+		{"different step", read, publish, "unrelated", unresolved},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf(workflow, tc.read, tc.publish, tc.source)
+			calls, missing := adoptCallsWithoutResolvedGo(t, []byte(data))
+			if calls != 1 || !slices.Equal(missing, tc.wantMissing) {
+				t.Fatalf("got %d calls and missing %q, want 1 call and missing %q", calls, missing, tc.wantMissing)
+			}
+		})
 	}
 }
 
