@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yuin/goldmark/ast"
+
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
@@ -59,16 +61,25 @@ func checkRenovateTemplate(template string) error {
 // checkRenovateNote looks for the visible note in the bounded, rendered summary.
 func checkRenovateNote(body string) error {
 	beforeRule, _, _ := strings.Cut(body, "\n---\n")
-	var reader checklistReader
+	doc, err := parseChecklistDocument(beforeRule)
+	if err != nil {
+		return err
+	}
 	inSummary := false
-	for i, line := range strings.SplitN(beforeRule, "\n", MaxPRLinesLimit+1) {
-		visible := strings.TrimSpace(reader.visibleLine(line, i+1))
-		if visible == renovateSummary {
-			inSummary = true
+	block := doc.root.FirstChild()
+	for range doc.root.ChildCount() {
+		if block.Kind() == ast.KindHeading || block.Kind() == ast.KindParagraph {
+			label, err := doc.visibleText(block)
+			if err != nil {
+				return err
+			}
+			if block.Kind() == ast.KindHeading {
+				inSummary = label == strings.TrimPrefix(renovateSummary, "## ")
+			} else if inSummary && slices.Contains(strings.Split(label, "\n"), renovateNote) {
+				return nil
+			}
 		}
-		if inSummary && visible == renovateNote {
-			return nil
-		}
+		block = block.NextSibling()
 	}
 	return fmt.Errorf("rendered summary is missing the visible takeover note")
 }
@@ -110,6 +121,12 @@ func checkRenovateBody(template string, notes, wantOutline []string) error {
 	body := renderRenovateBody(template, notes)
 	if err := checkRenovateOutline(body, wantOutline); err != nil {
 		return err
+	}
+	// Check the configured title after checking the rendered outline. A raw HTML
+	// prefix can leave an HTML comment open even after its CommonMark block ends.
+	beforeSummary, _, _ := strings.Cut(template, "\n"+renovateSummary+"\n")
+	if strings.TrimSpace(beforeSummary) != wantOutline[0] {
+		return fmt.Errorf("unexpected content before the summary heading")
 	}
 	if err := checkRenovateNote(body); err != nil {
 		return err
@@ -221,11 +238,12 @@ func TestRenovatePRBody(t *testing.T) {
 func checkRenovateReviewInputs(t *testing.T, template string, notes, want []string) {
 	t.Helper()
 	receiptHeading := want[len(want)-1]
-	firstBox := slices.IndexFunc(want, func(line string) bool { return strings.HasPrefix(line, "- [ ] **HISS-01 ") })
+	lines := strings.Split(template, "\n")
+	firstBox := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "- [ ] **HISS-01 ") })
 	if firstBox < 0 {
 		t.Fatal("shipped pull request template is missing the HISS-01 task item")
 	}
-	hiddenBox := strings.Replace(template, want[firstBox], "<!--\n"+want[firstBox]+"\n-->", 1)
+	hiddenBox := strings.Replace(template, lines[firstBox], "<!--\n"+lines[firstBox]+"\n-->", 1)
 	conditional := "{{#if false}}\n" + strings.Replace(template, receiptHeading, "{{/if}}\n"+receiptHeading, 1)
 	for _, tc := range []struct{ name, template, finding string }{
 		{"multiline comment hides HISS-01", hiddenBox, "rendered outline"},

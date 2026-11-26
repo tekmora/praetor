@@ -1,3 +1,3 @@
 type: fixed
-title: Renovate pull requests now include the repository's unchecked PR checklist for CodeRabbit's Description check and direct reviewers to the takeover pull request for the signed receipt.
+title: Renovate pull requests now include the repository's unchecked PR checklist for CodeRabbit's Description check and direct reviewers to the takeover pull request for the signed receipt. Checklist validation uses CommonMark to distinguish hidden labels from literal code.
 breaking: false

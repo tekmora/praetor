@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 
@@ -70,8 +69,6 @@ type CommitAnalysis struct {
 }
 
 var (
-	// taskBoxRegex captures the checkbox state after a bullet or ordered list marker.
-	taskBoxRegex        = regexp.MustCompile(`^(?:[-*+]|\d{1,9}[.)])[ \t]+\[([ xX])\](?:[ \t]|$)`)
 	breakingHeaderRegex = regexp.MustCompile(`(?i)^[a-z]+(\([^\)]+\))?!:\s*.+`)
 	// breakingFooterRegex matches both Conventional Commits 1.0.0 spellings of the
 	// breaking-change footer token, which the specification declares synonymous.
@@ -103,16 +100,16 @@ func ValidatePRChecklistWithPolicyContext(ctx context.Context, prBody string, po
 		}, errors.New("empty PR body")
 	}
 
-	lines := strings.SplitN(prBody, "\n", MaxPRLinesLimit+1)
-	if len(lines) > MaxPRLinesLimit {
-		return &PRChecklistResult{Errors: []string{fmt.Sprintf("PR body exceeds %d lines", MaxPRLinesLimit)}}, nil
+	doc, err := parseChecklistDocument(prBody)
+	if err != nil {
+		return &PRChecklistResult{Errors: []string{err.Error()}}, nil
 	}
 
 	res := &PRChecklistResult{}
-	receipt, receiptErr := scanChecklistLines(lines, res)
+	receipt, receiptErr := doc.readChecklist(res)
 	res.Errors = append(res.Errors, BodyHardWrapFindings(prBody)...)
 	res.Errors = append(res.Errors, ForeignReferenceFindings(prBody, "pull request body", policy.ClosingReferences.OwnOrganizations)...)
-	closingErrors, closingWarnings := closingReferenceFindings(ctx, strings.Join(lines, "\n"), "pull request body", policy.ClosingReferences)
+	closingErrors, closingWarnings := closingReferenceFindings(ctx, prBody, "pull request body", policy.ClosingReferences)
 	res.Errors = append(res.Errors, closingErrors...)
 	res.Warnings = append(res.Warnings, closingWarnings...)
 	if receiptErr != nil {
@@ -122,127 +119,6 @@ func ValidatePRChecklistWithPolicyContext(ctx context.Context, prBody string, po
 	}
 	finalizeChecklistValidation(res)
 	return res, nil
-}
-
-// checklistReader tracks HTML comments outside fenced code and the first receipt's
-// slice of the original lines. opened is one-based, so it also indexes the next line.
-// receiptStart and receiptEnd delimit the raw content, with zero for a missing delimiter.
-type checklistReader struct {
-	fence        util.MarkdownFence
-	comment      string
-	opened       int
-	receiptStart int
-	receiptEnd   int
-}
-
-// visibleLine returns the text outside HTML comments and fenced code at number.
-// It also remembers the first receipt span for signature verification.
-func (r *checklistReader) visibleLine(line string, number int) string {
-	wasOpen := r.fence.Open()
-	if r.comment == "" && r.fence.Inside(strings.TrimSpace(line)) {
-		switch {
-		case !wasOpen:
-			r.opened = number
-			if r.receiptStart == 0 && isReceiptFence(line) {
-				r.receiptStart = number
-			}
-		case !r.fence.Open() && r.opened == r.receiptStart:
-			r.receiptEnd = number - 1
-		}
-		return ""
-	}
-	return r.uncommentedLine(strings.TrimSuffix(line, "\r"))
-}
-
-// uncommentedLine strips inline markers from labels. A line that began inside an HTML
-// comment cannot introduce a Markdown block, even if text follows its closing delimiter.
-func (r *checklistReader) uncommentedLine(line string) string {
-	if r.comment != "" {
-		r.stripComments(line)
-		return ""
-	}
-	if !strings.Contains(line, "<!--") {
-		return line
-	}
-	spans := util.MarkdownCodeSpans(line, maxReferenceTextBytes)
-	if len(spans) == 0 {
-		return r.stripComments(line)
-	}
-	var visible strings.Builder
-	start := 0
-	for _, span := range spans {
-		visible.WriteString(r.stripComments(line[start:span.Start]))
-		code := line[span.Start:span.End]
-		if r.comment != "" {
-			code = r.stripComments(code)
-		}
-		visible.WriteString(code)
-		start = span.End
-	}
-	visible.WriteString(r.stripComments(line[start:]))
-	return visible.String()
-}
-
-// stripComments carries HTML comment state across the Markdown text between code spans.
-func (r *checklistReader) stripComments(text string) string {
-	comments := util.CommentSyntax{Block: [][2]string{{"<!--", "-->"}}}
-	visible, closer := util.StripComments(text, comments, r.comment)
-	r.comment = closer
-	return visible
-}
-
-// scanChecklistLines reads the checklist and first receipt from the same bounded lines.
-func scanChecklistLines(lines []string, res *PRChecklistResult) (string, error) {
-	var reader checklistReader
-	for i := 0; i < len(lines) && i < MaxPRLinesLimit; i++ {
-		visible := reader.visibleLine(lines[i], i+1)
-		if visible != "" {
-			checkLineForRequirements(lines[i], visible, res)
-		}
-	}
-	if reader.fence.Open() {
-		res.Errors = append(res.Errors, fmt.Sprintf(
-			"PR body ends inside the %q code fence opened at line %d: close it, or every checklist box after it is read as code",
-			reader.fence.Marker(), reader.opened))
-	}
-	res.receiptFence = reader.receiptStart != 0
-	if res.receiptFence && reader.receiptEnd == 0 {
-		return "", fmt.Errorf("the Ed25519 Exit-0 receipt fence %q is never closed: end the receipt block with a matching fence", reader.fence.Marker())
-	}
-	return strings.TrimSpace(strings.Join(lines[reader.receiptStart:reader.receiptEnd], "\n")), nil
-}
-
-// checkLineForRequirements records headings and task items in source order.
-// Markers must occur in the source. Only visible label text can satisfy a requirement.
-func checkLineForRequirements(source, visible string, res *PRChecklistResult) {
-	trimmed := strings.TrimSpace(source)
-	box := taskBoxRegex.FindStringSubmatch(trimmed)
-	if box == nil {
-		if _, heading := util.MarkdownHeadingText(trimmed); heading {
-			res.outline = append(res.outline, visible)
-		}
-		return
-	}
-	res.outline = append(res.outline, visible)
-	if box[1] == " " {
-		return
-	}
-	res.hasTickedBox = true
-	lower := strings.ToLower(visible)
-	if strings.Contains(lower, "hiss-16") || strings.Contains(lower, "compile-context") {
-		res.HasHISS16Check = true
-	}
-	if strings.Contains(lower, "3d test") || strings.Contains(lower, "hiss-15") ||
-		(strings.Contains(lower, "positive") && strings.Contains(lower, "negative")) {
-		res.Has3DTestsCheck = true
-	}
-}
-
-// isReceiptFence reports whether a fence line opens the receipt block, i.e. carries the
-// "receipt" token in its info string. An unlabelled code block is never a receipt.
-func isReceiptFence(line string) bool {
-	info := strings.ToLower(strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "`~")))
-	return slices.Contains(strings.Fields(info), ReceiptFenceToken)
 }
 
 // verifyReceiptEnvelope verifies the signature, the certified gate output, its format version
