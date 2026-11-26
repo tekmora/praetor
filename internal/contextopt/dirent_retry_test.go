@@ -63,7 +63,7 @@ func TestDirentReadStopsAtBound(t *testing.T) {
 		last = fmt.Errorf("attempt %d: %w", calls, unix.EINTR)
 		return 0, last
 	})
-	if n != 0 || calls != maxDirentReadAttempts || !errors.Is(err, last) {
+	if n != 0 || calls != 8 || !errors.Is(err, last) {
 		t.Fatalf("exhausted read: n=%d calls=%d err=%v, want %v", n, calls, err, last)
 	}
 }

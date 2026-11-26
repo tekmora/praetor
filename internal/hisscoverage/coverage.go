@@ -104,7 +104,7 @@ type Coverage struct {
 func (c Coverage) fixtureLanguage() string { return path.Clean(c.Language) }
 
 // validateLanguage accepts slash paths that clean to one ordinary child of the rule.
-// Backslashes and volume qualifiers in the input are ambiguous across hosts.
+// Capture also compares open directory identities to catch aliases on the fixture volume.
 func (c Coverage) validateLanguage(ruleID string, langs map[string]struct{}) error {
 	language := c.fixtureLanguage()
 	if strings.ContainsAny(c.Language, `\:`) || strings.TrimSpace(language) == "" {

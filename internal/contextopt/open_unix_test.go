@@ -13,7 +13,67 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// TestOpenUnixLeafRetriesEINTR interrupts the first open and then opens the real
+// child using the descriptor and flags supplied by the native opener.
+func TestOpenUnixLeafRetriesEINTR(t *testing.T) {
+	const name = "sample.txt"
+	dir := contextFixture(t, map[string][]byte{name: []byte("original")})
+	parent, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := parent.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	calls := 0
+	openat := func(fd int, leaf string, flags int, mode uint32) (int, error) {
+		calls++
+		if calls == 1 {
+			return -1, unix.EINTR
+		}
+		return unix.Openat(fd, leaf, flags, mode)
+	}
+	child, err := openUnixLeaf(parent.Fd(), dir, name, readLeafData, openat)
+	if err != nil {
+		t.Fatalf("open after interruption: %v", err)
+	}
+	info, statErr := child.Stat()
+	if err := child.Close(); err != nil {
+		t.Error(err)
+	}
+	if statErr != nil || info.Size() != int64(len("original")) || calls != 2 {
+		t.Fatalf("interrupted open: info=%v err=%v calls=%d", info, statErr, calls)
+	}
+}
+
+// TestOpenUnixLeafStopsOnError pins the attempt limit and preserves terminal errors.
+func TestOpenUnixLeafStopsOnError(t *testing.T) {
+	for _, tc := range [...]struct {
+		err   error
+		calls int
+	}{
+		{unix.EINTR, 8},
+		{unix.EACCES, 1},
+		{errors.Join(unix.EINTR, unix.EIO), 1},
+	} {
+		calls := 0
+		openat := func(int, string, int, uint32) (int, error) {
+			calls++
+			return -1, tc.err
+		}
+		_, err := openUnixLeaf(0, ".", "child", listDirectory, openat)
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Path != "child" || !errors.Is(err, tc.err) || calls != tc.calls {
+			t.Errorf("openat returning %v: got %v after %d calls, want %d calls", tc.err, err, calls, tc.calls)
+		}
+	}
+}
 
 func TestNonblockingOpenRejectsFileReplacedByFIFO(t *testing.T) {
 	root := contextFixture(t, map[string][]byte{"policy.md": []byte("before")})

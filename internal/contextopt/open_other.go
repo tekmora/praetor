@@ -10,6 +10,14 @@ import (
 	"os"
 )
 
+// DirectoryIdentity is unavailable on platforms without pinned directory handles.
+type DirectoryIdentity struct{}
+
+// Identity reports that this platform cannot identify a pinned directory.
+func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
+	return DirectoryIdentity{}, ErrSourceIdentityUnavailable
+}
+
 // openNativeLeaf refuses platforms without the pinned snapshot opener.
 func openNativeLeaf(_ uintptr, _, _ string, _ leafAccess) (*os.File, error) {
 	return nil, fmt.Errorf("context snapshots require Unix or Windows")

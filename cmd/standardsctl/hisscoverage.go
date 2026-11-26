@@ -162,8 +162,8 @@ func verifyCoverage(ctx context.Context, root string, catalog *hisscoverage.Cata
 	if !report.Passed() {
 		return failContradictedCoverage(report)
 	}
-	fmt.Printf("\n[PASS] %d claim(s) checked against %d fixture(s) (%d replayed here, %d attributed elsewhere); every claim holds.\n",
-		report.Claims, report.Fixtures, report.Claims-len(report.Delegated), len(report.Delegated))
+	fmt.Printf("\n[PASS] %s (%d claim(s) replayed here, %d attributed elsewhere); every claim holds.\n",
+		coverageVerificationSummary(report), report.Claims-len(report.Delegated), len(report.Delegated))
 	return nil
 }
 
@@ -181,7 +181,17 @@ func printCoverageNotices(report *hisscoverage.Report) {
 	}
 }
 
-// failContradictedCoverage prints findings and returns their count alongside the catalog claim count.
+// coverageVerificationSummary counts each rule and language once across all findings.
+func coverageVerificationSummary(report *hisscoverage.Report) string {
+	affected := make(map[[2]string]struct{})
+	for _, finding := range report.Findings {
+		affected[[2]string{finding.Rule, finding.Language}] = struct{}{}
+	}
+	return fmt.Sprintf("%d finding(s), %d of %d claim(s) affected, %d fixture(s) checked",
+		len(report.Findings), len(affected), report.Claims, report.Fixtures)
+}
+
+// failContradictedCoverage prints bounded detail and summarizes all findings.
 func failContradictedCoverage(report *hisscoverage.Report) error {
 	fmt.Printf("\n=== Coverage verification findings ===\n")
 	for i := 0; i < len(report.Findings) && i < maxCoverageFindingsPrinted; i++ {
@@ -190,8 +200,7 @@ func failContradictedCoverage(report *hisscoverage.Report) error {
 	if len(report.Findings) > maxCoverageFindingsPrinted {
 		fmt.Printf("  ... and %d more\n", len(report.Findings)-maxCoverageFindingsPrinted)
 	}
-	return fmt.Errorf("%w: %d finding(s) across %d claim(s) and %d fixture(s)",
-		hisscoverage.ErrClaimUnsupported, len(report.Findings), report.Claims, report.Fixtures)
+	return fmt.Errorf("%w: %s", hisscoverage.ErrClaimUnsupported, coverageVerificationSummary(report))
 }
 
 // printHissUsage answers a bare or help-token `hiss` invocation.

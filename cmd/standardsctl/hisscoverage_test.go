@@ -72,13 +72,30 @@ func TestCoverageRefusesPlatformBeforeCatalog(t *testing.T) {
 	}
 }
 
-// TestCoverageCountsBucketFindingsSeparately pins the summary for two refused four-bucket claims.
+// TestCoverageCountsBucketFindingsSeparately counts affected pairs across the full report,
+// including pairs that first appear beyond the printed detail limit.
 func TestCoverageCountsBucketFindingsSeparately(t *testing.T) {
-	report := &hisscoverage.Report{Claims: 2, Findings: make([]hisscoverage.Finding, 8)}
-	err := failContradictedCoverage(report)
-	want := hisscoverage.ErrClaimUnsupported.Error() + ": 8 finding(s) across 2 claim(s) and 0 fixture(s)"
+	report := &hisscoverage.Report{Claims: 10, Fixtures: 7}
+	for _, bucket := range [...]string{"positive", "negative", "gap", "measured"} {
+		report.Findings = append(report.Findings, hisscoverage.Finding{Rule: "HISS-01", Language: "go", Bucket: bucket})
+	}
+	checkCoverageFailureSummary(t, report, "4 finding(s), 1 of 10 claim(s) affected, 7 fixture(s) checked")
+	for i := len(report.Findings); i < maxCoverageFindingsPrinted; i++ {
+		report.Findings = append(report.Findings, report.Findings[0])
+	}
+	report.Findings = append(report.Findings, hisscoverage.Finding{Rule: "HISS-02", Language: "go"},
+		hisscoverage.Finding{Rule: "HISS-01", Language: "rust"})
+	want := fmt.Sprintf("%d finding(s), 3 of 10 claim(s) affected, 7 fixture(s) checked", maxCoverageFindingsPrinted+2)
+	checkCoverageFailureSummary(t, report, want)
+}
+
+// checkCoverageFailureSummary checks the refusal sentinel and the counts returned to the CLI.
+func checkCoverageFailureSummary(t *testing.T, report *hisscoverage.Report, summary string) {
+	t.Helper()
+	_, err := captureStdout(t, func() error { return failContradictedCoverage(report) })
+	want := hisscoverage.ErrClaimUnsupported.Error() + ": " + summary
 	if !errors.Is(err, hisscoverage.ErrClaimUnsupported) || err.Error() != want {
-		t.Fatalf("refusal summary = %v, want %q", err, want)
+		t.Errorf("refusal summary = %v, want %q", err, want)
 	}
 }
 
@@ -88,7 +105,8 @@ func TestRunHissCoverage_Positive_OmittedTitleRendersTheCatalogTitle(t *testing.
 	if err != nil {
 		t.Fatalf("an omitted title must pass: %v\n%s", err, out)
 	}
-	mustContain(t, out, "  HISS-14 "+catalogTitle(t, "HISS-14")+"\n", "[PASS]")
+	mustContain(t, out, "  HISS-14 "+catalogTitle(t, "HISS-14")+"\n",
+		"[PASS] 0 finding(s), 0 of 1 claim(s) affected, 0 fixture(s) checked")
 	if strings.Contains(out, "[WARN]") {
 		t.Fatalf("an omitted title must not warn:\n%s", out)
 	}

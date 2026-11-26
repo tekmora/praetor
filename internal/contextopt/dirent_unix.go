@@ -28,9 +28,6 @@ const direntNameOffset = int(unsafe.Offsetof(unix.Dirent{}.Name))
 // maxEmptyDirentBlocks limits consecutive native reads that yield only unused slots.
 const maxEmptyDirentBlocks = 256
 
-// maxDirentReadAttempts includes the initial read and bounds retries during a signal storm.
-const maxDirentReadAttempts = 8
-
 // readNames returns at most n names, retaining surplus records for the next bounded read.
 func (dir *SnapshotDirectory) readNames(ctx context.Context, n int) ([]listedName, error) {
 	// A block of tombstones or dot entries can precede ordinary names or EOF.
@@ -86,7 +83,7 @@ func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context, read func(uin
 func retryDirentRead(ctx context.Context, read func() (int, error)) (int, error) {
 	var n int
 	var err error
-	for range maxDirentReadAttempts {
+	for range maxNativeAttempts {
 		select {
 		case <-ctx.Done():
 			return n, errors.Join(err, ctx.Err())

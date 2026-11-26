@@ -63,12 +63,16 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.S
 		return fmt.Errorf("open fixture rule %s: %w", rule.ID, err)
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
+	var seen languageDirectories
+	if len(rule.Coverage) > 1 {
+		seen = make(languageDirectories, len(rule.Coverage))
+	}
 	for i := 0; i < len(rule.Coverage); i++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		stage := fixtureStage{ruleID: rule.ID, language: rule.Coverage[i].fixtureLanguage()}
-		claim, err := stage.captureClaim(ctx, dir, store)
+		claim, err := stage.captureClaim(ctx, dir, store, seen)
 		if err != nil {
 			return err
 		}
@@ -77,8 +81,28 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.S
 	return nil
 }
 
+// languageDirectories records the first language to capture each physical directory of a rule.
+type languageDirectories map[contextopt.DirectoryIdentity]string
+
+// register rejects a second spelling before its buckets can be listed again.
+func (seen languageDirectories) register(stage fixtureStage, dir *contextopt.SnapshotDirectory) error {
+	if seen == nil {
+		return nil // A rule with one language cannot alias a previous claim.
+	}
+	id, err := dir.Identity()
+	if err != nil {
+		return fmt.Errorf("identify fixture directory for rule %s language %q: %w", stage.ruleID, stage.language, err)
+	}
+	if first, ok := seen[id]; ok {
+		return fmt.Errorf("%w: rule %s language %q shares its fixture directory with %q",
+			ErrInvalidCatalog, stage.ruleID, stage.language, first)
+	}
+	seen[id] = stage.language
+	return nil
+}
+
 // captureClaim captures each bucket relative to the pinned language directory.
-func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.SnapshotDirectory, store *fixtureStore) (_ claimSnapshot, err error) {
+func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.SnapshotDirectory, store *fixtureStore, seen languageDirectories) (_ claimSnapshot, err error) {
 	dir, err := contextopt.OpenChildDirectory(ctx, rule, stage.language)
 	if util.SoleNotExist(err) {
 		return nil, nil
@@ -87,6 +111,9 @@ func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.Sna
 		return nil, escapedError{fmt.Errorf("open fixture language %s: %w", stage.language, err)}
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
+	if err := seen.register(stage, dir); err != nil {
+		return nil, err
+	}
 	claim := make(claimSnapshot, len(fixtureBuckets))
 	for _, name := range fixtureBuckets {
 		if err := ctx.Err(); err != nil {

@@ -11,12 +11,35 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cordanaLLM/praetor/internal/util"
 	"golang.org/x/sys/unix"
 )
+
+// maxNativeAttempts includes the first call and bounds retries during a signal storm.
+const maxNativeAttempts = 8
+
+// retryInterrupted repeats a descriptor-relative syscall only after an isolated EINTR.
+func retryInterrupted(call func() error) error {
+	var err error
+	for range maxNativeAttempts {
+		err = call()
+		if !errors.Is(util.SoleCause(err), unix.EINTR) {
+			break
+		}
+	}
+	return err
+}
 
 // openNativeLeaf acquires a flat leaf relative to a live descriptor. A directory lookup
 // refuses other types in the kernel, and a substituted FIFO cannot block either kind.
 func openNativeLeaf(parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
+	return openUnixLeaf(parent, parentName, name, access, unix.Openat)
+}
+
+// openUnixLeaf keeps the same parent and no-follow flags across interrupted opens.
+func openUnixLeaf(parent uintptr, parentName, name string, access leafAccess,
+	openat func(int, string, int, uint32) (int, error),
+) (*os.File, error) {
 	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOFOLLOW
 	if access == listDirectory {
 		flags |= unix.O_DIRECTORY
@@ -24,7 +47,13 @@ func openNativeLeaf(parent uintptr, parentName, name string, access leafAccess) 
 	if parent > math.MaxInt {
 		return nil, &os.PathError{Op: "openat", Path: name, Err: unix.EBADF}
 	}
-	fd, err := unix.Openat(int(parent), name, flags, 0)
+	parentFD := int(parent)
+	var fd int
+	err := retryInterrupted(func() error {
+		var openErr error
+		fd, openErr = openat(parentFD, name, flags, 0)
+		return openErr
+	})
 	if err != nil {
 		pathErr := &os.PathError{Op: "openat", Path: name, Err: err}
 		if errors.Is(err, unix.ELOOP) {

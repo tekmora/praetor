@@ -75,6 +75,83 @@ func TestCatalogRefusesInvalidLanguageComponents(t *testing.T) {
 	}
 }
 
+// casePairCatalog declares two spellings whose fixture directories may coincide.
+func casePairCatalog() *Catalog {
+	catalog := catalogFor("HISS-01", "go", StateEnforced)
+	rule := &catalog.Rules[0]
+	second := rule.Coverage[0]
+	second.Language = "GO"
+	rule.Coverage = append(rule.Coverage, second)
+	return catalog
+}
+
+// uppercaseLanguageExists checks how the fixture volume resolves GO after creating go.
+func uppercaseLanguageExists(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return true
+}
+
+// TestVerifyRefusesAliasedLanguageDirectory lets the volume resolve GO. On a
+// case-sensitive volume a rename makes the second open resolve to the same inode.
+func TestVerifyRefusesAliasedLanguageDirectory(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	ruleDir := filepath.Join(root, FixtureDir, "HISS-01")
+	upper := filepath.Join(ruleDir, "GO")
+	rename := !uppercaseLanguageExists(t, upper)
+	if rename && runtime.GOOS == "windows" {
+		t.Skip("renaming a directory with open children requires Unix")
+	}
+	listings := 0
+	ctx := withBucketReader(t.Context(), func(_ string, entries []os.DirEntry) []os.DirEntry {
+		listings++
+		if rename && listings == 1 {
+			if err := os.Rename(filepath.Join(ruleDir, "go"), upper); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return entries
+	})
+	report, err := Verify(ctx, root, casePairCatalog())
+	const duplicate = `language "GO" shares its fixture directory with "go"`
+	if report != nil || !errors.Is(err, ErrInvalidCatalog) || !strings.Contains(err.Error(), duplicate) {
+		t.Errorf("expected invalid catalog naming GO, got report %+v, err %v", report, err)
+	}
+	if listings != 1 {
+		t.Fatalf("listed the aliased positive bucket %d times, want once", listings)
+	}
+}
+
+// TestCaptureDistinctLanguageDirectories preserves separate buckets when the
+// fixture volume supports both names.
+func TestCaptureDistinctLanguageDirectories(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "first.go", recursiveGo)
+	if uppercaseLanguageExists(t, filepath.Join(root, FixtureDir, "HISS-01", "GO")) {
+		t.Skip("fixture volume aliases go and GO")
+	}
+	writeCorpusFixture(t, root, "HISS-01", "GO", bucketPositive, "second.go", recursiveGo)
+	var store fixtureStore
+	corpus, err := store.openCorpusSnapshot(t.Context(), root, casePairCatalog())
+	if closeErr := store.close(); closeErr != nil {
+		t.Error(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for lang, want := range map[string]string{"go": "first.go", "GO": "second.go"} {
+		files := corpus[fixtureStage{ruleID: "HISS-01", language: lang}][bucketPositive].files
+		if len(files) != 1 || files[0].name != want {
+			t.Errorf("%s: captured %+v, want %s", lang, files, want)
+		}
+	}
+}
+
 // TestVerifyAcceptsABackedClaim is the positive dimension: a claim of detection whose
 // positive fixture the rule actually reports must pass.
 func TestVerifyAcceptsABackedClaim(t *testing.T) {

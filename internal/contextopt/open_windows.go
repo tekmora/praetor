@@ -18,6 +18,14 @@ import (
 // readLeafAttributes requests only the attributes needed to classify a listed Windows leaf.
 const readLeafAttributes leafAccess = listDirectory + 1
 
+// DirectoryIdentity retains the full volume serial and 128-bit file ID of a directory.
+type DirectoryIdentity = winfileid.Info
+
+// Identity queries the directory's retained handle for its full Windows identity.
+func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
+	return readFileID(dir.File)
+}
+
 // openNativeLeaf opens the reparse point itself relative to the pinned parent handle.
 // Directory type is checked on the handle so a misplaced regular leaf stays distinct
 // from a missing bucket, including on Windows filesystems with ambiguous path errors.

@@ -14,6 +14,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// DirectoryIdentity is the device and inode of an open directory.
+type DirectoryIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+// Identity returns the directory's identity from its retained descriptor.
+func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
+	info, err := dir.Stat()
+	if err != nil {
+		return DirectoryIdentity{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return DirectoryIdentity{}, ErrSourceIdentityUnavailable
+	}
+	// Device numbers are opaque identifiers, including on platforms with a signed dev_t.
+	return DirectoryIdentity{uint64(stat.Dev), uint64(stat.Ino)}, nil //#nosec G115 -- preserves all device and inode bits
+}
+
 // statListedName inspects one kernel-listed component relative to the retained descriptor.
 // AT_SYMLINK_NOFOLLOW classifies links and devices without opening them.
 func (dir *SnapshotDirectory) statListedName(name string) (os.FileInfo, error) {
@@ -28,7 +48,10 @@ func (dir *SnapshotDirectory) statListedName(name string) (os.FileInfo, error) {
 			statErr = unix.EBADF
 			return
 		}
-		statErr = unix.Fstatat(int(fd), name, &info.stat, unix.AT_SYMLINK_NOFOLLOW)
+		parentFD := int(fd)
+		statErr = retryInterrupted(func() error {
+			return unix.Fstatat(parentFD, name, &info.stat, unix.AT_SYMLINK_NOFOLLOW)
+		})
 	})
 	if err != nil {
 		return nil, err
