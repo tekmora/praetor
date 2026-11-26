@@ -31,7 +31,7 @@ func WriteSnapshot(ctx context.Context, path string, data []byte, mode os.FileMo
 // directory or file inside the governed tree is refused rather than written through.
 // WriteSnapshot resolves the ancestry that already exists and would follow it.
 func WriteSnapshotIn(ctx context.Context, root, rel string, data []byte, mode os.FileMode) error {
-	return replaceSnapshotIn(ctx, root, rel, data, ReplaceOptions{Mode: mode}, true)
+	return replaceSnapshotIn(ctx, namedDirectory(root), rel, data, ReplaceOptions{Mode: mode}, true)
 }
 
 // ReplaceSnapshotIn is ReplaceSnapshot for rel below root, confined as WriteSnapshotIn is: it
@@ -39,19 +39,25 @@ func WriteSnapshotIn(ctx context.Context, root, rel string, data []byte, mode os
 // options.Exists is false. A caller that planned the content from an earlier read binds the
 // write to that read, so a concurrent edit fails the publish instead of being overwritten.
 func ReplaceSnapshotIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions) error {
-	return replaceSnapshotIn(ctx, root, rel, data, options, false)
+	return replaceSnapshotIn(ctx, namedDirectory(root), rel, data, options, false)
+}
+
+// ReplaceSnapshotBelow binds the publish to the observed bytes or absence of rel, walking
+// from the caller's pinned root even when its original pathname now names another directory.
+func ReplaceSnapshotBelow(ctx context.Context, root *os.Root, rel string, data []byte, options ReplaceOptions) error {
+	return replaceSnapshotIn(ctx, borrowedDirectory(root), rel, data, options, false)
 }
 
 // replaceSnapshotIn pins the parent of rel below root, creating absent directories without
 // following a symlink, and publishes through ReplaceRootSnapshot. observe binds the publish to
 // the current file instead of options.Expected and options.Exists.
-func replaceSnapshotIn(ctx context.Context, root, rel string, data []byte, options ReplaceOptions, observe bool) (err error) {
+func replaceSnapshotIn(ctx context.Context, open directorySource, rel string, data []byte, options ReplaceOptions, observe bool) (err error) {
 	if err := validateReplacement(ctx, data, options); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	dir, err := ensureDirectoryIn(ctx, root, filepath.Dir(rel), 0o755)
+	dir, err := ensureDirectoryIn(ctx, open, filepath.Dir(rel), 0o755)
 	if err != nil {
 		return err
 	}

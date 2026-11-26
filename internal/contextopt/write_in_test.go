@@ -39,7 +39,7 @@ func TestWriteSnapshotIn_Positive_CreatesAndReplaces(t *testing.T) {
 			t.Fatalf("got %q, want %q", got, value)
 		}
 	}
-	dir, err := ensureDirectoryIn(t.Context(), root, ".", 0o755)
+	dir, err := ensureDirectoryIn(t.Context(), namedDirectory(root), ".", 0o755)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestWriteSnapshotIn_Negative_RefusesInvalidRequests(t *testing.T) {
 			return WriteSnapshotIn(t.Context(), root, filepath.Join("a", "x.md"), []byte{0xff}, 0o644)
 		},
 		"wide mode": func() error {
-			_, err := ensureDirectoryIn(t.Context(), root, "a", 0o777)
+			_, err := ensureDirectoryIn(t.Context(), namedDirectory(root), "a", 0o777)
 			return err
 		},
 	} {

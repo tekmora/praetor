@@ -73,7 +73,7 @@ func ensureDirectoryPath(ctx context.Context, abs string, mode os.FileMode) erro
 // exists instead, so a symlinked directory inside the governed tree carried its writes out of
 // it. Existing directory permissions are left unchanged. The walk is bounded by MaxDuration
 // (HISS-02). The caller closes the result.
-func ensureDirectoryIn(ctx context.Context, root, rel string, mode os.FileMode) (*os.Root, error) {
+func ensureDirectoryIn(ctx context.Context, open directorySource, rel string, mode os.FileMode) (*os.Root, error) {
 	if ctx == nil || mode == 0 || mode&^0o755 != 0 {
 		return nil, errors.New("directory creation requires a context and nonzero permissions at most 0755")
 	}
@@ -83,11 +83,7 @@ func ensureDirectoryIn(ctx context.Context, root, rel string, mode os.FileMode) 
 	if err != nil {
 		return nil, err
 	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil, err
-	}
-	base, err := openDirectory(ctx, absRoot)
+	base, err := open(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -130,13 +130,41 @@ func openDirectory(ctx context.Context, absolute string) (*os.Root, error) {
 // direction that matters. Repository content is attacker-influenceable; the operator's own
 // filesystem above the root is not, and conflating the two is what #109 was.
 //
-// Prefer this over OpenDirectory wherever the caller already holds a root and a path beneath it.
+// Use OpenDirectoryBelow when the caller already has an open handle for the boundary.
 func OpenDirectoryIn(ctx context.Context, root, rel string) (*os.Root, error) {
-	return openDirectoryIn(ctx, root, rel, false)
+	return openDirectoryIn(ctx, namedDirectory(root), rel, false)
+}
+
+// OpenDirectoryBelow pins a directory below a borrowed root, refusing symlinks in rel.
+// The caller owns the returned directory and retains ownership of root.
+func OpenDirectoryBelow(ctx context.Context, root *os.Root, rel string) (*os.Root, error) {
+	return openDirectoryIn(ctx, borrowedDirectory(root), rel, false)
+}
+
+// directorySource opens an owned handle for a component walk, which closes it as it descends.
+type directorySource func(context.Context) (*os.Root, error)
+
+// namedDirectory opens the boundary supplied by a pathname-based caller.
+func namedDirectory(path string) directorySource {
+	return func(ctx context.Context) (*os.Root, error) { return OpenDirectory(ctx, path) }
+}
+
+// borrowedDirectory starts each walk at the caller's pinned directory. Opening "." gives the
+// walker its own handle without looking up the name under which the directory was opened.
+func borrowedDirectory(root *os.Root) directorySource {
+	return func(ctx context.Context) (*os.Root, error) {
+		if root == nil {
+			return nil, errors.New("snapshot operation requires a pinned root")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return root.OpenRoot(".")
+	}
 }
 
 // openDirectoryIn returns a nil directory for an initially absent or blocked child in an optional walk.
-func openDirectoryIn(ctx context.Context, root, rel string, optional bool) (*os.Root, error) {
+func openDirectoryIn(ctx context.Context, open directorySource, rel string, optional bool) (*os.Root, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -147,11 +175,7 @@ func openDirectoryIn(ctx context.Context, root, rel string, optional bool) (*os.
 	if err != nil {
 		return nil, err
 	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil, err
-	}
-	current, err := openDirectory(ctx, absRoot)
+	current, err := open(ctx)
 	if err != nil {
 		return nil, err
 	}

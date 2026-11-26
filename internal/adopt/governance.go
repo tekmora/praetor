@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/config"
@@ -372,13 +373,15 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 	if s.declines("pull-request-template") {
 		return nil
 	}
-	upper, err := repoFile(s.repoPath, prTemplateUpper)
+	return s.scaffoldInstalledTemplate(ctx)
+}
+
+// installPullRequestTemplate selects the existing spelling and renders the scaffold within
+// the repository opened for this adoption. A preview uses the same lookup without locking.
+func (s *adoptSession) installPullRequestTemplate(ctx context.Context, root *os.Root) error {
+	rel, exists, err := installedTemplatePath(ctx, root)
 	if err != nil {
 		return err
-	}
-	rel := prTemplateFile
-	if fileExists(upper) {
-		rel = prTemplateUpper
 	}
 	if s.policy == nil {
 		if s.opts.DryRun {
@@ -387,7 +390,9 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 		}
 		return errors.New("render pull request template: the effective audit policy is unresolved")
 	}
-	return s.scaffoldInstalledTemplate(ctx, scaffold{
+	return s.reconcileInstalledTemplate(ctx, scaffold{
+		root:      root,
+		confined:  true,
 		rel:       rel,
 		perm:      filePerm,
 		content:   []byte(buildPullRequestTemplate(s.policy.Policy.Complexity)),
@@ -395,7 +400,7 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 		refreshed: "Refreshed the unedited pull request template to the current verification checklist",
 		created:   "Scaffolded pull request template with HISS verification checklist",
 		verified:  "Existing pull request template verified present",
-	})
+	}, exists)
 }
 
 func reconcileSecurityPolicy(ctx context.Context, s *adoptSession) error {

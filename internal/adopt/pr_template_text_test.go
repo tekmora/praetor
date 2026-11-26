@@ -372,10 +372,11 @@ func TestPRTemplateConcurrentInstallRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.recordInstalledTemplate(t.Context(), rel, before, exists, winner); err != nil {
+	root := templateFixtureRoot(t, s.repoPath)
+	if err := s.recordInstalledTemplate(t.Context(), root, rel, before, exists, winner); err != nil {
 		t.Errorf("adoption recording the same digest after a concurrent create: %v", err)
 	}
-	err = s.recordInstalledTemplate(t.Context(), rel, before, exists, []byte("different template\n"))
+	err = s.recordInstalledTemplate(t.Context(), root, rel, before, exists, []byte("different template\n"))
 	if err == nil || !strings.Contains(err.Error(), "snapshot already exists: "+filepath.Base(rel)) {
 		t.Fatalf("adoption recording a different digest: expected a conflict naming the record, got %v", err)
 	}
@@ -390,7 +391,7 @@ func TestPRTemplateConcurrentInstallRecord(t *testing.T) {
 
 // templateReadContext schedules a competitor on the first cancellation check made directly
 // on the caller's context. The bounded record read has its own child context. The first
-// direct check is ObserveSnapshot at the start of refreshPriorScaffold, before it reads the
+// direct check is the scaffold observation in refreshPriorScaffold, before it reads the
 // template. This scheduling point also exists in the original, unlocked implementation.
 type templateReadContext struct {
 	context.Context
@@ -455,7 +456,7 @@ func TestPRTemplateAdoptionLockRefusal(t *testing.T) {
 	s := ceilingPRTemplateSession(t.TempDir())
 	record := filepath.Join(s.repoPath, workingDirPath, "adopt-installed", prTemplateFile+".sha256")
 	mustWrite(t, record, "invalid digest\n")
-	holdTemplateDirectoryLock(t, s.repoPath)
+	takeTemplateFixtureLock(t, s.repoPath)
 	ctx, err := contextopt.WithDirectoryLockBudget(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +484,7 @@ func TestPRTemplateFailedRefreshKeepsInstallRecord(t *testing.T) {
 	if got := mustRead(t, record); got != want {
 		t.Fatalf("initial install record = %q, want %q", got, want)
 	}
-	holdTemplateDirectoryLock(t, filepath.Join(s.repoPath, filepath.Dir(prTemplateFile)))
+	takeTemplateFixtureLock(t, filepath.Join(s.repoPath, filepath.Dir(prTemplateFile)))
 	ctx, err := contextopt.WithDirectoryLockBudget(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -496,29 +497,6 @@ func TestPRTemplateFailedRefreshKeepsInstallRecord(t *testing.T) {
 	if repoText(t, s.repoPath, prTemplateFile) != installed || mustRead(t, record) != want {
 		t.Fatal("failed refresh changed the installed template or its digest record")
 	}
-}
-
-// holdTemplateDirectoryLock holds the named publication directory until the test ends.
-func holdTemplateDirectoryLock(t *testing.T, path string) {
-	t.Helper()
-	dir, err := contextopt.OpenDirectory(t.Context(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := dir.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	unlock, err := contextopt.LockDirectory(t.Context(), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := unlock(); err != nil {
-			t.Error(err)
-		}
-	})
 }
 
 // TestPRTemplateRejectsMalformedInstallRecord requires an invalid digest to fail before writing.

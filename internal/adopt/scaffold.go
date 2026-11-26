@@ -133,9 +133,11 @@ type scaffold struct {
 	verified    string // action detail when an existing file matches content
 	// confined writes through contextopt.WriteSnapshotIn, the writer compile-context uses, which
 	// follows no symlink below the repository, and refreshes an earlier text through
-	// contextopt.ReplaceSnapshotIn. It is set for the files compile-context also reads (the
-	// canonical personas); every other scaffold goes through writeRepoFile.
+	// contextopt.ReplaceSnapshotIn. A caller with an open root uses the same confined
+	// operations through that handle.
 	confined bool
+	// root is the repository handle borrowed from the template installer.
+	root *os.Root
 	// prior holds the digest (priorRendering) of every text a Praetor release wrote at rel,
 	// keyed to what produced it. An existing file holding one of them, in one consistent
 	// line-ending style, is Praetor output nobody edited, so adoption refreshes it to content
@@ -201,19 +203,36 @@ func (s *adoptSession) scaffoldFile(ctx context.Context, sc scaffold) (scaffoldS
 	if err != nil {
 		return 0, err
 	}
-	if fileExists(full) {
-		refreshed, err := s.refreshPriorScaffold(ctx, full, sc)
+	return s.scaffoldAt(ctx, full, sc, fileExists(full))
+}
+
+// scaffoldAt applies the scaffold at the observed name. For a pinned scaffold the name
+// is relative to sc.root. Other scaffolds use the absolute path confined by repoFile.
+func (s *adoptSession) scaffoldAt(ctx context.Context, path string, sc scaffold, exists bool) (scaffoldState, error) {
+	if exists {
+		refreshed, err := s.refreshPriorScaffold(ctx, path, sc)
 		if err != nil || refreshed {
 			return scaffoldWritten, err
 		}
-		return s.recordExistingScaffold(ctx, full, sc)
+		return s.recordExistingScaffold(ctx, path, sc)
 	}
-	if err := s.writeScaffold(ctx, full, sc); err != nil {
+	if err := s.writeScaffold(ctx, path, sc); err != nil {
 		return 0, err
 	}
 	s.planDryRunWrite(sc.rel, sc.content)
 	s.report.recordCreated(sc.rel, sc.created)
 	return scaffoldWritten, nil
+}
+
+// observe reads the scaffold through its pinned repository when supplied.
+func (sc scaffold) observe(ctx context.Context, path string) ([]byte, bool, error) {
+	if sc.root == nil {
+		return contextopt.ObserveSnapshot(ctx, path)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return contextopt.ObserveSnapshotBelow(ctx, sc.root, path, false)
 }
 
 // refreshPriorScaffold replaces an existing file holding an earlier Praetor text of sc with
@@ -224,7 +243,7 @@ func (s *adoptSession) refreshPriorScaffold(ctx context.Context, full string, sc
 	if len(sc.prior) == 0 {
 		return false, nil
 	}
-	actual, exists, err := contextopt.ObserveSnapshot(ctx, full)
+	actual, exists, err := sc.observe(ctx, full)
 	if err != nil || !exists {
 		return false, ctx.Err()
 	}
@@ -269,6 +288,8 @@ const snapshotModeBits os.FileMode = 0o644
 func (s *adoptSession) publishPriorRefresh(ctx context.Context, full string, actual, content []byte, sc scaffold) error {
 	options := contextopt.ReplaceOptions{Expected: actual, Exists: true, Mode: sc.perm, AcceptCurrent: true}
 	switch {
+	case sc.root != nil:
+		return contextopt.ReplaceSnapshotBelow(ctx, sc.root, filepath.FromSlash(sc.rel), content, options)
 	case sc.confined:
 		return contextopt.ReplaceSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), content, options)
 	case sc.perm&^snapshotModeBits != 0:
@@ -280,7 +301,13 @@ func (s *adoptSession) publishPriorRefresh(ctx context.Context, full string, act
 // writeScaffold persists sc at full unless the session is a dry run, through the root-pinned
 // writer when sc is confined.
 func (s *adoptSession) writeScaffold(ctx context.Context, full string, sc scaffold) error {
-	if !sc.confined || s.opts.DryRun {
+	if s.opts.DryRun {
+		return nil
+	}
+	if sc.root != nil {
+		return contextopt.ReplaceSnapshotBelow(ctx, sc.root, filepath.FromSlash(sc.rel), sc.content, contextopt.ReplaceOptions{Mode: sc.perm})
+	}
+	if !sc.confined {
 		return s.write(full, sc.content, sc.perm)
 	}
 	if err := contextopt.WriteSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), sc.content, sc.perm); err != nil {
@@ -296,7 +323,7 @@ func (s *adoptSession) writeScaffold(ctx context.Context, full string, sc scaffo
 // (auditLocked), a file with mixed line endings included, since it cannot hold the scaffold's
 // text, and preserved otherwise.
 func (s *adoptSession) recordExistingScaffold(ctx context.Context, full string, sc scaffold) (scaffoldState, error) {
-	actual, _, readErr := contextopt.ObserveSnapshot(ctx, full)
+	actual, _, readErr := sc.observe(ctx, full)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return 0, ctxErr
 	}

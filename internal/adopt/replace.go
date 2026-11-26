@@ -172,11 +172,19 @@ func ensurePrivateWorkingDir(ctx context.Context, repoPath string) error {
 	if err != nil {
 		return fmt.Errorf("open repository root: %w", err)
 	}
-	err = root.Mkdir(workingDirPath, workingDirPerm)
-	if err != nil && !errors.Is(err, os.ErrExist) {
-		return errors.Join(fmt.Errorf("create %s: %w", workingDirPath, err), root.Close())
+	return errors.Join(ensurePrivateWorkingDirBelow(ctx, root), root.Close())
+}
+
+// ensurePrivateWorkingDirBelow creates the private ledger relative to its caller's root.
+func ensurePrivateWorkingDirBelow(ctx context.Context, root *os.Root) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return root.Close()
+	err := root.Mkdir(workingDirPath, workingDirPerm)
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("create %s: %w", workingDirPath, err)
+	}
+	return nil
 }
 
 // backupPath returns where this run keeps the backup of rel, fixing the run's stamp on first use.

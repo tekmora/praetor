@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,33 +20,64 @@ import (
 // installedTemplateDigest matches one canonical SHA-256 line in the private adoption ledger.
 var installedTemplateDigest = regexp.MustCompile("^[0-9a-f]{64}\n$")
 
-// scaffoldInstalledTemplate holds the repository directory lock used by publishLock from
-// record observation through confirmation. The root exists even on a first adoption or with
-// an obstructed ledger. Both snapshot writes lock strict descendants of this directory.
-func (s *adoptSession) scaffoldInstalledTemplate(ctx context.Context, sc scaffold) (err error) {
-	if s.opts.DryRun {
-		return s.reconcileInstalledTemplate(ctx, sc)
-	}
-	lockCtx, cancel := context.WithTimeout(ctx, contextopt.DirectoryLockBudget)
+// scaffoldInstalledTemplate pins the repository for the whole operation. A live install
+// holds its directory lock from template name selection through digest publication.
+// Template and record publishers take their own locks on strict descendants.
+func (s *adoptSession) scaffoldInstalledTemplate(ctx context.Context) (err error) {
+	budget := contextopt.DirectoryLockBudget
+	lockCtx, cancel := context.WithTimeoutCause(ctx, budget, fmt.Errorf("%s wait budget: %w", budget, context.DeadlineExceeded))
 	defer cancel()
 	root, err := contextopt.OpenDirectory(lockCtx, s.repoPath)
 	if err != nil {
 		return fmt.Errorf("open repository for PR template adoption lock: %w", err)
 	}
 	defer func() { err = errors.Join(err, root.Close()) }()
+	if s.opts.DryRun {
+		return s.installPullRequestTemplate(ctx, root)
+	}
 	unlock, err := contextopt.LockDirectory(lockCtx, root)
 	if err != nil {
 		return fmt.Errorf("acquire PR template adoption lock on %s: %w", root.Name(), err)
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
-	return s.reconcileInstalledTemplate(ctx, sc)
+	return s.installPullRequestTemplate(ctx, root)
+}
+
+// installedTemplatePath prefers the uppercase spelling when present, refusing a linked
+// directory or filename before scaffolding. Missing directories are left for the writer.
+func installedTemplatePath(ctx context.Context, root *os.Root) (_ string, _ bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
+	parent := filepath.Dir(filepath.FromSlash(prTemplateFile))
+	dir, err := contextopt.OpenDirectoryBelow(ctx, root, parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return prTemplateFile, false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("locate PR template in %s: %w", parent, err)
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	for _, rel := range [...]string{prTemplateUpper, prTemplateFile} {
+		info, err := dir.Lstat(filepath.Base(rel))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("locate %s: %w", rel, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", false, fmt.Errorf("refusing symlink at %s", rel)
+		}
+		return rel, true, nil
+	}
+	return prTemplateFile, false, nil
 }
 
 // reconcileInstalledTemplate recognizes the last installation alongside known releases.
 // A dry run, failed write or preserved edit leaves the record untouched.
-func (s *adoptSession) reconcileInstalledTemplate(ctx context.Context, sc scaffold) error {
+func (s *adoptSession) reconcileInstalledTemplate(ctx context.Context, sc scaffold, templateExists bool) error {
 	record := filepath.Join(workingDirPath, "adopt-installed", filepath.FromSlash(sc.rel)+".sha256")
-	before, exists, err := contextopt.ObserveOptionalSnapshotIn(ctx, s.repoPath, record)
+	before, exists, err := contextopt.ObserveSnapshotBelow(ctx, sc.root, record, true)
 	if err != nil {
 		return fmt.Errorf("read template install record %s: %w", record, err)
 	}
@@ -56,7 +88,7 @@ func (s *adoptSession) reconcileInstalledTemplate(ctx context.Context, sc scaffo
 		sc.prior = maps.Clone(sc.prior)
 		sc.prior[strings.TrimSuffix(string(before), "\n")] = "last installed template"
 	}
-	state, err := s.scaffoldFile(ctx, sc)
+	state, err := s.scaffoldAt(ctx, filepath.FromSlash(sc.rel), sc, templateExists)
 	if err != nil || s.opts.DryRun {
 		return err
 	}
@@ -69,7 +101,7 @@ func (s *adoptSession) reconcileInstalledTemplate(ctx context.Context, sc scaffo
 // confirmInstalledTemplate records the installed bytes only while they match the requested
 // rendering. A CRLF checkout retains the same canonical digest as the LF rendering.
 func (s *adoptSession) confirmInstalledTemplate(ctx context.Context, sc scaffold, record string, before []byte, exists bool) error {
-	installed, present, err := contextopt.ObserveSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel))
+	installed, present, err := contextopt.ObserveSnapshotBelow(ctx, sc.root, filepath.FromSlash(sc.rel), false)
 	if err != nil {
 		return fmt.Errorf("read installed template %s: %w", sc.rel, err)
 	}
@@ -80,12 +112,12 @@ func (s *adoptSession) confirmInstalledTemplate(ctx context.Context, sc scaffold
 	if !present || !match {
 		return fmt.Errorf("installed template %s changed before recording its digest", sc.rel)
 	}
-	return s.recordInstalledTemplate(ctx, record, before, exists, installed)
+	return s.recordInstalledTemplate(ctx, sc.root, record, before, exists, installed)
 }
 
 // recordInstalledTemplate binds the update to the previously observed record. Recording a
 // verified match also repairs a missing record after an interrupted installation.
-func (s *adoptSession) recordInstalledTemplate(ctx context.Context, record string, before []byte, exists bool, content []byte) error {
+func (s *adoptSession) recordInstalledTemplate(ctx context.Context, root *os.Root, record string, before []byte, exists bool, content []byte) error {
 	digest, _, err := util.CanonicalTextDigest(content)
 	if err != nil {
 		return fmt.Errorf("digest installed template for %s: %w", record, err)
@@ -94,10 +126,10 @@ func (s *adoptSession) recordInstalledTemplate(ctx context.Context, record strin
 	if string(before) == line {
 		return nil
 	}
-	if err := ensurePrivateWorkingDir(ctx, s.repoPath); err != nil {
+	if err := ensurePrivateWorkingDirBelow(ctx, root); err != nil {
 		return err
 	}
-	if err := contextopt.ReplaceSnapshotIn(ctx, s.repoPath, record, []byte(line), contextopt.ReplaceOptions{
+	if err := contextopt.ReplaceSnapshotBelow(ctx, root, record, []byte(line), contextopt.ReplaceOptions{
 		Expected: before, Exists: exists, Mode: 0o600, AcceptCurrent: true,
 	}); err != nil {
 		writeErr := fmt.Errorf("write template install record %s: %w", record, err)
