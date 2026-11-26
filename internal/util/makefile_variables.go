@@ -312,49 +312,40 @@ func (v makefileVariables) bind(binding makefileBinding) (makefileValue, bool) {
 	default:
 		return makefileValue{}, false
 	}
-	var expanded strings.Builder
-	depth, ok := v.expand(text, binding.line, func(part string, _ bool) {
-		expanded.WriteString(part)
-	})
-	value := expanded.String()
-	if !ok || depth >= MaxMakefileVariableDepth || !makefileLiteralWords(value) {
+	expanded, depth, ok := v.expand(text, binding.line)
+	if !ok || depth >= MaxMakefileVariableDepth {
 		return makefileValue{}, false
 	}
-	return makefileValue{text: value, line: binding.line, depth: depth + 1}, true
+	return makefileValue{text: expanded, line: binding.line, depth: depth + 1}, true
 }
 
-// expand emits each literal run and each fixed reference value in order. The caller decides
-// whether blanks in a value separate names. A failed expansion invalidates only this text.
-func (v makefileVariables) expand(text string, line int, emit func(part string, fromValue bool)) (int, bool) {
+// expand resolves a complete value or rule head to plain path text and horizontal blanks.
+// A byte outside that alphabet or a reference without a fixed value invalidates the whole input.
+func (v makefileVariables) expand(text string, line int) (string, int, bool) {
 	if len(text) > MaxMakefileLineBytes {
-		return 0, false
+		return "", 0, false
 	}
-	size, depth := 0, 0
-	for len(text) > 0 {
-		next := strings.IndexByte(text, '$')
-		if next < 0 {
-			if size+len(text) > MaxMakefileLineBytes {
-				return 0, false
+	var expanded strings.Builder
+	depth := 0
+	for i := 0; i < len(text); {
+		if text[i] != '$' {
+			if !makefileValueByte(text[i]) || expanded.Len() == MaxMakefileLineBytes {
+				return "", 0, false
 			}
-			emit(text, false)
-			break
+			expanded.WriteByte(text[i])
+			i++
+			continue
 		}
-		reference := text[next:]
-		width := makefileReferenceWidth(reference)
-		value, ok := v.lookup(reference[:width], line)
-		if !ok {
-			return 0, false
+		width := makefileReferenceWidth(text[i:])
+		value, ok := v.lookup(text[i:i+width], line)
+		if !ok || expanded.Len()+len(value.text) > MaxMakefileLineBytes {
+			return "", 0, false
 		}
-		size += next + len(value.text)
-		if size > MaxMakefileLineBytes {
-			return 0, false
-		}
-		emit(text[:next], false)
-		emit(value.text, true)
+		expanded.WriteString(value.text)
 		depth = max(depth, value.depth)
-		text = reference[width:]
+		i += width
 	}
-	return depth, true
+	return expanded.String(), depth, true
 }
 
 // lookup returns the value reference names, "$(NAME)" or "${NAME}" closed by its own bracket, when
@@ -368,53 +359,18 @@ func (v makefileVariables) lookup(reference string, line int) (makefileValue, bo
 	return value, ok && value.line < line
 }
 
-// targets returns all provable names and whether every word resolved. Patterns and unknown
-// references keep ownership uncertain for other names without hiding literal siblings.
-func (v makefileVariables) targets(words []makefileTargetWord, line int) ([]string, bool) {
-	var names []string
-	complete := true
-	for _, word := range words {
-		switch {
-		case strings.Contains(word.text, "%"):
-			complete = false
-		case !strings.Contains(word.text, "$"):
-			names = append(names, word.text)
-		default:
-			expanded, ok := v.expandTarget(word, line)
-			complete = complete && ok
-			names = append(names, expanded...)
+// targets returns the provable names in a rule head. A computed head must resolve in full
+// to plain path words before any name counts. Literal heads keep their Make quoting rules.
+func (v makefileVariables) targets(head string, line int) ([]string, bool) {
+	if strings.Contains(head, "$") {
+		literal, _, ok := v.expand(head, line)
+		if !ok {
+			return nil, false
 		}
+		return strings.Fields(literal), true
 	}
-	return names, complete
-}
-
-// expandTarget expands one already-split source word. Only blanks supplied by a variable
-// separate result names. Quoted source blanks and backslashes are ordinary filename bytes here.
-func (v makefileVariables) expandTarget(word makefileTargetWord, line int) ([]string, bool) {
-	if !word.expandable {
-		return nil, false
-	}
-	var names []string
-	var name strings.Builder
-	finish := func() {
-		if name.Len() > 0 {
-			names = append(names, name.String())
-			name.Reset()
-		}
-	}
-	_, ok := v.expand(word.text, line, func(part string, fromValue bool) {
-		if fromValue {
-			for i := strings.IndexAny(part, " \t"); i >= 0; i = strings.IndexAny(part, " \t") {
-				name.WriteString(part[:i])
-				finish()
-				part = part[i+1:]
-			}
-		}
-		name.WriteString(part)
-	})
-	if !ok {
-		return nil, false
-	}
-	finish()
-	return names, true
+	names := MakefileTargetWords(head)
+	count := len(names)
+	names = slices.DeleteFunc(names, func(name string) bool { return strings.Contains(name, "%") })
+	return names, len(names) == count
 }

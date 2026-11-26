@@ -504,6 +504,9 @@ func makefileRuleShape(head, rest string, operands map[string]struct{}) string {
 	if strings.Contains(head, "&:") || strings.Contains(head, "&") {
 		return "grouped target"
 	}
+	if strings.Contains(head, "$") {
+		return "computed target"
+	}
 	for _, field := range MakefileTargetWords(head) {
 		if shape := makefileRuleTargetShape(field, operands); shape != "" {
 			return shape
@@ -545,12 +548,9 @@ func makefilePrerequisiteShape(rest string, operands map[string]struct{}) string
 	return ""
 }
 
-// makefileRuleTargetShape names why one rule target is not statically provable (computed, pattern, grouped,
+// makefileRuleTargetShape names why one literal rule target is not statically provable (pattern, grouped,
 // unsupported syntax, a rule that remakes a makefile or operand, or a special dot target), or returns "".
 func makefileRuleTargetShape(field string, operands map[string]struct{}) string {
-	if strings.Contains(field, "$") {
-		return "computed target"
-	}
 	if strings.Contains(field, "%") {
 		return "pattern rule"
 	}

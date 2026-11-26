@@ -39,7 +39,7 @@ func MakefileImplicitSourceNear(ctx context.Context, dir *os.Root, base string) 
 
 // checkMakefileSourceEntries uses the directory's case behavior when matching sibling names.
 func checkMakefileSourceEntries(ctx context.Context, dir *os.Root, entries []os.DirEntry, base string) error {
-	foldCase, err := makefileCaseAliases(dir, base)
+	foldCase, err := makefileCaseAliases(dir, entries, base)
 	if err != nil {
 		return err
 	}
@@ -59,8 +59,8 @@ func checkMakefileSourceEntries(ctx context.Context, dir *os.Root, entries []os.
 	return ctx.Err()
 }
 
-// makefileCaseAliases reports whether a differently cased spelling selects the same file.
-func makefileCaseAliases(dir *os.Root, base string) (bool, error) {
+// makefileCaseAliases reports whether both spellings select a single directory entry.
+func makefileCaseAliases(dir *os.Root, entries []os.DirEntry, base string) (bool, error) {
 	alternate := strings.ToUpper(base)
 	if alternate == base {
 		alternate = strings.ToLower(base)
@@ -76,5 +76,11 @@ func makefileCaseAliases(dir *os.Root, base string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return os.SameFile(original, alias), nil
+	listed := 0
+	for i := 0; i < len(entries) && i < maxMakefileSourceEntries; i++ {
+		if name := entries[i].Name(); name == base || name == alternate {
+			listed++
+		}
+	}
+	return listed < 2 && os.SameFile(original, alias), nil
 }

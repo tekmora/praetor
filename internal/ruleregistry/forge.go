@@ -76,11 +76,12 @@ func registryNeedsForge(registry *Registry) bool {
 	return false
 }
 
+// loadForgeStates collects valid settings and retains any provider error with the audit diagnostics.
 func loadForgeStates(
 	ctx context.Context,
 	registry *Registry,
 	opts AuditOptions,
-	report *Report,
+	report *auditDiagnostics,
 ) map[ForgeSetting]ForgeState {
 	states := map[ForgeSetting]ForgeState{}
 	if !registryNeedsForge(registry) {
@@ -93,6 +94,7 @@ func loadForgeStates(
 	resolved, err := opts.Forge(ctx)
 	if err != nil {
 		report.Problems = append(report.Problems, fmt.Sprintf("forge readback failed: %v", err))
+		report.causes = append(report.causes, err)
 	}
 	for setting, state := range resolved {
 		if validForgeSetting(setting) {

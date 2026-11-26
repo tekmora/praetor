@@ -197,8 +197,8 @@ not asserted anyway:
 
   A computed target name counts once the file fixes its value, so `$(NAME):` after
   `GATE := verify` and `NAME := $(GATE)-all` offers the command; the adoption guide
-  lists the bindings the reader resolves. A literal `verify-all` in a target list also
-  offers the command when a sibling reference stays unresolved.
+  lists the bindings the reader resolves. A computed rule head must resolve in full
+  to plain path words before any target in it can offer the command.
 
   A line the reader claims no rule from offers no command either, although adoption
   preserves such a file as possibly owning the target: an `include`, an `$(eval ...)`

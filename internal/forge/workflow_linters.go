@@ -840,12 +840,11 @@ func readRootMakefile(ctx context.Context, repoPath string) map[string]*makeTarg
 
 // parseTargetLine records prerequisites and an inline recipe for each active target on the line.
 func parseTargetLine(trimmed string, makeVars map[string]string, targets map[string]*makeTargetDef) []string {
-	colon := strings.Index(trimmed, ":")
-	if colon < 0 || isMakeAssignment(trimmed, colon) {
+	head, rest, ok := util.MakefileRuleParts(trimmed)
+	if !ok {
 		return nil
 	}
-	targetNames := util.MakefileTargetWords(trimmed[:colon])
-	rest := trimmed[colon+1:]
+	targetNames := util.MakefileTargetWords(head)
 	inlineRecipe := ""
 	if semi := strings.Index(rest, ";"); semi >= 0 {
 		inlineRecipe = strings.TrimSpace(rest[semi+1:])
@@ -996,15 +995,6 @@ func stripMakeRecipePrefixes(s string) string {
 		s = strings.TrimLeft(s[1:], "\t ")
 	}
 	return s
-}
-
-func isMakeAssignment(line string, colon int) bool {
-	rest := line[colon:]
-	if strings.HasPrefix(rest, ":=") || strings.HasPrefix(rest, "::=") {
-		return true
-	}
-	head := line[:colon]
-	return strings.ContainsAny(head, "=+?!")
 }
 
 func joinMakefileLines(content string) []string {

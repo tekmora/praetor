@@ -197,9 +197,10 @@ used, so `X != cat rebind.txt` with `rebind.txt` holding `$(eval NAME := build)`
 `NAME := build` the same way (`makefileEvaluatesText` in `internal/util/makefile_variables.go`).
 Neither does a file whose computed binding names hold more than 256 literal runs in all
 (`MaxMakefileComputedRuns`): the reader splits each such name once and compares every variable it
-fixes with each run, and the bound keeps that work small on a large Makefile. On
-`$(PREFIX) verify-all: dep`, the reader recognizes the literal `verify-all`. An unbound
-`PREFIX` leaves ownership of additional target names uncertain.
+fixes with each run, and the bound keeps that work small on a large Makefile. A computed rule head
+must resolve in full to plain path words. In `$(PREFIX) verify-all: dep`, an unbound `PREFIX`
+leaves both targets unresolved. A backslash in a computed head also leaves the entire head
+unresolved, even when the variable has a fixed value. Literal heads retain Make's quoted blanks.
 
 The documentation gate block is the one place adoption follows includes. When the Makefile holds
 `include path` with literal operands only, adoption reads each file that Git tracks under exactly

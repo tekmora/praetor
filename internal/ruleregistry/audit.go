@@ -62,7 +62,7 @@ type Report struct {
 	Problems []string `json:"problems,omitempty"`
 }
 
-// auditDiagnostics keeps local pointer causes available to errors.As while collecting report rows.
+// auditDiagnostics keeps pointer and forge readback errors available while collecting report rows.
 type auditDiagnostics struct {
 	*Report
 	causes []error
@@ -73,7 +73,7 @@ func (d *auditDiagnostics) Error() string {
 	return fmt.Sprintf("rules audit: %d invalid declaration(s)", len(d.Problems))
 }
 
-// Unwrap returns the underlying errors from resolving local pointers.
+// Unwrap returns the underlying errors from resolving evidence.
 func (d *auditDiagnostics) Unwrap() []error {
 	return d.causes
 }
@@ -151,7 +151,7 @@ func AuditWithOptions(ctx context.Context, root string, opts AuditOptions) (*Rep
 	}
 	report := &auditDiagnostics{Report: &Report{}}
 	entries := indexEntries(registry, known, report.Report)
-	forgeStates := loadForgeStates(ctx, registry, opts, report.Report)
+	forgeStates := loadForgeStates(ctx, registry, opts, report)
 	for i := 0; i < len(known) && i < maxAuditRules; i++ {
 		row := auditRule(ctx, root, known[i], entries[known[i].ID], forgeStates, report)
 		report.Rows = append(report.Rows, row)

@@ -851,10 +851,10 @@ func TestAudit_ForgeEvidenceNegative(t *testing.T) {
 		t.Fatalf("drift HISS-01 = %#v, want unresolved and unenforced", row)
 	}
 
-	readErr := errors.New("forge unavailable")
+	readErr := context.DeadlineExceeded
 	report, err = AuditWithOptions(t.Context(), repo, forgeOptions(ForgeRequiredSignatures,
 		forgeState("required", "", false, false), readErr))
-	if err == nil || !strings.Contains(strings.Join(report.Problems, "\n"), "forge readback failed: forge unavailable") {
+	if !errors.Is(err, readErr) || !slices.Contains(report.Problems, "forge readback failed: "+readErr.Error()) {
 		t.Fatalf("read error AuditWithOptions() = (%#v, %v)", report, err)
 	}
 

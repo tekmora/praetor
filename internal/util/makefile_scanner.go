@@ -153,7 +153,7 @@ func (s *makefileScanner) syntax(line string, fields []string) {
 	case makefileConditionalWords[fields[0]]:
 		s.conditional(fields)
 	default:
-		if colon, _ := makefileRuleDelimiter(line); colon >= 0 {
+		if _, _, ok := MakefileRuleParts(line); ok {
 			s.set(makefileRecipeOpen)
 		} else {
 			s.set(makefileRecipeClosed)

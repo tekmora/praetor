@@ -164,8 +164,8 @@ type makefileOwnershipRow struct {
 // appendable, a continued assignment, recipe line or comment declared verify-all, a continued
 // target name declared nothing, and a define whose continued line swallows endef closed there.
 // info-message is the one bare expansion the reader exempts: a line made only of info, warning
-// and error calls expands to nothing (makefileSilentRows). computed-target-list declares
-// verify-all even when the sibling reference stays unresolved.
+// and error calls expands to nothing (makefileSilentRows). An unbound reference in
+// computed-target-list leaves every target in its head unresolved.
 var makefileIssue554Rows = map[string]makefileOwnershipRow{
 	"single-line-template": {
 		makefile:  "make-rule = $(1): ; @echo custom\n$(call make-rule,verify-all)\n",
@@ -188,7 +188,7 @@ var makefileIssue554Rows = map[string]makefileOwnershipRow{
 	},
 	"computed-target-list": {
 		makefile:  "$(PREFIX) verify-all: dep\n\t@echo custom\n",
-		hasTarget: true, mayDefine: true, makeTarget: true,
+		mayDefine: true, makeTarget: true,
 	},
 	"continued-assignment": {
 		makefile: "HELP = usage \\\n  verify-all: run every gate\nall:\n\t@echo all\n",
@@ -674,43 +674,47 @@ func TestMakefileComputedTargetNamesTheFileFixes(t *testing.T) {
 	assertOwnershipRows(t, makefileComputedRows)
 }
 
-// TestMakefileComputedTargetQuotedBlank distinguishes quoted blanks from blanks in a variable value.
-func TestMakefileComputedTargetQuotedBlank(t *testing.T) {
-	for _, blank := range [...]string{" ", "\t"} {
-		head := "doc\\" + blank + "$(NAME) verify-all: ; @true\n"
-		file := "NAME := notes index\n" + head
-		if !util.MakefileHasTarget(file, "verify-all") || !util.MakefileHasTarget(file, "index") {
-			t.Fatal("lost the literal sibling or the target after the blank in NAME")
-		}
-		if util.MakefileHasTarget(file, "notes") || util.MakefileHasTarget(file, "doc") {
-			t.Fatal("split the computed target at its quoted blank")
-		}
-		target := "doc" + blank + "notes"
-		if !util.MakefileHasTarget(file, target) {
-			t.Fatalf("lost the quoted blank in %q", target)
-		}
-		if got := util.MakefileTargetStatus(file, target); got != util.MakefileTargetUnproven {
-			t.Fatalf("computed target %q evidence = %v, want unproven", target, got)
-		}
-		if util.MakefileHasTarget(head, target) || !util.MakefileMayDefineTarget(head, target) {
-			t.Fatalf("unbound NAME should leave %q unresolved", target)
-		}
+// TestMakefileUnresolvedRuleHead checks that an unprovable head yields no target or recipe,
+// even when the requested target is a literal sibling and the recipe itself is literal.
+func TestMakefileUnresolvedRuleHead(t *testing.T) {
+	for _, tc := range [...]struct {
+		name, file string
+		targets    []string
+	}{
+		{"empty expansion", "EMPTY :=\ndoc\\$(EMPTY) verify-all: ; @true\n", []string{`doc\$(EMPTY)`, `doc\`, "doc verify-all", "verify-all"}},
+		{"expanded colon", "RULE = other: ; @true\n$(RULE) verify-all:\n", []string{"$(RULE)", "other", "verify-all"}},
+		{"quoted blank", "NAME := notes\ndoc\\ $(NAME) verify-all: ; @true\n", []string{"doc $(NAME)", "doc notes", "notes", "verify-all"}},
+		{"quoted tab", "NAME := notes index\ndoc\\\t$(NAME) verify-all: ; @true\n", []string{"doc notes", "doc\tnotes", "index", "verify-all"}},
+		{"function between siblings", "NAME := notes\n$(NAME) x$(if , phantom , fallback ) verify-all: ; @true\n",
+			[]string{"notes", "x", "phantom", "fallback", "verify-all"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range tc.targets {
+				assertUnresolvedMakefileTarget(t, tc.file, target)
+			}
+		})
 	}
 }
 
-// TestMakefileUnresolvedTargetWord keeps the known siblings on either side of an unprovable
-// expansion. Blanks inside the reference belong to that reference.
-func TestMakefileUnresolvedTargetWord(t *testing.T) {
-	const file = "NAME := notes\n$(NAME) x$(if , phantom , fallback ) verify-all: ; @true\n"
-	for _, name := range [...]string{"notes", "verify-all"} {
-		if !util.MakefileHasTarget(file, name) {
-			t.Errorf("lost known sibling %q", name)
-		}
+// assertUnresolvedMakefileTarget checks ownership, recipe lookup and audit evidence for one name.
+func assertUnresolvedMakefileTarget(t *testing.T, file, target string) {
+	t.Helper()
+	if util.MakefileHasTarget(file, target) || !util.MakefileMayDefineTarget(file, target) {
+		t.Errorf("ownership of %q should be unresolved", target)
 	}
-	for _, name := range [...]string{"x", "phantom", "fallback"} {
-		if util.MakefileHasTarget(file, name) || !util.MakefileMayDefineTarget(file, name) {
-			t.Errorf("%q should remain unresolved", name)
-		}
+	if recipe, found := util.MakefileTargetRecipe(file, target); found {
+		t.Errorf("unexpected recipe for %q: %q", target, recipe)
+	}
+	if got := util.MakefileTargetStatus(file, target); got != util.MakefileTargetUnproven {
+		t.Errorf("evidence for %q = %v, want unproven", target, got)
+	}
+}
+
+// TestMakefileUnresolvedHeadKeepsLaterRecipe checks that only the ambiguous declaration is skipped.
+func TestMakefileUnresolvedHeadKeepsLaterRecipe(t *testing.T) {
+	const file = "$(UNKNOWN) verify-all:\n\t@echo computed\nverify-all:\n\t@echo literal\n"
+	if recipe, found := util.MakefileTargetRecipe(file, "verify-all"); !found || recipe != "\t@echo literal\n" {
+		t.Fatalf("verify-all recipe = %q, found %v", recipe, found)
 	}
 }
 

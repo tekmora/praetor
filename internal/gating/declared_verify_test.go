@@ -196,6 +196,7 @@ func TestDeclaresVerifyTargetReadsTheMakefileMakeReads(t *testing.T) {
 		{"lower-case makefile declares it", map[string]string{"makefile": verifyAllMakefile}, true},
 		{"GNUmakefile is read first", map[string]string{"GNUmakefile": "test:\n", "Makefile": verifyAllMakefile}, false},
 		{"target only in a comment", map[string]string{"Makefile": "# verify-all:\ntest:\n"}, false},
+		{"empty expansion before sibling", map[string]string{"Makefile": "EMPTY :=\ndoc\\$(EMPTY) verify-all: ; @true\n"}, false},
 		{"no makefile", map[string]string{}, false},
 		{"oversized makefile", map[string]string{"Makefile": verifyAllMakefile + strings.Repeat("#\n", maxMakefileBytes/2)}, false},
 	}
@@ -224,7 +225,7 @@ func TestDeclaresVerifyTargetBackslashes(t *testing.T) {
 	} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {
 			dir := t.TempDir()
-			file := "NAME := notes\ndoc" + strings.Repeat(`\`, count) + " $(NAME) verify-all: ; @true\n"
+			file := "doc" + strings.Repeat(`\`, count) + " notes verify-all: ; @true\n"
 			writeFile(t, filepath.Join(dir, "Makefile"), file)
 			if !declaresVerifyTarget(dir) {
 				t.Error("declared verification lost the literal verify-all sibling")

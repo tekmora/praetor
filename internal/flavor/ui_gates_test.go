@@ -67,6 +67,7 @@ func TestAuditUIGates_Boundary_NonUISkips(t *testing.T) {
 	}
 }
 
+// TestAuditUIGates_PositiveAndMissingSpecs checks required specs and literal Make prerequisites.
 func TestAuditUIGates_PositiveAndMissingSpecs(t *testing.T) {
 	uiDir := writeBaseSvelteDir(t, `{"name":"ui","devDependencies":{"@axe-core/playwright":"4.11.1"}}`)
 	withThreshold := &config.Manifest{UI: &config.UIPolicy{
@@ -86,6 +87,13 @@ func TestAuditUIGates_PositiveAndMissingSpecs(t *testing.T) {
 	passLine, err := flavor.AuditUIGates(uiDir, withThreshold)
 	if err != nil || !strings.Contains(passLine, "[PASS] UI gates:") {
 		t.Fatalf("valid UI AuditUIGates = (%q, %v), want [PASS]", passLine, err)
+	}
+	escaped := strings.Replace(validUIMakefileFixture, "verify-all:", `aux\:tag verify-all:`, 1)
+	if err := os.WriteFile(filepath.Join(uiDir, "Makefile"), []byte(escaped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := flavor.AuditUIGates(uiDir, withThreshold); err != nil {
+		t.Fatalf("escaped colon before verify-all: %v", err)
 	}
 }
 

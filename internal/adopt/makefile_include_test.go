@@ -2,6 +2,7 @@ package adopt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -190,6 +191,30 @@ func TestMakefileImplicitSourceNearBoundary(t *testing.T) {
 	mustWrite(t, filepath.Join(boundary.repoPath, "d", "extra"), "")
 	if err := makefileImplicitSourceNear(t.Context(), boundary.repoPath, "d/x.mk"); err == nil {
 		t.Error("directory over the entry bound counted as clean")
+	}
+}
+
+// TestMakefileImplicitSourceCaseLinks distinguishes hard links from a single case-aliased entry.
+func TestMakefileImplicitSourceCaseLinks(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "gen.mk")
+	mustWrite(t, base, "a:\n")
+	mustWrite(t, filepath.Join(dir, "GEN.MK.sh"), "")
+	err := os.Link(base, filepath.Join(dir, "GEN.MK"))
+	if errors.Is(err, os.ErrExist) {
+		if err := makefileImplicitSourceNear(t.Context(), dir, "gen.mk"); err == nil || !strings.Contains(err.Error(), "GEN.MK.sh") {
+			t.Fatalf("case-aliased gen.mk should see GEN.MK.sh: %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := makefileImplicitSourceNear(t.Context(), dir, "gen.mk"); err != nil {
+		t.Fatalf("separately listed GEN.MK made gen.mk ambiguous: %v", err)
+	}
+	if err := makefileImplicitSourceNear(t.Context(), dir, "GEN.MK"); err == nil || !strings.Contains(err.Error(), "GEN.MK.sh") {
+		t.Fatalf("GEN.MK should see its own source: %v", err)
 	}
 }
 
