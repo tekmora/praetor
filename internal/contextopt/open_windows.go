@@ -29,7 +29,7 @@ func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
 // openNativeLeaf opens the reparse point itself relative to the pinned parent handle.
 // Directory type is checked on the handle so a misplaced regular leaf stays distinct
 // from a missing bucket, including on Windows filesystems with ambiguous path errors.
-func openNativeLeaf(parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
+func openNativeLeaf(_ context.Context, parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
 	leaf, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return nil, err
@@ -79,11 +79,11 @@ type windowsListedInfo struct {
 }
 
 // statListedName checks the current kind and captures regular file identity relative to the parent.
-func (dir *SnapshotDirectory) statListedName(name string) (_ os.FileInfo, err error) {
+func (dir *SnapshotDirectory) statListedName(ctx context.Context, name string) (_ os.FileInfo, err error) {
 	if err := ValidateLeafName(name); err != nil {
 		return nil, err
 	}
-	file, err := openLeafAt(dir.File, name, readLeafAttributes)
+	file, err := openLeafAt(ctx, dir.File, name, readLeafAttributes)
 	if err != nil {
 		return nil, err
 	}

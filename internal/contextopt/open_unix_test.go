@@ -39,7 +39,9 @@ func TestOpenUnixLeafRetriesEINTR(t *testing.T) {
 		}
 		return unix.Openat(fd, leaf, flags, mode)
 	}
-	child, err := openUnixLeaf(parent.Fd(), dir, name, readLeafData, openat)
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	child, err := openUnixLeaf(ctx, parent.Fd(), dir, name, readLeafData, openat)
 	if err != nil {
 		t.Fatalf("open after interruption: %v", err)
 	}
@@ -67,11 +69,33 @@ func TestOpenUnixLeafStopsOnError(t *testing.T) {
 			calls++
 			return -1, tc.err
 		}
-		_, err := openUnixLeaf(0, ".", "child", listDirectory, openat)
+		_, err := openUnixLeaf(t.Context(), 0, ".", "child", listDirectory, openat)
 		var pathErr *os.PathError
 		if !errors.As(err, &pathErr) || pathErr.Path != "child" || !errors.Is(err, tc.err) || calls != tc.calls {
 			t.Errorf("openat returning %v: got %v after %d calls, want %d calls", tc.err, err, calls, tc.calls)
 		}
+	}
+}
+
+// TestOpenUnixLeafStopsOnCanceledEINTR requires the interrupted open to be the last call.
+func TestOpenUnixLeafStopsOnCanceledEINTR(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	calls := 0
+	openat := func(int, string, int, uint32) (int, error) {
+		calls++
+		cancel()
+		return -1, unix.EINTR
+	}
+	_, err := openUnixLeaf(ctx, 0, ".", "child", listDirectory, openat)
+	requireCanceledInterruption(t, calls, err)
+}
+
+// requireCanceledInterruption checks that cancellation preserves the first syscall's error.
+func requireCanceledInterruption(t *testing.T, calls int, err error) {
+	t.Helper()
+	if calls != 1 || !errors.Is(err, unix.EINTR) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled syscall: calls=%d err=%v", calls, err)
 	}
 }
 
@@ -97,14 +121,16 @@ func TestNonblockingOpenRejectsFileReplacedByFIFO(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		file, err := openSource(pinned, "policy.md")
+		file, err := openSource(ctx, pinned, "policy.md")
 		if err != nil {
 			done <- err
 			return
 		}
-		_, readErr := stableRead(context.Background(), file, before)
+		_, readErr := stableRead(ctx, file, before)
 		if err := file.Close(); err != nil {
 			done <- err
 			return
@@ -136,7 +162,9 @@ func TestOpenSourceRefusesReplacementSymlink(t *testing.T) {
 	if err := root.Symlink("original.go", name); err != nil {
 		t.Fatal(err)
 	}
-	file, err := openSource(root, name)
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	file, err := openSource(ctx, root, name)
 	if file != nil {
 		t.Errorf("opened a fixture through a replacement link")
 		if err := file.Close(); err != nil {

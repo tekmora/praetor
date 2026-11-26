@@ -8,13 +8,11 @@ package contextopt
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"unsafe"
 
-	"github.com/cordanaLLM/praetor/internal/util"
 	"golang.org/x/sys/unix"
 )
 
@@ -62,7 +60,7 @@ func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context, read func(uin
 	var size int
 	var readErr error
 	if err := conn.Control(func(fd uintptr) {
-		size, readErr = retryDirentRead(ctx, func() (int, error) { return read(fd, buf[:]) })
+		size, readErr = retryInterrupted(ctx, func() (int, error) { return read(fd, buf[:]) })
 	}); err != nil {
 		return nil, err
 	}
@@ -76,25 +74,6 @@ func (dir *SnapshotDirectory) readDirentBlock(ctx context.Context, read func(uin
 		return nil, io.ErrUnexpectedEOF
 	}
 	return dir.decodeDirents(ctx, buf[:size])
-}
-
-// retryDirentRead retries only an isolated EINTR without bytes. Native syscall wrappers
-// may return -1 on failure. Cancellation and exhaustion retain the last interruption.
-func retryDirentRead(ctx context.Context, read func() (int, error)) (int, error) {
-	var n int
-	var err error
-	for range maxNativeAttempts {
-		select {
-		case <-ctx.Done():
-			return n, errors.Join(err, ctx.Err())
-		default:
-		}
-		n, err = read()
-		if n < -1 || n > 0 || !errors.Is(util.SoleCause(err), unix.EINTR) {
-			return n, err
-		}
-	}
-	return n, err
 }
 
 // decodeDirents pairs each parsed name with the type byte from that same native record.
@@ -162,7 +141,7 @@ func (dir *SnapshotDirectory) observeUntypedName(ctx context.Context, name strin
 	if err := ctx.Err(); err != nil {
 		return listedName{name: name, err: err}
 	}
-	info, err := dir.statListedName(name)
+	info, err := dir.statListedName(ctx, name)
 	listed := listedName{name: name, observed: info, err: err}
 	if err == nil {
 		listed.kind = info.Mode().Type()

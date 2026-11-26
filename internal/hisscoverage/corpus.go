@@ -85,12 +85,17 @@ func (corpus corpusSnapshot) captureRule(ctx context.Context, root *contextopt.S
 type languageDirectories map[contextopt.DirectoryIdentity]string
 
 // register rejects a second spelling before its buckets can be listed again.
-func (seen languageDirectories) register(stage fixtureStage, dir *contextopt.SnapshotDirectory) error {
+func (seen languageDirectories) register(ctx context.Context, stage fixtureStage, identify func() (contextopt.DirectoryIdentity, error)) error {
 	if seen == nil {
 		return nil // A rule with one language cannot alias a previous claim.
 	}
-	id, err := dir.Identity()
-	if err != nil {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	id, err := identify()
+	if err := errors.Join(err, ctx.Err()); err != nil {
 		return fmt.Errorf("identify fixture directory for rule %s language %q: %w", stage.ruleID, stage.language, err)
 	}
 	if first, ok := seen[id]; ok {
@@ -111,7 +116,7 @@ func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.Sna
 		return nil, escapedError{fmt.Errorf("open fixture language %s: %w", stage.language, err)}
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
-	if err := seen.register(stage, dir); err != nil {
+	if err := seen.register(ctx, stage, dir.Identity); err != nil {
 		return nil, err
 	}
 	claim := make(claimSnapshot, len(fixtureBuckets))

@@ -6,6 +6,7 @@
 package contextopt
 
 import (
+	"context"
 	"math"
 	"os"
 	"syscall"
@@ -36,7 +37,14 @@ func (dir *SnapshotDirectory) Identity() (DirectoryIdentity, error) {
 
 // statListedName inspects one kernel-listed component relative to the retained descriptor.
 // AT_SYMLINK_NOFOLLOW classifies links and devices without opening them.
-func (dir *SnapshotDirectory) statListedName(name string) (os.FileInfo, error) {
+func (dir *SnapshotDirectory) statListedName(ctx context.Context, name string) (os.FileInfo, error) {
+	return dir.statUnixListedName(ctx, name, unix.Fstatat)
+}
+
+// statUnixListedName keeps the same parent and no-follow flag across interrupted lookups.
+func (dir *SnapshotDirectory) statUnixListedName(ctx context.Context, name string,
+	fstatat func(int, string, *unix.Stat_t, int) error,
+) (os.FileInfo, error) {
 	conn, err := dir.SyscallConn()
 	if err != nil {
 		return nil, err
@@ -49,8 +57,8 @@ func (dir *SnapshotDirectory) statListedName(name string) (os.FileInfo, error) {
 			return
 		}
 		parentFD := int(fd)
-		statErr = retryInterrupted(func() error {
-			return unix.Fstatat(parentFD, name, &info.stat, unix.AT_SYMLINK_NOFOLLOW)
+		_, statErr = retryInterrupted(ctx, func() (int, error) {
+			return 0, fstatat(parentFD, name, &info.stat, unix.AT_SYMLINK_NOFOLLOW)
 		})
 	})
 	if err != nil {

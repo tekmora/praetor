@@ -14,9 +14,67 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 )
+
+// TestLanguageIdentityDeadline rejects a late second language while its parent is live.
+func TestLanguageIdentityDeadline(t *testing.T) {
+	requireNativeReplay(t)
+	for _, nativeErr := range [...]error{nil, os.ErrPermission} {
+		synctest.Test(t, func(t *testing.T) {
+			parent := t.Context()
+			seen := make(languageDirectories)
+			first := fixtureStage{ruleID: "HISS-01", language: "go"}
+			second := fixtureStage{ruleID: first.ruleID, language: "python"}
+			if err := seen.register(parent, first, delayedLanguageIdentity(t, contextopt.MaxDuration-time.Second, nil)); err != nil {
+				t.Fatal(err)
+			}
+			err := seen.register(parent, second, delayedLanguageIdentity(t, contextopt.MaxDuration+time.Second, nativeErr))
+			if !errors.Is(err, context.DeadlineExceeded) || len(seen) != 1 || parent.Err() != nil {
+				t.Fatalf("late identity: err=%v registered=%v parent=%v", err, seen, parent.Err())
+			}
+			if nativeErr != nil && !errors.Is(err, nativeErr) {
+				t.Fatalf("lost identity error %v: %v", nativeErr, err)
+			}
+		})
+	}
+}
+
+// delayedLanguageIdentity opens a distinct directory and delays its query result on the test clock.
+func delayedLanguageIdentity(t *testing.T, delay time.Duration, nativeErr error) func() (contextopt.DirectoryIdentity, error) {
+	t.Helper()
+	dir, err := contextopt.OpenSnapshotDirectoryIn(t.Context(), t.TempDir(), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := dir.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return func() (contextopt.DirectoryIdentity, error) {
+		id, err := dir.Identity()
+		time.Sleep(delay)
+		return id, errors.Join(err, nativeErr)
+	}
+}
+
+// TestLanguageIdentitySkipsCanceledLookup keeps an expired claim out of the native query.
+func TestLanguageIdentitySkipsCanceledLookup(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	seen := make(languageDirectories)
+	err := seen.register(ctx, fixtureStage{}, func() (contextopt.DirectoryIdentity, error) {
+		t.Fatal("identity lookup started after cancellation")
+		return contextopt.DirectoryIdentity{}, nil
+	})
+	if !errors.Is(err, context.Canceled) || len(seen) != 0 {
+		t.Fatalf("canceled identity: registered=%v err=%v", seen, err)
+	}
+}
 
 // TestVerifyShortBucketReadsPreserveOverflow supplies 4096 entries followed by the sentinel
 // through the same cursor. Each call must request only the remaining entry allowance.

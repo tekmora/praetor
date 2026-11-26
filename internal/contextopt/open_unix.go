@@ -6,6 +6,7 @@
 package contextopt
 
 import (
+	"context"
 	"errors"
 	"math"
 	"os"
@@ -18,26 +19,36 @@ import (
 // maxNativeAttempts includes the first call and bounds retries during a signal storm.
 const maxNativeAttempts = 8
 
-// retryInterrupted repeats a descriptor-relative syscall only after an isolated EINTR.
-func retryInterrupted(call func() error) error {
+// retryInterrupted retries isolated EINTR with a zero or -1 result, stopping before
+// the next syscall on cancellation. A partial read retains its byte count and error.
+func retryInterrupted(ctx context.Context, call func() (int, error)) (int, error) {
+	var n int
 	var err error
 	for range maxNativeAttempts {
-		err = call()
-		if !errors.Is(util.SoleCause(err), unix.EINTR) {
-			break
+		select {
+		case <-ctx.Done():
+			return n, errors.Join(err, ctx.Err())
+		default:
+		}
+		n, err = call()
+		if n < -1 || n > 0 || !errors.Is(util.SoleCause(err), unix.EINTR) {
+			return n, err
 		}
 	}
-	return err
+	if canceled := ctx.Err(); canceled != nil {
+		err = errors.Join(err, canceled)
+	}
+	return n, err
 }
 
 // openNativeLeaf acquires a flat leaf relative to a live descriptor. A directory lookup
 // refuses other types in the kernel, and a substituted FIFO cannot block either kind.
-func openNativeLeaf(parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
-	return openUnixLeaf(parent, parentName, name, access, unix.Openat)
+func openNativeLeaf(ctx context.Context, parent uintptr, parentName, name string, access leafAccess) (*os.File, error) {
+	return openUnixLeaf(ctx, parent, parentName, name, access, unix.Openat)
 }
 
 // openUnixLeaf keeps the same parent and no-follow flags across interrupted opens.
-func openUnixLeaf(parent uintptr, parentName, name string, access leafAccess,
+func openUnixLeaf(ctx context.Context, parent uintptr, parentName, name string, access leafAccess,
 	openat func(int, string, int, uint32) (int, error),
 ) (*os.File, error) {
 	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOFOLLOW
@@ -48,11 +59,8 @@ func openUnixLeaf(parent uintptr, parentName, name string, access leafAccess,
 		return nil, &os.PathError{Op: "openat", Path: name, Err: unix.EBADF}
 	}
 	parentFD := int(parent)
-	var fd int
-	err := retryInterrupted(func() error {
-		var openErr error
-		fd, openErr = openat(parentFD, name, flags, 0)
-		return openErr
+	fd, err := retryInterrupted(ctx, func() (int, error) {
+		return openat(parentFD, name, flags, 0)
 	})
 	if err != nil {
 		pathErr := &os.PathError{Op: "openat", Path: name, Err: err}

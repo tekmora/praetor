@@ -19,20 +19,20 @@ func TestListedDirectoryKind(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
 	defer cancel()
 	dir, child, path := listedChildDirectory(t, ctx)
-	if entry := dir.resolveEntry(child); entry.Name() != "child" || !entry.IsDir() {
+	if entry := dir.resolveEntry(ctx, child); entry.Name() != "child" || !entry.IsDir() {
 		t.Fatalf("stable directory: %v", entry)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	missing := dir.resolveEntry(child)
+	missing := dir.resolveEntry(ctx, child)
 	if _, err := missing.Info(); missing.Name() != "child" || !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("missing directory: name=%q err=%v", missing.Name(), err)
 	}
 	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	replaced := dir.resolveEntry(child)
+	replaced := dir.resolveEntry(ctx, child)
 	if _, err := replaced.Info(); replaced.Name() != "child" || replaced.IsDir() || err == nil {
 		t.Errorf("directory replaced by regular file: name=%q err=%v", replaced.Name(), err)
 	}

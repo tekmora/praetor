@@ -83,7 +83,7 @@ func TestWindowsListedDirectoryAttributeAccess(t *testing.T) {
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("open for listing: %v, want access denied", err)
 	}
-	entry := dir.resolveEntry(child)
+	entry := dir.resolveEntry(ctx, child)
 	info, err := entry.Info()
 	if err != nil || !info.IsDir() || entry.Name() != child.name {
 		t.Fatalf("metadata-only lookup of %q: %v, %v", child.name, info, err)

@@ -282,7 +282,7 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 	if err != nil {
 		return 0, err
 	}
-	file, err := openListedSource(root, name, before, limit)
+	file, err := openListedSource(ctx, root, name, before, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -299,7 +299,7 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 }
 
 // openSource opens a regular-file candidate relative to the pinned root.
-func openSource(root *os.Root, name string) (*os.File, error) {
+func openSource(ctx context.Context, root *os.Root, name string) (*os.File, error) {
 	if err := ValidateLeafName(name); err != nil {
 		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
 	}
@@ -307,7 +307,7 @@ func openSource(root *os.Root, name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, openErr := openLeafAt(parent, name, readLeafData)
+	file, openErr := openLeafAt(ctx, parent, name, readLeafData)
 	if err := parent.Close(); err != nil {
 		if file != nil {
 			err = errors.Join(err, file.Close())
@@ -318,11 +318,11 @@ func openSource(root *os.Root, name string) (*os.File, error) {
 }
 
 // openListedSource enforces the listed type and size before opening the leaf without following links.
-func openListedSource(root *os.Root, name string, listed os.FileInfo, limit int64) (*os.File, error) {
+func openListedSource(ctx context.Context, root *os.Root, name string, listed os.FileInfo, limit int64) (*os.File, error) {
 	if err := checkListedSource(listed, limit); err != nil {
 		return nil, err
 	}
-	file, err := openSource(root, name)
+	file, err := openSource(ctx, root, name)
 	if err != nil {
 		// A refused replacement link or device has platform-specific open errors.
 		current, statErr := root.Lstat(name)

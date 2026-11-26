@@ -58,7 +58,7 @@ func TestDirentReadStopsAtBound(t *testing.T) {
 	defer cancel()
 	calls := 0
 	var last error
-	n, err := retryDirentRead(ctx, func() (int, error) {
+	n, err := retryInterrupted(ctx, func() (int, error) {
 		calls++
 		last = fmt.Errorf("attempt %d: %w", calls, unix.EINTR)
 		return 0, last
@@ -83,7 +83,7 @@ func TestDirentReadPreservesTerminalErrors(t *testing.T) {
 	} {
 		ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
 		calls := 0
-		n, err := retryDirentRead(ctx, func() (int, error) {
+		n, err := retryInterrupted(ctx, func() (int, error) {
 			calls++
 			if tc.cancel {
 				cancel()

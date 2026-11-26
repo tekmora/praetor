@@ -60,7 +60,7 @@ func OpenChildDirectory(ctx context.Context, dir *SnapshotDirectory, name string
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	child, err := openLeafAt(dir.File, name, listDirectory)
+	child, err := openLeafAt(ctx, dir.File, name, listDirectory)
 	if err != nil {
 		return nil, errors.Join(err, ctx.Err())
 	}
@@ -122,7 +122,7 @@ func (dir *SnapshotDirectory) resolveEntries(ctx context.Context, names []listed
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		entries[i] = dir.resolveEntry(listed)
+		entries[i] = dir.resolveEntry(ctx, listed)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -177,11 +177,11 @@ func checkDirectoryChunk(count, remaining int, err error) error {
 }
 
 // resolveEntry freezes the listed identity before the listing leaves the pinned directory.
-func (dir *SnapshotDirectory) resolveEntry(listed listedName) os.DirEntry {
+func (dir *SnapshotDirectory) resolveEntry(ctx context.Context, listed listedName) os.DirEntry {
 	if listed.err != nil {
 		return failedEntry{name: listed.name, err: listed.err}
 	}
-	info, err := dir.statListedName(listed.name)
+	info, err := dir.statListedName(ctx, listed.name)
 	if err != nil {
 		return failedEntry{name: listed.name, err: err}
 	}
@@ -222,7 +222,7 @@ func (dir *SnapshotDirectory) ReadListedSnapshot(ctx context.Context, name strin
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	file, err := openLeafAt(dir.File, name, readLeafData)
+	file, err := openLeafAt(ctx, dir.File, name, readLeafData)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ const (
 
 // openLeafAt holds a reference to the parent's descriptor until the native open returns,
 // including if another caller closes the directory concurrently.
-func openLeafAt(parent *os.File, name string, access leafAccess) (*os.File, error) {
+func openLeafAt(ctx context.Context, parent *os.File, name string, access leafAccess) (*os.File, error) {
 	conn, err := parent.SyscallConn()
 	if err != nil {
 		return nil, err
@@ -257,7 +257,7 @@ func openLeafAt(parent *os.File, name string, access leafAccess) (*os.File, erro
 	var child *os.File
 	var openErr error
 	if err := conn.Control(func(fd uintptr) {
-		child, openErr = openNativeLeaf(fd, parent.Name(), name, access)
+		child, openErr = openNativeLeaf(ctx, fd, parent.Name(), name, access)
 	}); err != nil {
 		return nil, err
 	}

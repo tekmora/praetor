@@ -46,7 +46,7 @@ func TestUnknownDirentObservesKind(t *testing.T) {
 	defer cancel()
 	dir, _, path := listedChildDirectory(t, ctx)
 	before := decodeUnknownChild(t, ctx, dir)
-	if entry := dir.resolveEntry(before); !entry.IsDir() {
+	if entry := dir.resolveEntry(ctx, before); !entry.IsDir() {
 		t.Fatalf("stable DT_UNKNOWN directory: %v", entry)
 	}
 	if err := os.Remove(path); err != nil {
@@ -56,11 +56,11 @@ func TestUnknownDirentObservesKind(t *testing.T) {
 	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	entry := dir.resolveEntry(missing)
+	entry := dir.resolveEntry(ctx, missing)
 	if _, err := entry.Info(); entry.Name() != "child" || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing at first observation: %q, %v", entry.Name(), err)
 	}
-	entry = dir.resolveEntry(before)
+	entry = dir.resolveEntry(ctx, before)
 	if _, err := entry.Info(); entry.Name() != "child" || err == nil || !strings.Contains(err.Error(), "listed kind") {
 		t.Fatalf("directory replaced after first observation: %q, %v", entry.Name(), err)
 	}
@@ -71,7 +71,7 @@ func TestUnknownDirentObservesKind(t *testing.T) {
 func checkUnknownRegularCapture(t *testing.T, ctx context.Context, dir *SnapshotDirectory, path string) {
 	t.Helper()
 	stable := decodeUnknownChild(t, ctx, dir)
-	info := resolvedChildInfo(t, dir, stable)
+	info := resolvedChildInfo(t, ctx, dir, stable)
 	data, err := dir.ReadListedSnapshot(ctx, info.Name(), info)
 	if err != nil || string(data) != "replacement" {
 		t.Fatalf("stable regular file: %q, %v", data, err)
@@ -86,7 +86,7 @@ func checkUnknownRegularCapture(t *testing.T, ctx context.Context, dir *Snapshot
 	if err := os.Rename(path+".new", path); err != nil {
 		t.Fatal(err)
 	}
-	info = resolvedChildInfo(t, dir, listed)
+	info = resolvedChildInfo(t, ctx, dir, listed)
 	data, err = dir.ReadListedSnapshot(ctx, info.Name(), info)
 	var pathErr *os.PathError
 	if data != nil || !errors.Is(err, errSourceChangedWhileOpening) ||
@@ -96,9 +96,9 @@ func checkUnknownRegularCapture(t *testing.T, ctx context.Context, dir *Snapshot
 }
 
 // resolvedChildInfo retrieves the metadata that the listing passes to capture.
-func resolvedChildInfo(t *testing.T, dir *SnapshotDirectory, listed listedName) os.FileInfo {
+func resolvedChildInfo(t *testing.T, ctx context.Context, dir *SnapshotDirectory, listed listedName) os.FileInfo {
 	t.Helper()
-	info, err := dir.resolveEntry(listed).Info()
+	info, err := dir.resolveEntry(ctx, listed).Info()
 	if err != nil {
 		t.Fatal(err)
 	}
