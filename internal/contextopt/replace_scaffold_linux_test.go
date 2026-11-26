@@ -141,6 +141,7 @@ func replaceParentDuringWait(t *testing.T, parent, replacement, moved string) co
 // plantRepairFile creates an ordinary script with an exact checkout mode despite the process umask.
 func plantRepairFile(t *testing.T, dir string, data []byte, mode os.FileMode) {
 	t.Helper()
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a fixture directory needs the owner search bit; 0o700 is least privilege
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
