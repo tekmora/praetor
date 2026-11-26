@@ -61,9 +61,9 @@ func checkRenovateTemplate(template string) error {
 // checkRenovateNote looks for the visible note in the bounded, rendered summary.
 func checkRenovateNote(body string) error {
 	beforeRule, _, _ := strings.Cut(body, "\n---\n")
-	doc, err := parseChecklistDocument(beforeRule)
-	if err != nil {
-		return err
+	doc, finding := parseChecklistDocument(beforeRule)
+	if finding != "" {
+		return errors.New(finding)
 	}
 	inSummary := false
 	block := doc.root.FirstChild()

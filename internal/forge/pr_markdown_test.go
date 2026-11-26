@@ -4,6 +4,7 @@
 package forge
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -84,6 +85,20 @@ func TestChecklistBodyLineBoundaries(t *testing.T) {
 	res, err := ValidatePRChecklist("\n" + atLimit)
 	if err != nil || res.Valid || res.HasReceipt || res.hasTickedBox || !containsFragment(res.Errors, "exceeds") {
 		t.Fatalf("one line over must be rejected before parsing: %+v, %v", res, err)
+	}
+}
+
+// TestChecklistBodyByteLimit reports a single finding before reading any checklist item.
+func TestChecklistBodyByteLimit(t *testing.T) {
+	const checked = "- [x] HISS-16\n"
+	body := checked + strings.Repeat("x", maxReferenceTextBytes+1-len(checked))
+	res, err := ValidatePRChecklist(body)
+	if err != nil || res == nil {
+		t.Fatalf("expected a checklist result for oversized input, got %+v, %v", res, err)
+	}
+	want := []string{fmt.Sprintf("pull request body exceeds %d bytes", maxReferenceTextBytes)}
+	if res.Valid || res.HasHISS16Check || !slices.Equal(res.Errors, want) {
+		t.Fatalf("expected an invalid result with only %q, got %+v", want, res)
 	}
 }
 

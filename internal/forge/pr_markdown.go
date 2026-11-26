@@ -60,19 +60,19 @@ type checklistDocument struct {
 	root   ast.Node
 }
 
-// parseChecklistDocument checks both PR body limits before allocating the Markdown tree.
-func parseChecklistDocument(body string) (*checklistDocument, error) {
+// parseChecklistDocument returns a limit finding or the bounded Markdown tree.
+func parseChecklistDocument(body string) (*checklistDocument, string) {
 	if len(body) > maxReferenceTextBytes {
-		return nil, fmt.Errorf("pull request body exceeds %d bytes", maxReferenceTextBytes)
+		return nil, fmt.Sprintf("pull request body exceeds %d bytes", maxReferenceTextBytes)
 	}
 	// The PR limit counts the empty lines at EOF that CheckLineBudget normally trims.
 	content := strings.TrimRight(body, "\n")
 	trailing := len(body) - len(content)
 	if err := util.CheckLineBudget(content, MaxPRLinesLimit-trailing); err != nil {
-		return nil, fmt.Errorf("PR body exceeds %d lines", MaxPRLinesLimit)
+		return nil, fmt.Sprintf("PR body exceeds %d lines", MaxPRLinesLimit)
 	}
 	source := []byte(body)
-	return &checklistDocument{source: source, root: checklistParser.Parse(text.NewReader(source))}, nil
+	return &checklistDocument{source: source, root: checklistParser.Parse(text.NewReader(source))}, ""
 }
 
 // readChecklist visits blocks in document order. Each heading or task paragraph consumes

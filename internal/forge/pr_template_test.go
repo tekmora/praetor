@@ -63,12 +63,12 @@ func TestUntickedTemplateSatisfiesNothing(t *testing.T) {
 // The receipt fence must carry the label the extractor requires. A `text` fence is treated as a
 // code snippet in a description and never read, so the pasted receipt was silently ignored.
 func TestShippedTemplateReceiptFenceIsLabelled(t *testing.T) {
-	doc, err := parseChecklistDocument(readTemplate(t))
-	if err != nil {
-		t.Fatal(err)
+	doc, finding := parseChecklistDocument(readTemplate(t))
+	if finding != "" {
+		t.Fatal(finding)
 	}
 	var receiptFences, textFences int
-	err = ast.Walk(doc.root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+	err := ast.Walk(doc.root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		block, ok := n.(*ast.FencedCodeBlock)
 		if !entering || !ok {
 			return ast.WalkContinue, nil

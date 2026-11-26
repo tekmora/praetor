@@ -92,6 +92,8 @@ func ValidatePRChecklistWithPolicy(prBody string, policy ReceiptPolicy) (*PRChec
 }
 
 // ValidatePRChecklistWithPolicyContext uses the caller context for closing-reference lookups.
+// Missing input returns a call error and a checklist finding. A supplied body that
+// exceeds a parsing limit returns the limit finding with a nil call error.
 func ValidatePRChecklistWithPolicyContext(ctx context.Context, prBody string, policy ReceiptPolicy) (*PRChecklistResult, error) {
 	if strings.TrimSpace(prBody) == "" {
 		return &PRChecklistResult{
@@ -100,9 +102,9 @@ func ValidatePRChecklistWithPolicyContext(ctx context.Context, prBody string, po
 		}, errors.New("empty PR body")
 	}
 
-	doc, err := parseChecklistDocument(prBody)
-	if err != nil {
-		return &PRChecklistResult{Errors: []string{err.Error()}}, nil
+	doc, finding := parseChecklistDocument(prBody)
+	if finding != "" {
+		return &PRChecklistResult{Errors: []string{finding}}, nil
 	}
 
 	res := &PRChecklistResult{}
