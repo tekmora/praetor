@@ -12,13 +12,15 @@ import (
 )
 
 // ReplaceOptions binds a write to observed contents or explicit absence. Mode is
-// a permission ceiling: existing restrictive permissions are never widened.
+// a permission ceiling unless VerifiedExecutable requests the exact mode of a script.
 type ReplaceOptions struct {
 	Expected []byte
 	Exists   bool
 	Mode     os.FileMode
 	// ExpectedLimit raises only the prior snapshot read bound for a bounded recovery.
 	ExpectedLimit int64
+	// VerifiedExecutable permits mode 0755 for a shebang script from a verified source.
+	VerifiedExecutable bool
 }
 
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
@@ -90,7 +92,6 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
 	if err := publishSnapshot(ctx, root, name, stage, file, mode, options); err != nil {
-		err = errors.Join(err, file.Chmod(0o600))
 		return fmt.Errorf("publish snapshot (inspect %s): %w", stagedPath(root, stage), err)
 	}
 	return SyncDirectory(ctx, root)
@@ -151,13 +152,30 @@ func validateReplacement(ctx context.Context, data []byte, options ReplaceOption
 		return err
 	}
 
-	if options.Mode == 0 || options.Mode&^0o644 != 0 {
-		return errors.New("snapshot mode must be nonzero owner read/write and optional group/other read bits")
+	if err := validateReplacementMode(data, options); err != nil {
+		return err
 	}
 	if !options.Exists && len(options.Expected) != 0 {
 		return errors.New("absent snapshot cannot have expected content")
 	}
 	return errors.Join(validateText(data), validateText(options.Expected))
+}
+
+// verifiedScriptMode is the exact mode reserved for executable distribution scripts.
+const verifiedScriptMode os.FileMode = 0o755
+
+// validateReplacementMode restricts exact executable mode to explicitly verified scripts.
+func validateReplacementMode(data []byte, options ReplaceOptions) error {
+	if options.VerifiedExecutable {
+		if options.Mode != verifiedScriptMode || !bytes.HasPrefix(data, []byte("#!")) {
+			return errors.New("verified executable replacement requires a shebang script and mode 0755")
+		}
+		return nil
+	}
+	if options.Mode == 0 || options.Mode&^0o644 != 0 {
+		return errors.New("snapshot mode must be nonzero owner read/write and optional group/other read bits")
+	}
+	return nil
 }
 
 // validateReplacementLimits bounds new bytes independently from the prior recovery snapshot.
@@ -199,6 +217,9 @@ func verifyReplacement(ctx context.Context, root *os.Root, name string, options 
 	if !bytes.Equal(current.Bytes(), options.Expected) {
 		return 0, fmt.Errorf("snapshot changed before replacement: %s", name)
 	}
+	if options.VerifiedExecutable {
+		return options.Mode, nil
+	}
 	return options.Mode & info.Mode().Perm(), nil
 }
 
@@ -217,17 +238,30 @@ func stageSnapshot(ctx context.Context, root *os.Root, name string, data []byte)
 	return file, nil
 }
 
-func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, file *os.File, mode os.FileMode, options ReplaceOptions) error {
+// publishSnapshot seals the staged file before rename or link. A failed link cleanup
+// can leave both names on the published inode, so only an unpublished stage is re-privatized.
+func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, file *os.File, mode os.FileMode, options ReplaceOptions) (err error) {
 	if _, err := verifyReplacement(ctx, root, name, options); err != nil {
 		return err
 	}
+	var created bool
+	defer func() {
+		if err != nil && !created {
+			err = errors.Join(err, file.Chmod(0o600))
+		}
+	}()
 	if err := sealStage(ctx, file, mode); err != nil {
 		return err
+	}
+	// A per-call observer can sample the sealed stage at the last boundary before
+	// publication. Cancellation here races the rename or link, as it does for any caller.
+	if observe, ok := ctx.Value((*ReplaceOptions)(nil)).(func(string)); ok {
+		observe(stagedPath(root, stage))
 	}
 	if options.Exists {
 		return root.Rename(stage, name)
 	}
-	created, err := linkStagedSnapshot(root, name, stage)
+	created, err = linkStagedSnapshot(root, name, stage)
 	if err != nil {
 		return err
 	}

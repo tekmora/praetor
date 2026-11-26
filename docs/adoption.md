@@ -1295,13 +1295,11 @@ Loaded remotely, the action has no `.git`, so a forced run first checks out prae
   `.gitattributes` when adoption should refresh it. An edited copy of any of them, or one with
   mixed line endings, is left as it is and keeps the contract above
   (`TestAdoptDoesNotRepinAnEditedOrForeignCatalog`).
-- **Checkpoint script modes.** On POSIX, adoption installs checkpoint bundle sources
-  that start with `#!` at mode `0755`. Re-adoption repairs a matching script in place,
-  preserving its inode, checkout line endings, named ACL entries and ordinary extended attributes.
-  Changing permissions can update the ACL mask. A symlink, multiple hard links or setuid,
-  setgid or sticky bits prevent a mode repair. Dry-run reports the same mode decision for
-  an unchanged file (`TestAdopt_CheckpointSourceModes`, `TestCheckpointSharedModeRepairRefused`).
-  Other bundle sources use the ordinary text-file permissions.
+- **Checkpoint script modes.** On POSIX, adoption sets mode `0755` on staged checkpoint
+  scripts whose verified source starts with `#!`. A new or refreshed script is executable
+  as soon as it appears. Re-adoption restores the same mode on a matching script and
+  preserves its checkout line endings (`TestAdopt_CheckpointSourceModes`).
+  Issue 2073 tracks the remaining checkpoint filesystem work.
 - **Files the repository ignores.** Once every step has run, adoption asks git whether the
   repository's own ignore rules exclude any file it created, verified, merged or replaced
   (`reportIgnoredWrites` in `internal/adopt/ignored_writes.go`). An ignored file that git does

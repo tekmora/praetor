@@ -122,8 +122,8 @@ type scaffold struct {
 	rel     string      // repository-relative path
 	perm    os.FileMode // file mode
 	content []byte      // payload written when the file is created
-	// sourceMode marks a checkpoint bundle file whose verified shebang selects its distribution mode.
-	sourceMode bool
+	// verifiedExecutable requests the exact script mode for a verified checkpoint source.
+	verifiedExecutable bool
 	// auditLocked marks a file whose bytes praetorctl audit compares with the scaffold: the
 	// managed asset families (managed_family.go) and the branch ruleset while the policy
 	// requires one (RulesetRequired). Audit fails until such a file holds the scaffold, so
@@ -136,7 +136,7 @@ type scaffold struct {
 	// confined writes through contextopt.WriteSnapshotIn, the writer compile-context uses, which
 	// follows no symlink below the repository, and refreshes an earlier text through
 	// contextopt.ReplaceSnapshotIn. It is set for the files compile-context also reads (the
-	// canonical personas); every other scaffold goes through writeRepoFile.
+	// canonical personas). Verified executable scripts also use the root-pinned replacement.
 	confined bool
 	// prior holds the digest (priorRendering) of every text a Praetor release wrote at rel,
 	// keyed to what produced it. An existing file holding one of them, in one consistent
@@ -203,11 +203,7 @@ func (s *adoptSession) scaffoldFile(ctx context.Context, sc scaffold) (scaffoldS
 	if err != nil {
 		return 0, err
 	}
-	exists, err := s.scaffoldExists(ctx, full, sc)
-	if err != nil {
-		return 0, err
-	}
-	if exists {
+	if fileExists(full) {
 		refreshed, err := s.refreshPriorScaffold(ctx, full, sc)
 		if err != nil || refreshed {
 			return scaffoldWritten, err
@@ -217,24 +213,9 @@ func (s *adoptSession) scaffoldFile(ctx context.Context, sc scaffold) (scaffoldS
 	if err := s.writeScaffold(ctx, full, sc); err != nil {
 		return 0, err
 	}
-	if err := s.finishScaffoldWrite(ctx, sc, sc.content); err != nil {
-		return 0, err
-	}
+	s.planDryRunWrite(sc.rel, sc.content)
 	s.report.recordCreated(sc.rel, sc.created)
 	return scaffoldWritten, nil
-}
-
-// scaffoldExists checks the root-relative checkpoint path before deciding whether to
-// create, refresh or verify it, including when a dry run will only record the decision.
-func (s *adoptSession) scaffoldExists(ctx context.Context, full string, sc scaffold) (bool, error) {
-	if !sc.sourceMode {
-		return fileExists(full), nil
-	}
-	_, exists, err := contextopt.ObserveSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel))
-	if err != nil {
-		return false, fmt.Errorf("observe checkpoint %s: %w", sc.rel, err)
-	}
-	return exists, nil
 }
 
 // refreshPriorScaffold replaces an existing file holding an earlier Praetor text of sc with
@@ -267,48 +248,33 @@ func (s *adoptSession) refreshPriorScaffold(ctx context.Context, full string, sc
 // (reconcileManagedFamilyFile) use.
 func (s *adoptSession) replacePriorText(ctx context.Context, full string, actual []byte, crlf bool, sc scaffold, detail string) error {
 	content := []byte(util.RestoreLineEndings(string(sc.content), crlf))
+	return s.refreshScaffold(ctx, full, actual, content, sc, detail)
+}
+
+// refreshScaffold publishes the verified bytes and mode or records the same change for a dry run.
+func (s *adoptSession) refreshScaffold(ctx context.Context, full string, actual, content []byte, sc scaffold, detail string) error {
 	if !s.opts.DryRun {
 		if err := s.publishPriorRefresh(ctx, full, actual, content, sc); err != nil {
 			return fmt.Errorf("refresh %s: %w", sc.rel, err)
 		}
 	}
-	if err := s.finishScaffoldWrite(ctx, sc, content); err != nil {
-		return err
-	}
+	s.planDryRunWrite(sc.rel, content)
 	s.report.recordReconciled(sc.rel, detail)
 	return nil
 }
 
-// finishScaffoldWrite records preview bytes or sets the installed checkpoint script's
-// mode after the content writer has finished, before reporting a successful write.
-func (s *adoptSession) finishScaffoldWrite(ctx context.Context, sc scaffold, content []byte) error {
-	if s.opts.DryRun {
-		s.planDryRunWrite(sc.rel, content)
-		return nil
-	}
-	_, err := s.reconcileCheckpointMode(ctx, sc, content)
-	return err
-}
-
-// snapshotModeBits are the only mode bits contextopt's snapshot writers accept: they write
-// text files, never an executable one.
+// snapshotModeBits are the permission ceiling for ordinary text snapshots.
 const snapshotModeBits os.FileMode = 0o644
 
 // publishPriorRefresh writes content over actual at full. A text scaffold is replaced bound to
 // actual, so a file edited in between is not overwritten; a confined one goes through the
 // root-pinned writer compile-context uses (contextopt.ReplaceSnapshotIn), so a symlink at or
-// below the repository is refused rather than written through. Checkpoint scripts use the text
-// writer and receive their executable mode separately. Other executable scaffolds, such as
-// the interceptor, use writeRepoFile as they do for creation and forced replacement.
+// below the repository is refused rather than written through. Verified checkpoint scripts
+// use that replacement with their distribution mode. The interceptor still uses writeRepoFile.
 func (s *adoptSession) publishPriorRefresh(ctx context.Context, full string, actual, content []byte, sc scaffold) error {
-	// Keep checkpoint text refreshes bound to the observed bytes. finishScaffoldWrite
-	// applies the executable mode after the base snapshot writer publishes the new text.
-	if sc.sourceMode {
-		sc.perm = filePerm
-	}
-	options := contextopt.ReplaceOptions{Expected: actual, Exists: true, Mode: sc.perm}
+	options := contextopt.ReplaceOptions{Expected: actual, Exists: true, Mode: sc.perm, VerifiedExecutable: sc.verifiedExecutable}
 	switch {
-	case sc.confined:
+	case sc.confined || sc.verifiedExecutable:
 		return contextopt.ReplaceSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), content, options)
 	case sc.perm&^snapshotModeBits != 0:
 		return writeRepoFile(full, content, sc.perm)
@@ -319,6 +285,10 @@ func (s *adoptSession) publishPriorRefresh(ctx context.Context, full string, act
 // writeScaffold persists sc at full unless the session is a dry run, through the root-pinned
 // writer when sc is confined.
 func (s *adoptSession) writeScaffold(ctx context.Context, full string, sc scaffold) error {
+	if sc.verifiedExecutable && !s.opts.DryRun {
+		options := contextopt.ReplaceOptions{Mode: sc.perm, VerifiedExecutable: true}
+		return contextopt.ReplaceSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), sc.content, options)
+	}
 	if !sc.confined || s.opts.DryRun {
 		return s.write(full, sc.content, sc.perm)
 	}
@@ -351,7 +321,7 @@ func (s *adoptSession) recordExistingScaffold(ctx context.Context, full string, 
 		s.report.addWarning("%s: existing file preserved but not compared with the scaffold: %v", sc.rel, err)
 		return scaffoldUnverified, nil
 	case identical:
-		return s.verifyScaffoldMode(ctx, sc, actual)
+		return s.verifyScaffoldMode(ctx, full, sc, actual)
 	}
 	note := scaffoldDriftNote(sc.auditLocked, actual, sc.content, s.forceCommand())
 	s.report.recordReconciled(sc.rel, note)
@@ -359,15 +329,18 @@ func (s *adoptSession) recordExistingScaffold(ctx context.Context, full string, 
 	return scaffoldDrifted, nil
 }
 
-// verifyScaffoldMode records a matching scaffold after checking any checkpoint mode repair.
-func (s *adoptSession) verifyScaffoldMode(ctx context.Context, sc scaffold, actual []byte) (scaffoldState, error) {
-	changed, err := s.reconcileCheckpointMode(ctx, sc, actual)
-	if err != nil {
-		return 0, err
-	}
-	if changed {
-		s.report.recordReconciled(sc.rel, fmt.Sprintf("Restored file mode to %04o", sc.perm))
-		return scaffoldWritten, nil
+// verifyScaffoldMode repairs a matching checkpoint script using its observed checkout bytes.
+// Windows has no POSIX execute bit to reconcile.
+func (s *adoptSession) verifyScaffoldMode(ctx context.Context, full string, sc scaffold, actual []byte) (scaffoldState, error) {
+	if sc.verifiedExecutable {
+		info, err := os.Lstat(full)
+		if err != nil {
+			return 0, fmt.Errorf("inspect mode of %s: %w", sc.rel, err)
+		}
+		if info.Mode().Perm() != sc.perm {
+			detail := fmt.Sprintf("Restored file mode to %04o", sc.perm)
+			return scaffoldWritten, s.refreshScaffold(ctx, full, actual, actual, sc, detail)
+		}
 	}
 	s.report.recordReconciled(sc.rel, sc.verified)
 	return scaffoldIdentical, nil

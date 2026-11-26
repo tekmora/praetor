@@ -166,3 +166,27 @@ func TestSyncDirectoryPersistsWrittenEntries(t *testing.T) {
 		t.Fatalf("directory sync refused on %s: %v", runtime.GOOS, err)
 	}
 }
+
+// TestReplaceSnapshotRejectsUnverifiedScriptModes keeps the ordinary text ceiling and
+// limits a verified executable request to a shebang script with distribution mode 0755.
+func TestReplaceSnapshotRejectsUnverifiedScriptModes(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range [...]struct {
+		name, data string
+		options    ReplaceOptions
+	}{
+		{"ordinary snapshot", "#!/bin/sh\n", ReplaceOptions{Mode: 0o755}},
+		{"missing shebang", "# comment\n", ReplaceOptions{Mode: 0o755, VerifiedExecutable: true}},
+		{"writable script", "#!/bin/sh\n", ReplaceOptions{Mode: 0o775, VerifiedExecutable: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ReplaceSnapshotIn(t.Context(), root, "script", []byte(tc.data), tc.options)
+			if err == nil {
+				t.Fatal("accepted an invalid executable snapshot request")
+			}
+			if _, err := os.Lstat(filepath.Join(root, "script")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected an absent destination, got %v", err)
+			}
+		})
+	}
+}

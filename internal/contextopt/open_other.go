@@ -19,13 +19,3 @@ func openSource(root *os.Root, name string) (*os.File, error) {
 	}
 	return root.Open(name)
 }
-
-// openExecutable refuses a POSIX mode repair on platforms without a no-follow Unix open.
-func openExecutable(string) (*os.File, error) {
-	return nil, fmt.Errorf("executable mode repair requires POSIX file modes")
-}
-
-// singleLink refuses in-place POSIX mode repairs on hosts without Unix link counts.
-func singleLink(os.FileInfo) bool {
-	return false
-}

@@ -174,7 +174,11 @@ const maxCheckpointSources = 8
 // text of it (priorCheckpointDigests), line endings aside, or one that cannot be read to tell.
 func keptCheckpointSource(ctx context.Context, s *adoptSession, sources []checkpointSource) (int, error) {
 	for i := 0; i < len(sources) && i < maxCheckpointSources; i++ {
-		actual, exists, readErr := contextopt.ObserveSnapshotIn(ctx, s.repoPath, filepath.FromSlash(sources[i].path))
+		full, err := repoFile(s.repoPath, sources[i].path)
+		if err != nil {
+			return 0, err
+		}
+		actual, exists, readErr := contextopt.ObserveSnapshot(ctx, full)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr
 		}
@@ -208,10 +212,14 @@ func keptCheckpointText(actual []byte, exists bool, readErr error, source checkp
 // vendored set, an existing copy belongs to the vendored canonical bundle and keeps its text.
 func installCheckpointSource(ctx context.Context, s *adoptSession, source checkpointSource, vendored bool) error {
 	sc := scaffold{
-		rel: source.path, perm: scaffoldSourcePerm(source.data), content: source.data, sourceMode: true,
+		rel: source.path, perm: filePerm, content: source.data,
 		created:   "Installed shared checkpoint evaluator from verified source bundle",
 		verified:  "Existing shared checkpoint evaluator preserved",
 		refreshed: "Refreshed an unedited earlier Praetor checkpoint evaluator to the verified source bundle",
+	}
+	if runtime.GOOS != "windows" && bytes.HasPrefix(source.data, []byte("#!")) {
+		sc.verifiedExecutable = true
+		sc.perm = execPerm
 	}
 	if !vendored {
 		sc.prior = priorCheckpointDigests[source.path]
@@ -227,27 +235,6 @@ func installCheckpointSource(ctx context.Context, s *adoptSession, source checkp
 		return fmt.Errorf("existing %s could not be compared with the verified checkpoint evaluator", source.path)
 	}
 	return nil
-}
-
-// scaffoldSourcePerm selects the checkpoint distribution mode from the first line.
-func scaffoldSourcePerm(data []byte) os.FileMode {
-	if bytes.HasPrefix(data, []byte("#!")) {
-		return execPerm
-	}
-	return filePerm
-}
-
-// reconcileCheckpointMode verifies the installed bytes before granting execute access.
-// Other scaffolds keep their existing permission ceiling. Windows has no POSIX execute bit.
-func (s *adoptSession) reconcileCheckpointMode(ctx context.Context, sc scaffold, actual []byte) (bool, error) {
-	if !sc.sourceMode || sc.perm != execPerm || runtime.GOOS == "windows" {
-		return false, nil
-	}
-	changed, err := contextopt.ReconcileExecutableIn(ctx, s.repoPath, filepath.FromSlash(sc.rel), actual, s.opts.DryRun)
-	if err != nil {
-		return false, fmt.Errorf("checkpoint mode for %s: %w", sc.rel, err)
-	}
-	return changed, nil
 }
 
 func readCheckpointSources(ctx context.Context, root string) (result []checkpointSource, err error) {

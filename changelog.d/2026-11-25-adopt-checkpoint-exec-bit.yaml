@@ -2,7 +2,5 @@
 # SPDX-License-Identifier: EUPL-1.2
 type: fixed
 title: >-
-  Adoption installs checkpoint scripts that start with a shebang as executable on POSIX
-  and repairs matching copies in place. Preview and adoption both refuse symlinked
-  checkpoint parents, parents replaced during the lock wait, and scripts with multiple
-  hard links or special permission bits, including already-executable scripts.
+  Adoption publishes verified checkpoint scripts with mode 0755 on POSIX and restores
+  that mode on re-adoption. Issue 2073 tracks the remaining checkpoint filesystem work.

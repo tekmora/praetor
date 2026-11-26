@@ -5,14 +5,15 @@
 package adopt
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 )
 
@@ -112,55 +113,6 @@ func TestCheckpointSourceModeRefresh(t *testing.T) {
 	}
 }
 
-// TestCheckpointModeRepairKeepsFile compares the preview and live reports and checks
-// that chmod preserves the inode, mtime and CRLF bytes.
-func TestCheckpointModeRepairKeepsFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no POSIX execute bit")
-	}
-	root := t.TempDir()
-	source := checkpointSource{checkpointScript, []byte(checkpointFixtureTexts[checkpointScript])}
-	text := crlfText(string(source.data))
-	path := filepath.Join(root, filepath.FromSlash(source.path))
-	mustWrite(t, path, text)
-	before := plantCheckpointMode(t, path, filePerm)
-	for _, dryRun := range [...]bool{true, false} {
-		s := &adoptSession{repoPath: root, report: &AdoptReport{}, opts: AdoptOptions{DryRun: dryRun}}
-		if err := installCheckpointSource(t.Context(), s, source, false); err != nil {
-			t.Fatal(err)
-		}
-		if action, ok := actionOf(s.report, source.path); !ok || action.Details != "Restored file mode to 0755" {
-			t.Fatalf("dry run %t reported %+v", dryRun, action)
-		}
-		want := execPerm
-		if dryRun {
-			want = filePerm
-		}
-		assertCheckpointFile(t, root, source.path, text, want)
-	}
-	after, err := os.Stat(path)
-	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
-		t.Fatalf("repair changed inode or mtime: %v, %v", after, err)
-	}
-}
-
-// plantCheckpointMode sets a distinct mtime and verifies the starting mode, including special bits.
-func plantCheckpointMode(t *testing.T, path string, mode os.FileMode) os.FileInfo {
-	t.Helper()
-	stamp := time.Unix(1000000000, 0)
-	if err := os.Chtimes(path, stamp, stamp); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode() != mode {
-		t.Fatalf("plant %v on %s: stat %v, error %v", mode, path, info, err)
-	}
-	return info
-}
-
 // TestCheckpointSourceModeFollowsContent changes which bundle path starts with a shebang.
 func TestCheckpointSourceModeFollowsContent(t *testing.T) {
 	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}}
@@ -183,84 +135,42 @@ func TestCheckpointSourceModeFollowsContent(t *testing.T) {
 	}
 }
 
-// TestCheckpointSymlinkedParentRefused checks creation and prior-text refresh through an in-repo link.
-func TestCheckpointSymlinkedParentRefused(t *testing.T) {
-	source := checkpointSource{checkpointScript, []byte(checkpointFixtureTexts[checkpointScript])}
-	parent := filepath.Dir(filepath.FromSlash(source.path))
-	for _, tc := range [...]struct{ prior, dryRun bool }{
-		{false, true}, {false, false}, {true, true}, {true, false},
-	} {
-		t.Run(fmt.Sprintf("prior=%t/preview=%t", tc.prior, tc.dryRun), func(t *testing.T) {
-			s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}, opts: AdoptOptions{DryRun: tc.dryRun}}
-			target := linkInRootDir(t, s.repoPath, parent, filepath.Join(filepath.Dir(parent), "redirected"))
-			if tc.prior {
-				mustWrite(t, filepath.Join(target, filepath.Base(source.path)), firstPriorCheckpointText(t, source.path))
-			}
-			before := snapshotTree(t, s.repoPath)
-			err := installCheckpointSource(t.Context(), s, source, false)
-			if err == nil || !strings.Contains(err.Error(), "symlink") {
-				t.Errorf("expected symlink refusal, got %v", err)
-			}
-			if len(s.report.ActionDetails) != 0 || len(s.dryRunWrites) != 0 {
-				t.Error("refused checkpoint recorded an action or planned write")
-			}
-			assertTreeUnchanged(t, before, snapshotTree(t, s.repoPath))
-		})
-	}
-}
-
-// TestCheckpointSharedModeRepairRefused checks both decisions and both hard-link names,
-// including when the existing mode already matches the requested mode.
-func TestCheckpointSharedModeRepairRefused(t *testing.T) {
+// TestCheckpointRefreshCancellation cancels after the shared replacement has sealed the
+// new script but before it renames it over an earlier, non-executable checkpoint.
+func TestCheckpointRefreshCancellation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows has no POSIX execute bit")
 	}
-	root := t.TempDir()
-	source := checkpointSource{checkpointScript, []byte(checkpointFixtureTexts[checkpointScript])}
-	path := filepath.Join(root, filepath.FromSlash(source.path))
-	mustWrite(t, path, string(source.data))
-	if err := os.Link(path, filepath.Join(root, "alias")); err != nil {
+	s := &adoptSession{repoPath: t.TempDir(), report: &AdoptReport{}}
+	prior := firstPriorCheckpointText(t, checkpointScript)
+	current := checkpointFixtureTexts[checkpointScript]
+	path := filepath.Join(s.repoPath, filepath.FromSlash(checkpointScript))
+	mustWrite(t, path, prior)
+	if err := os.Chmod(path, filePerm); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range [...]os.FileMode{filePerm, execPerm} {
-		t.Run(mode.String(), func(t *testing.T) {
-			plantCheckpointMode(t, path, mode)
-			assertCheckpointRefusal(t, root, source, mode, "shared or unverified inode")
-			assertCheckpointFile(t, root, "alias", string(source.data), mode)
-		})
-	}
-}
 
-// TestCheckpointSpecialModeRefused plants each special bit independently, including on
-// an already executable script. Adoption must neither clear the bit nor grant execution.
-func TestCheckpointSpecialModeRefused(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no POSIX special mode bits")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	observed := false
+	observe := func(stage string) {
+		observed = true
+		assertCheckpointFile(t, s.repoPath, checkpointScript, prior, filePerm)
+		assertCheckpointFile(t, filepath.Dir(stage), filepath.Base(stage), current, execPerm)
+		cancel()
 	}
-	for _, mode := range [...]os.FileMode{os.ModeSetuid | filePerm, os.ModeSetgid | execPerm, os.ModeSticky | filePerm} {
-		t.Run(mode.String(), func(t *testing.T) {
-			root := t.TempDir()
-			source := checkpointSource{checkpointScript, []byte(checkpointFixtureTexts[checkpointScript])}
-			path := filepath.Join(root, filepath.FromSlash(source.path))
-			mustWrite(t, path, string(source.data))
-			plantCheckpointMode(t, path, mode)
-			assertCheckpointRefusal(t, root, source, mode, "special mode bits")
-		})
+	ctx = context.WithValue(ctx, (*contextopt.ReplaceOptions)(nil), observe)
+	err := installCheckpointSource(ctx, s, checkpointSource{checkpointScript, []byte(current)}, false)
+	// Either operation may win, but new bytes must already be executable.
+	switch mustRead(t, path) {
+	case prior:
+		assertCheckpointFile(t, s.repoPath, checkpointScript, prior, filePerm)
+	case current:
+		assertCheckpointFile(t, s.repoPath, checkpointScript, current, execPerm)
+	default:
+		t.Fatal("destination holds neither complete checkpoint script")
 	}
-}
-
-// assertCheckpointRefusal checks the preview and live refusal against the same inode.
-func assertCheckpointRefusal(t *testing.T, root string, source checkpointSource, mode os.FileMode, reason string) {
-	t.Helper()
-	for _, dryRun := range [...]bool{true, false} {
-		s := &adoptSession{repoPath: root, report: &AdoptReport{}, opts: AdoptOptions{DryRun: dryRun}}
-		err := installCheckpointSource(t.Context(), s, source, false)
-		if err == nil || !strings.Contains(err.Error(), reason) {
-			t.Errorf("dry run %t returned %v, want %s", dryRun, err, reason)
-		}
-		if len(s.report.ActionDetails) != 0 {
-			t.Errorf("dry run %t reported an action: %v", dryRun, s.report.ActionDetails)
-		}
-		assertCheckpointFile(t, root, source.path, string(source.data), mode)
+	if !observed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation at publication, observed=%t, err=%v", observed, err)
 	}
 }
