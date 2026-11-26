@@ -370,6 +370,55 @@ func TestPRTemplateRejectsMalformedInstallRecord(t *testing.T) {
 	}
 }
 
+// TestPRTemplateBlockedLedger plans without a prior digest and reports the blocked writes on apply.
+func TestPRTemplateBlockedLedger(t *testing.T) {
+	repo := t.TempDir()
+	initTestGit(t, repo)
+	writeOriginRemote(t, repo, "https://github.com/acme/widget.git")
+	blocked := filepath.Join(repo, workingDirPath)
+	mustWrite(t, blocked, "blocked ledger")
+	opts := AdoptOptions{Path: repo, LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true, DryRun: true}
+	plan, err := Adopt(t.Context(), opts)
+	if err != nil {
+		t.Fatalf("plan with blocked ledger: %v", err)
+	}
+	assertNoIssues(t, plan)
+	if !hasAction(plan, prTemplateFile, actionCreate) {
+		t.Fatalf("plan omitted the new template %s", prTemplateFile)
+	}
+	assertAbsent(t, repo, prTemplateFile)
+
+	opts.DryRun = false
+	applied, err := Adopt(t.Context(), opts)
+	if err != nil {
+		t.Fatalf("apply stopped before reporting incomplete work: %v", err)
+	}
+	record := filepath.Join(workingDirPath, "adopt-installed", prTemplateFile+".sha256")
+	messages := strings.Join(applied.Errors, "\n")
+	if !strings.Contains(messages, "write template install record "+record) || !strings.Contains(messages, "workingdir init") {
+		t.Fatalf("missing blocked writes in the apply report: %v", applied.Errors)
+	}
+	if mustRead(t, blocked) != "blocked ledger" || repoText(t, repo, prTemplateFile) == "" {
+		t.Fatal("expected the installed template and the original ledger obstruction")
+	}
+}
+
+// TestPRTemplateRefusesSymlinkedLedger requires a named read failure even when the target is empty.
+func TestPRTemplateRefusesSymlinkedLedger(t *testing.T) {
+	s := ceilingPRTemplateSession(t.TempDir())
+	target := linkInRootDir(t, s.repoPath, workingDirPath, "empty")
+	record := filepath.Join(workingDirPath, "adopt-installed", prTemplateFile+".sha256")
+	for _, dryRun := range []bool{true, false} {
+		s.opts.DryRun = dryRun
+		err := reconcilePullRequestTemplate(t.Context(), s)
+		if err == nil || !strings.Contains(err.Error(), "read template install record "+record) {
+			t.Fatalf("dry run %t: expected a refusal naming the record, got %v", dryRun, err)
+		}
+	}
+	assertAbsent(t, s.repoPath, prTemplateFile)
+	assertDirEmpty(t, target)
+}
+
 // TestPriorPRTemplateDigests records the current rendering and replays each older fixture.
 func TestPriorPRTemplateDigests(t *testing.T) {
 	current := fixtureDigest(t, prTemplateFile, []byte(repoText(t, sourceCheckout, prTemplateFile)))

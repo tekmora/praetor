@@ -5,6 +5,7 @@ package adopt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -22,7 +23,7 @@ var installedTemplateDigest = regexp.MustCompile("^[0-9a-f]{64}\n$")
 // known release texts. A dry run, failed write or preserved edit leaves the record untouched.
 func (s *adoptSession) scaffoldInstalledTemplate(ctx context.Context, sc scaffold) error {
 	record := filepath.Join(workingDirPath, "adopt-installed", filepath.FromSlash(sc.rel)+".sha256")
-	before, exists, err := contextopt.ObserveSnapshotIn(ctx, s.repoPath, record)
+	before, exists, err := contextopt.ObserveOptionalSnapshotIn(ctx, s.repoPath, record)
 	if err != nil {
 		return fmt.Errorf("read template install record %s: %w", record, err)
 	}
@@ -60,7 +61,12 @@ func (s *adoptSession) recordInstalledTemplate(ctx context.Context, record strin
 	if err := contextopt.ReplaceSnapshotIn(ctx, s.repoPath, record, []byte(line), contextopt.ReplaceOptions{
 		Expected: before, Exists: exists, Mode: 0o600, AcceptCurrent: true,
 	}); err != nil {
-		return fmt.Errorf("write template install record %s: %w", record, err)
+		writeErr := fmt.Errorf("write template install record %s: %w", record, err)
+		if errors.Is(err, contextopt.ErrNonDirectoryComponent) {
+			s.report.addError("%s", writeErr)
+			return nil
+		}
+		return writeErr
 	}
 	return nil
 }

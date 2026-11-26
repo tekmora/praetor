@@ -48,17 +48,31 @@ func ObserveRootSnapshot(ctx context.Context, root *os.Root, name string) ([]byt
 // directory or file reads as (nil, false, nil). A caller that checks a target here before its
 // first write fails before writing anything instead of at the write.
 func ObserveSnapshotIn(ctx context.Context, root, rel string) (data []byte, exists bool, err error) {
+	return observeSnapshotIn(ctx, root, rel, false)
+}
+
+// ObserveOptionalSnapshotIn also reports absence when a non-directory ancestor prevents rel
+// from existing. Symlinks and unreadable or invalid snapshots still fail the observation.
+func ObserveOptionalSnapshotIn(ctx context.Context, root, rel string) ([]byte, bool, error) {
+	return observeSnapshotIn(ctx, root, rel, true)
+}
+
+// observeSnapshotIn reads a confined snapshot under the caller's policy for blocked parents.
+func observeSnapshotIn(ctx context.Context, root, rel string, optional bool) (data []byte, exists bool, err error) {
 	if ctx == nil {
 		return nil, false, errors.New("snapshot observation requires a context")
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	dir, err := OpenDirectoryIn(ctx, root, filepath.Dir(rel))
-	if errors.Is(err, os.ErrNotExist) {
+	dir, err := openDirectoryIn(ctx, root, filepath.Dir(rel), optional)
+	if !optional && errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err
+	}
+	if dir == nil {
+		return nil, false, nil
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
 	return ObserveRootSnapshot(ctx, dir, filepath.Base(rel))

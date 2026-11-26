@@ -9,6 +9,18 @@ import (
 	"strings"
 )
 
+// ErrNonDirectoryComponent identifies a non-directory observed by Lstat below a pinned parent.
+// Symlinks have a separate refusal even when their target is missing.
+var ErrNonDirectoryComponent = errors.New("path component is not a directory")
+
+// nonDirectoryError preserves the walker's refusal and classifies an observed obstruction.
+func nonDirectoryError(info os.FileInfo, refusal string) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New(refusal)
+	}
+	return fmt.Errorf("%s: %w", refusal, ErrNonDirectoryComponent)
+}
+
 // EnsureDirectory creates absent directories through pinned parents, rejecting a symlink at
 // any component this call creates. Existing directory permissions are left unchanged.
 //
@@ -105,6 +117,7 @@ func ensureComponents(ctx context.Context, root *os.Root, parts []string, mode o
 	return root, nil
 }
 
+// ensureChildDirectory creates a missing child and rejects an existing obstruction.
 func ensureChildDirectory(ctx context.Context, root *os.Root, name string, mode os.FileMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -120,7 +133,7 @@ func ensureChildDirectory(ctx context.Context, root *os.Root, name string, mode 
 		return err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("directory component must not be a symlink or file: %s", name)
+		return nonDirectoryError(info, "directory component must not be a symlink or file: "+name)
 	}
 	return nil
 }
