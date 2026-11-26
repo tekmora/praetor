@@ -45,7 +45,7 @@ var (
 // same driver.
 type actionsForge struct {
 	reader     forge.ActionsReader
-	protection protectionReader
+	driver     *forge.GitHubDriver
 	repository func() (forge.RepositorySettings, error)
 	runs       *forge.WorkflowRunReport
 	notMade    string
@@ -72,14 +72,20 @@ func openActionsForge(ctx context.Context, rootDir string, repo config.Repositor
 	return newActionsForge(ctx, repo, token, actionsForgeEndpoint)
 }
 
-// newActionsForge shares one repository settings read, including its error, across comparisons.
+// newActionsForge shares one settings read across comparisons. Once the GET validates the
+// current full name, subsequent reads and writes on this command's driver use those coordinates.
 func newActionsForge(ctx context.Context, repo config.RepositoryMetadata, token, endpoint string) actionsForge {
 	driver := forge.NewGitHubDriver(token, endpoint)
 	driver.SetRepository(repo.Owner, repo.Name)
 	repository := sync.OnceValues(func() (forge.RepositorySettings, error) {
-		return driver.ReadRepositorySettings(ctx)
+		settings, err := driver.ReadRepositorySettings(ctx)
+		if err == nil {
+			owner, name, _ := strings.Cut(settings.FullName(), "/") // validated by ReadRepositorySettings
+			driver.SetRepository(owner, name)
+		}
+		return settings, err
 	})
-	return actionsForge{reader: driver, protection: driver, repository: repository}
+	return actionsForge{reader: driver, driver: driver, repository: repository}
 }
 
 // readActionsPermissions compares declared with the live workflow permissions, or returns why
@@ -148,7 +154,7 @@ func auditLiveBranchProtection(ctx context.Context, manifest *config.Manifest, r
 	if err != nil {
 		return fmt.Errorf("[FAIL] Live branch protection audit failed: %w", err)
 	}
-	protection, findings, err := compareLiveProtection(ctx, live.protection, target)
+	protection, findings, err := compareLiveProtection(ctx, live.driver, target)
 	var unread *forgeReadError
 	switch {
 	case errors.As(err, &unread):
@@ -277,7 +283,7 @@ func liveProtectionNotCompared(manifest *config.Manifest, policy *config.Resolve
 		return "", errors.New("[FAIL] Live branch protection audit failed: policy is required")
 	case !adopt.RulesetRequired(policy.BranchProtection):
 		return "[INFO] Live branch protection not compared with the forge: policy requires neither linear history nor signed commits, so it declares no branch protection ruleset.", nil
-	case live.protection == nil:
+	case live.driver == nil:
 		return "[SKIP] Live branch protection not compared with the forge: " + live.notMade, nil
 	}
 	return "", nil
@@ -477,7 +483,7 @@ func liveMergeQueueVerdict(ctx context.Context, rootDir string, target protectio
 	if !target.policy.MergeQueue && live != nil && live.HasActiveRule(forge.MergeQueueRule) {
 		return errors.New("[FAIL] " + forge.UndeclaredMergeQueueFailure(target.branch))
 	}
-	findings, err := forge.LiveMergeQueueFindings(ctx, rootDir, live)
+	findings, err := forge.LiveMergeQueueFindings(ctx, rootDir, target.repository, live)
 	if err != nil {
 		return fmt.Errorf("[FAIL] Live branch protection of %s: read the merge_group triggers: %w", target.branch, err)
 	}

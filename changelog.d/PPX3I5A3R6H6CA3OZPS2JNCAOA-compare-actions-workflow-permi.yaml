@@ -1,3 +1,7 @@
 type: fixed
-title: Compare Actions workflow permissions with the current owner after a repository transfer or rename
+title: >-
+  Use the current repository after a transfer or rename. An unreadable or inconsistent repository identity
+  fails live audit comparisons of visibility, Actions permissions or branch protection, plan comparisons of
+  Actions permissions or remote branch protection, and remote rules audits that need forge evidence.
+  Remote sync requires a validated identity before its first forge write.
 breaking: true

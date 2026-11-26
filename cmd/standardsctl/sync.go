@@ -245,9 +245,13 @@ func reconcileRemoteForge(ctx context.Context, rootDir string, in remoteSyncInpu
 	if err := preflightRemoteForge(ctx, rootDir, in.manifest.Repository, remote.host); err != nil {
 		return err
 	}
-	gh := forge.NewGitHubDriver(token, remote.endpoint)
-	gh.SetRepository(in.manifest.Repository.Owner, in.manifest.Repository.Name)
-	if err := reconcileRemoteRuleset(ctx, gh, rootDir, in); err != nil {
+	live := newActionsForge(ctx, in.manifest.Repository, token, remote.endpoint)
+	settings, err := live.repository()
+	if err != nil {
+		return err
+	}
+	gh := live.driver
+	if err := reconcileRemoteRuleset(ctx, gh, rootDir, in, settings.FullName()); err != nil {
 		return err
 	}
 	fmt.Printf("  [SYNC] Reconciling %d labels from .config/labels.yaml on GitHub...\n", len(in.labels))
@@ -271,11 +275,10 @@ func reconcileRemoteForge(ctx context.Context, rootDir string, in remoteSyncInpu
 // value, and fails when a declared property is still not enforced once the ruleset converged.
 // It then names the checks it left off. A declared merge queue is written to its own ruleset
 // (reconcileRemoteMergeQueue).
-func reconcileRemoteRuleset(ctx context.Context, gh *forge.GitHubDriver, rootDir string, in remoteSyncInputs) error {
+func reconcileRemoteRuleset(ctx context.Context, gh *forge.GitHubDriver, rootDir string, in remoteSyncInputs, repository string) error {
 	if in.policy == nil {
 		return errors.New("reconcile branch protection: no resolved policy")
 	}
-	repository := gh.Owner + "/" + gh.Repo
 	queued := in.policy.MergeQueue
 	contexts, omitted, err := remoteStatusContexts(ctx, rootDir, repository, queued, in.contexts, forge.WithDeclaredStatusContexts(in.policy.StatusContexts))
 	if err != nil {
@@ -296,7 +299,7 @@ func reconcileRemoteRuleset(ctx context.Context, gh *forge.GitHubDriver, rootDir
 	if err != nil {
 		return err
 	}
-	if err := reconcileRemoteMergeQueue(ctx, gh, in); err != nil {
+	if err := reconcileRemoteMergeQueue(ctx, gh, target); err != nil {
 		return err
 	}
 	drifted, err := reportLiveProtection(ctx, gh, target, "read back", false)
@@ -308,27 +311,27 @@ func reconcileRemoteRuleset(ctx context.Context, gh *forge.GitHubDriver, rootDir
 			"another ruleset, legacy branch protection or the repository's plan overrides it",
 			forge.RepositoryRulesetName, in.branch, strings.Join(drifted, ", "))
 	}
-	if err := printSyncedRuleset(ctx, rootDir, gh, in.branch, queued); err != nil {
+	if err := printSyncedRuleset(ctx, rootDir, gh, target); err != nil {
 		return err
 	}
-	return reportOmittedStatusChecks(ctx, gh, in.branch, omitted)
+	return reportOmittedStatusChecks(ctx, gh, target, omitted)
 }
 
 // printSyncedRuleset reports the converged rulesets: the main ruleset as synchronized, or with a
 // warning naming each check the merge queue never receives, then the merge queue ruleset when one
 // is declared.
-func printSyncedRuleset(ctx context.Context, rootDir string, gh *forge.GitHubDriver, branch string, queued bool) error {
-	stale, err := staleQueueChecks(ctx, rootDir, gh, branch, queued)
+func printSyncedRuleset(ctx context.Context, rootDir string, gh *forge.GitHubDriver, target protectionTarget) error {
+	stale, err := staleQueueChecks(ctx, rootDir, gh, target)
 	if err != nil {
 		return err
 	}
 	if len(stale) > 0 {
-		printStaleQueueChecks(branch, stale)
+		printStaleQueueChecks(target.branch, stale)
 	} else {
-		fmt.Printf("  [OK] Remote branch protection synchronized on GitHub (%s and lts-*, read back; live rules praetor does not render kept)\n", branch)
+		fmt.Printf("  [OK] Remote branch protection synchronized on GitHub (%s and lts-*, read back; live rules praetor does not render kept)\n", target.branch)
 	}
-	if queued {
-		fmt.Printf("  [OK] Merge queue ruleset %q synchronized on GitHub (%s only, read back)\n", forge.MergeQueueRulesetName, branch)
+	if target.policy.MergeQueue {
+		fmt.Printf("  [OK] Merge queue ruleset %q synchronized on GitHub (%s only, read back)\n", forge.MergeQueueRulesetName, target.branch)
 	}
 	return nil
 }
@@ -337,13 +340,13 @@ func printSyncedRuleset(ctx context.Context, rootDir string, gh *forge.GitHubDri
 // holds the merge_queue rule alone and targets the default branch alone, when the policy declares
 // a merge queue. Without the declaration it writes nothing: the ruleset, if the repository has
 // one, is reported by the live comparison that follows (reportLiveProtection).
-func reconcileRemoteMergeQueue(ctx context.Context, gh *forge.GitHubDriver, in remoteSyncInputs) error {
-	if !in.policy.MergeQueue {
+func reconcileRemoteMergeQueue(ctx context.Context, gh *forge.GitHubDriver, target protectionTarget) error {
+	if !target.policy.MergeQueue {
 		return nil
 	}
 	fmt.Printf("  [SYNC] Reconciling merge queue ruleset %q on GitHub for %s (%s only)...\n",
-		forge.MergeQueueRulesetName, gh.Owner+"/"+gh.Repo, in.branch)
-	lowered, kept, err := gh.ReconcileMergeQueue(ctx, in.branch, in.policy)
+		forge.MergeQueueRulesetName, target.repository, target.branch)
+	lowered, kept, err := gh.ReconcileMergeQueue(ctx, target.branch, &target.policy)
 	printLoweredParameters(forge.MergeQueueRulesetName, lowered)
 	printKeptParameters(forge.MergeQueueRulesetName, kept)
 	return err
@@ -353,17 +356,17 @@ func reconcileRemoteMergeQueue(ctx context.Context, gh *forge.GitHubDriver, in r
 // (forge.MergeQueueFindings) with what GitHub requires of branch after the write: the merge never
 // removes a live required check, so a check an earlier sync wrote for a workflow without the
 // merge_group trigger stays required and stalls the queue. It is empty without a declared queue.
-func staleQueueChecks(ctx context.Context, rootDir string, gh *forge.GitHubDriver, branch string, queued bool) ([]forge.MergeQueueFinding, error) {
-	if !queued {
+func staleQueueChecks(ctx context.Context, rootDir string, gh *forge.GitHubDriver, target protectionTarget) ([]forge.MergeQueueFinding, error) {
+	if !target.policy.MergeQueue {
 		return nil, nil
 	}
-	live, err := gh.ReadBranchProtection(ctx, branch)
+	live, err := gh.ReadBranchProtection(ctx, target.branch)
 	if err != nil {
-		return nil, fmt.Errorf("read back the merge queue checks of %s: %w", branch, err)
+		return nil, fmt.Errorf("read back the merge queue checks of %s: %w", target.branch, err)
 	}
-	stale, err := forge.LiveMergeQueueFindings(ctx, rootDir, live)
+	stale, err := forge.LiveMergeQueueFindings(ctx, rootDir, target.repository, live)
 	if err != nil {
-		return nil, fmt.Errorf("compare the merge queue checks of %s with the merge_group triggers: %w", branch, err)
+		return nil, fmt.Errorf("compare the merge queue checks of %s with the merge_group triggers: %w", target.branch, err)
 	}
 	return stale, nil
 }
@@ -418,11 +421,11 @@ func remoteStatusContexts(ctx context.Context, rootDir, repository string, merge
 // off. The merge never removes a live required check (forge.GitHubDriver.ReconcileProtection),
 // so a check an earlier sync wrote stays required: that is a warning, because every pull request
 // waits for a check no run reports until the operator removes it from the ruleset.
-func reportOmittedStatusChecks(ctx context.Context, gh *forge.GitHubDriver, branch string, omitted []string) error {
+func reportOmittedStatusChecks(ctx context.Context, gh *forge.GitHubDriver, target protectionTarget, omitted []string) error {
 	if len(omitted) == 0 {
 		return nil
 	}
-	live, err := gh.LiveRuleset(ctx, branch)
+	live, err := gh.LiveRuleset(ctx, target.branch)
 	if err != nil {
 		return fmt.Errorf("read back the status checks left off: %w", err)
 	}
@@ -440,7 +443,7 @@ func reportOmittedStatusChecks(ctx context.Context, gh *forge.GitHubDriver, bran
 			absent = append(absent, check)
 		}
 	}
-	printOmittedStatusChecks(gh.Owner+"/"+gh.Repo, absent, stale)
+	printOmittedStatusChecks(target.repository, absent, stale)
 	return nil
 }
 

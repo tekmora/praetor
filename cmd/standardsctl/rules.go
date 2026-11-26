@@ -131,7 +131,7 @@ func rulesComparisonRepository(ctx context.Context, flags rulesAuditFlags, repo 
 	if err != nil {
 		return declared, nil, err
 	}
-	return settings.FullName(), live.protection, nil
+	return settings.FullName(), live.driver, nil
 }
 
 func assertedForgeStates(target protectionTarget) (map[ruleregistry.ForgeSetting]ruleregistry.ForgeState, error) {

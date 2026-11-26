@@ -314,23 +314,43 @@ func (s *forgeStub) handler() http.HandlerFunc {
 				return
 			}
 		}
-		if r.URL.Path == strings.TrimSuffix(forgeStubRepo, "/") || r.URL.Path == forgeStubRepo+"topics" {
+		s.serveResource(w, r, body)
+	}
+}
+
+// serveResource answers the checkout alias and current repository paths from the same state.
+// The request log retains the original paths so tests can distinguish the two.
+func (s *forgeStub) serveResource(w http.ResponseWriter, r *http.Request, body map[string]any) {
+	fullName, ok := s.repo["full_name"].(string)
+	if !ok {
+		fullName = ""
+	}
+	for _, base := range [...]string{strings.TrimSuffix(forgeStubRepo, "/"), "/repos/" + fullName} {
+		if r.URL.Path == base || r.URL.Path == base+"/topics" {
 			s.serveRepository(w, r.Method, body)
 			return
 		}
-		resource := strings.TrimPrefix(r.URL.Path, forgeStubRepo)
-		switch {
-		case strings.HasPrefix(resource, "labels"):
-			s.serveLabel(w, r.Method, strings.TrimPrefix(resource, "labels"), body)
-		case strings.HasPrefix(resource, "rules/branches/"):
-			s.serveBranchRules(w, strings.TrimPrefix(resource, "rules/branches/"))
-		case strings.HasPrefix(resource, "branches/") && strings.HasSuffix(resource, "/protection"):
-			s.serveLegacyProtection(w)
-		case strings.HasPrefix(resource, "actions/workflows/") && strings.HasSuffix(resource, "/runs"):
-			s.serveWorkflowRuns(w, strings.TrimSuffix(strings.TrimPrefix(resource, "actions/workflows/"), "/runs"))
-		default:
-			s.serveRuleset(w, r.Method, strings.TrimPrefix(resource, "rulesets"), body)
+		if resource, ok := strings.CutPrefix(r.URL.Path, base+"/"); ok {
+			s.serveSubresource(w, r.Method, resource, body)
+			return
 		}
+	}
+	http.NotFound(w, r)
+}
+
+// serveSubresource dispatches a path relative to the matched fixture repository.
+func (s *forgeStub) serveSubresource(w http.ResponseWriter, method, resource string, body map[string]any) {
+	switch {
+	case strings.HasPrefix(resource, "labels"):
+		s.serveLabel(w, method, strings.TrimPrefix(resource, "labels"), body)
+	case strings.HasPrefix(resource, "rules/branches/"):
+		s.serveBranchRules(w, strings.TrimPrefix(resource, "rules/branches/"))
+	case strings.HasPrefix(resource, "branches/") && strings.HasSuffix(resource, "/protection"):
+		s.serveLegacyProtection(w)
+	case strings.HasPrefix(resource, "actions/workflows/") && strings.HasSuffix(resource, "/runs"):
+		s.serveWorkflowRuns(w, strings.TrimSuffix(strings.TrimPrefix(resource, "actions/workflows/"), "/runs"))
+	default:
+		s.serveRuleset(w, method, strings.TrimPrefix(resource, "rulesets"), body)
 	}
 }
 
@@ -361,23 +381,30 @@ func (s *forgeStub) serveBranchRules(w http.ResponseWriter, branch string) {
 		if s.rulesUnenforced || doc["enforcement"] != "active" || !stubRulesetTargets(doc, "refs/heads/"+branch) {
 			continue
 		}
-		list, isList := doc["rules"].([]any)
-		if !isList {
-			continue
-		}
-		for _, raw := range list {
-			rule, isObject := raw.(map[string]any)
-			if !isObject {
-				continue
-			}
-			entry := map[string]any{"type": rule["type"], "ruleset_id": id, "ruleset_source_type": "Repository", "ruleset_source": "acme/widgets"}
-			if params, present := rule["parameters"]; present {
-				entry["parameters"] = params
-			}
-			rules = append(rules, entry)
-		}
+		rules = append(rules, s.branchRuleEntries(id, doc)...)
 	}
 	stubRespond(w, http.StatusOK, rules)
+}
+
+// branchRuleEntries attaches the ruleset and current repository to each active rule.
+func (s *forgeStub) branchRuleEntries(id int, doc map[string]any) []map[string]any {
+	list, ok := doc["rules"].([]any)
+	if !ok {
+		return nil
+	}
+	var entries []map[string]any
+	for _, raw := range list {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		entry := map[string]any{"type": rule["type"], "ruleset_id": id, "ruleset_source_type": "Repository", "ruleset_source": s.repo["full_name"]}
+		if params, present := rule["parameters"]; present {
+			entry["parameters"] = params
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
 // stubRulesetTargets reports whether the ruleset's ref_name condition includes ref, exactly or
@@ -835,18 +862,12 @@ func metadataManifest() string {
 // description, homepage and topics .standards.yaml declares, keeps the topics it does not
 // name, and reports visibility drift without changing the visibility.
 func TestSync_Remote_RepositoryMetadata(t *testing.T) {
-	f := newSyncValidationFixture(t)
-	env := initGitFixture(t, f.dir)
-	if out, gerr := runFixtureGit(t, f.dir, env, "remote", "add", "origin", "https://github.com/acme/widgets.git"); gerr != nil {
-		t.Fatalf("remote add: %v (%s)", gerr, out)
-	}
+	repo := fixtureRepositorySettings("public")
+	repo["description"], repo["homepage"], repo["topics"] = "stale", "", []any{"governance", "operator-topic"}
+	stub := &forgeStub{repo: repo}
+	f, endpoint := remoteProtectionFixture(t, stub)
 	writeFixtureFile(t, f.dir, ".standards.yaml", metadataManifest())
-	stub := &forgeStub{repo: map[string]any{
-		"description": "stale", "homepage": "", "visibility": "public", "topics": []any{"governance", "operator-topic"},
-	}}
-	srv := httptest.NewServer(stub.handler())
-	t.Cleanup(srv.Close)
-	remote := []string{"--config=" + f.manifestPath, "--remote", "--token=ghp_x", "--endpoint=" + srv.URL}
+	remote := []string{"--config=" + f.manifestPath, "--remote", "--token=ghp_x", "--endpoint=" + endpoint}
 
 	// Positive: the drifted fields are written, the undeclared topic is kept, visibility is reported.
 	out, err := runSyncCmd(t, remote...)
@@ -858,7 +879,7 @@ func TestSync_Remote_RepositoryMetadata(t *testing.T) {
 		"[OK] Repository metadata synchronized on GitHub (updated description, homepage; topics added: widgets;",
 		"[DRIFT] Repository visibility: manifest declares private, GitHub reports public; left unchanged")
 	mustContain(t, strings.Join(stub.recorded(), "\n"), "PATCH /repos/acme/widgets", "PUT /repos/acme/widgets/topics")
-	repo := stub.storedRepo()
+	repo = stub.storedRepo()
 	if repo["description"] != "Widget engine" || repo["homepage"] != "https://widgets.example" || repo["visibility"] != "public" {
 		t.Fatalf("repository metadata not converged, or visibility changed: %v", repo)
 	}
@@ -878,7 +899,12 @@ func TestSync_Remote_RepositoryMetadata(t *testing.T) {
 			t.Fatalf("a converged repository was written again: %v", stub.recorded()[before:])
 		}
 	}
+	checkRemoteMetadataFailures(t, f)
+}
 
+// checkRemoteMetadataFailures verifies rejected writes and invalid declarations against the same checkout.
+func checkRemoteMetadataFailures(t *testing.T, f *auditFixture) {
+	t.Helper()
 	// Negative: a rejected metadata write fails the command.
 	failing := &forgeStub{}
 	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -889,7 +915,7 @@ func TestSync_Remote_RepositoryMetadata(t *testing.T) {
 		failing.handler()(w, r)
 	}))
 	t.Cleanup(failSrv.Close)
-	_, err = runSyncCmd(t, "--config="+f.manifestPath, "--remote", "--token=ghp_x", "--endpoint="+failSrv.URL)
+	_, err := runSyncCmd(t, "--config="+f.manifestPath, "--remote", "--token=ghp_x", "--endpoint="+failSrv.URL)
 	mustErrContain(t, err, "reconcile repository metadata")
 	mustErrContain(t, err, "422")
 

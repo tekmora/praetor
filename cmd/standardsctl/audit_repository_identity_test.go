@@ -61,20 +61,29 @@ func TestPlanRemoteIdentityFirst(t *testing.T) {
 	mustContain(t, out, "  - compliant:", "Live branch protection of main on GitHub for acme/widgets")
 }
 
+// transferredRepository is the metadata returned when the checkout still names acme/widgets.
+func transferredRepository() map[string]any {
+	return map[string]any{
+		"full_name": "new-org/imago", "owner": map[string]string{"login": "new-org"}, "visibility": "public",
+	}
+}
+
+// transferWorkflow reports Transfer gate only in the repository returned by the identity GET.
+func transferWorkflow() string {
+	guard := "if: github.repository == (vars.PRAETOR_CANONICAL_REPOSITORY || 'new-org/imago')"
+	return strings.Replace(prJobWorkflow("Transfer gate"), "runs-on:", guard+"\n    runs-on:", 1)
+}
+
 // TestTransferredRepositoryRequiredChecks exercises the guarded job in both live comparisons.
 // The old checkout has CI protected. The current repository also runs Transfer gate on each PR.
 func TestTransferredRepositoryRequiredChecks(t *testing.T) {
 	stub := &forgeStub{
-		repo: map[string]any{
-			"full_name": "new-org/imago", "owner": map[string]string{"login": "new-org"}, "visibility": "public",
-		},
+		repo:     transferredRepository(),
 		rulesets: liveRuleset(t, declaredProtection(false), []string{"CI"}, "active"),
 		runs:     map[string]map[string]any{"ci.yml": completedMainRunsPage(), "transfer.yml": completedMainRunsPage()},
 	}
 	f := protectedFixture(t, false, "", stub)
-	guard := "if: github.repository == (vars.PRAETOR_CANONICAL_REPOSITORY || 'new-org/imago')"
-	job := strings.Replace(prJobWorkflow("Transfer gate"), "runs-on:", guard+"\n    runs-on:", 1)
-	f.commitWorkflows(t, map[string]string{"transfer.yml": job})
+	f.commitWorkflows(t, map[string]string{"transfer.yml": transferWorkflow()})
 	f.recordOriginMain(t)
 	const missing = "Required status checks: declared 2, live 1 of 2 required; missing: Transfer gate"
 	t.Run("audit", func(t *testing.T) {
@@ -116,4 +125,15 @@ func TestAuditRepositoryVisibility_Boundary_ForgeReadErrorFails(t *testing.T) {
 	f := visibilityFixture(t, "public", stub)
 	_, err := f.audit(t)
 	mustErrContain(t, err, "[FAIL] Repository visibility: read repository identity: unexpected status 500")
+}
+
+// TestPlanRemoteProtectionIdentityFailure requires metadata even without declared Actions permissions.
+func TestPlanRemoteProtectionIdentityFailure(t *testing.T) {
+	stub := &forgeStub{repoStatus: http.StatusInternalServerError}
+	f, endpoint := remoteProtectionFixture(t, stub)
+	_, err := runPlanCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+endpoint)
+	mustErrContain(t, err, "read repository identity: unexpected status 500")
+	if got := stub.readPaths(); !slices.Equal(got, []string{"/repos/acme/widgets"}) {
+		t.Errorf("reads after identity failure: %v", got)
+	}
 }

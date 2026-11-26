@@ -70,6 +70,25 @@ func TestRulesAuditCLI_ForgeReadbackPositiveAndOffline(t *testing.T) {
 		`"match": true`, `"read_back": true`, `"enforced": true`)
 }
 
+// TestRulesAuditCLI_TransferredRequiredCheck reports the guarded job missing from live protection.
+func TestRulesAuditCLI_TransferredRequiredCheck(t *testing.T) {
+	stub := &forgeStub{repo: transferredRepository(), legacy: classicProtection("CI")}
+	f := rulesAuditForgeFixture(t, stub)
+	writeFixtureFile(t, f.dir, ".github/workflows/transfer.yml", transferWorkflow())
+	out, err := captureStdout(t, func() error {
+		return runRulesAudit([]string{"--root", f.dir, "--remote", "--token=fixture", "--endpoint=" + actionsForgeEndpoint})
+	})
+	if err == nil {
+		t.Fatalf("rules audit passed with Transfer gate missing:\n%s", out)
+	}
+	mustContain(t, out, "HISS-01 forge:required_checks asserted 2, observed 1 of 2 required; missing: Transfer gate, match=false")
+	const base = "/repos/new-org/imago/"
+	want := []string{"/repos/acme/widgets", base + "rules/branches/main", base + "rulesets", base + "branches/main/protection"}
+	if got := stub.readPaths(); !slices.Equal(got, want) {
+		t.Errorf("rules audit reads = %v, want %v", got, want)
+	}
+}
+
 // TestRulesAuditCLI_ForgeReadbackNegativeAndError distinguishes drift from a failed read.
 func TestRulesAuditCLI_ForgeReadbackNegativeAndError(t *testing.T) {
 	f := rulesAuditForgeFixture(t, &forgeStub{legacy: classicProtection()})
