@@ -26,26 +26,12 @@ import (
 //
 // A walk that exhausts its bound, or meets any error other than fs.ErrNotExist, reports
 // false, so the caller surfaces the original error instead of assuming there was nothing.
+// If a stat blocks past the deadline, the walk stops when that stat returns.
 func DirectoryAbsent(dir string, err error) bool {
-	return directoryAbsentWithStat(dir, err, os.Stat)
-}
-
-// directoryAbsentWithStat lets the caller return at the walk deadline even if
-// a stat is still blocked. The worker can publish a late result without waiting.
-func directoryAbsentWithStat(dir string, err error, stat func(string) (os.FileInfo, error)) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), MaxIODuration)
 	defer cancel()
-	done := make(chan bool, 1)
-	go func() {
-		absent, inspectErr := directoryAbsentContext(ctx, dir, err, stat)
-		done <- inspectErr == nil && absent
-	}()
-	select {
-	case absent := <-done:
-		return absent && ctx.Err() == nil
-	case <-ctx.Done():
-		return false
-	}
+	absent, inspectErr := DirectoryAbsentContext(ctx, dir, err)
+	return inspectErr == nil && absent
 }
 
 // DirectoryAbsentContext bounds the entire ancestor walk, including when the

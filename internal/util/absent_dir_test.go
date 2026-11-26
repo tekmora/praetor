@@ -86,17 +86,28 @@ func TestDirectoryAbsent_Boundary_ExistingDirectoryAndWrappedError(t *testing.T)
 	}
 }
 
-// TestDirectoryAbsent_Negative_BlockedStat checks that the boolean wrapper
-// returns at the walk deadline while the first stat is still sleeping.
+// TestDirectoryAbsent_Negative_BlockedStat checks that a stat waiting on the
+// caller's deadline has exited when the walk reports the timeout.
 func TestDirectoryAbsent_Negative_BlockedStat(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		const timeout = MaxIODuration / 2
 		start := time.Now()
-		absent := directoryAbsentWithStat("missing", fs.ErrNotExist, func(string) (os.FileInfo, error) {
-			time.Sleep(MaxIODuration + time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
+		defer cancel()
+		done := make(chan struct{})
+		absent, err := directoryAbsentContext(ctx, "missing", fs.ErrNotExist, func(string) (os.FileInfo, error) {
+			defer close(done)
+			<-ctx.Done()
+			synctest.Wait() // Let cancellation reach the walk's child context.
 			return nil, fs.ErrPermission
 		})
-		if elapsed := time.Since(start); absent || elapsed != MaxIODuration {
-			t.Fatalf("blocked stat: absent=%v after %v, want false after %v", absent, elapsed, MaxIODuration)
+		if elapsed := time.Since(start); absent || !errors.Is(err, context.DeadlineExceeded) || elapsed != timeout {
+			t.Fatalf("blocked stat: absent=%v err=%v elapsed=%v, want false and deadline exceeded at %v", absent, err, elapsed, timeout)
+		}
+		select {
+		case <-done:
+		default:
+			t.Fatal("walk returned while stat was still blocked")
 		}
 	})
 }
