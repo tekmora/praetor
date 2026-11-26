@@ -950,6 +950,47 @@ func TestAudit_InvalidRegistry(t *testing.T) {
 	}
 }
 
+// TestAudit_GuidanceWithEvidenceRowIsUnresolved verifies that a guidance entry carrying evidence
+// fails validation and reports an unresolved row instead of a prose-only one, while guidance
+// without evidence keeps its prose-only row.
+func TestAudit_GuidanceWithEvidenceRowIsUnresolved(t *testing.T) {
+	tests := []struct {
+		name     string
+		registry string
+		wantErr  bool
+		status   Status
+		prose    bool
+		evidence string
+	}{
+		{"guidance with evidence", "version: 1\nrules:\n  - id: HISS-01\n    class: guidance\n    evidence: [make:verify-all]\n",
+			true, StatusUnresolved, false, "unresolved: guidance carries evidence"},
+		{"guidance without evidence", "version: 1\nrules:\n  - id: HISS-01\n    class: guidance\n",
+			false, StatusGuidance, true, "prose-only"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report, err := Audit(t.Context(), fixtureRoot(t, test.registry))
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Audit() error = %v, want error=%t", err, test.wantErr)
+			}
+			if report == nil {
+				t.Fatal("Audit() report = nil")
+			}
+			row := findRow(t, report, "HISS-01")
+			want := Row{Status: test.status, ProseOnly: test.prose, Evidence: test.evidence}
+			if !sameAuditState(row, want) {
+				t.Fatalf("HISS-01 row = %#v, want status %q prose_only %t evidence %q",
+					row, test.status, test.prose, test.evidence)
+			}
+		})
+	}
+}
+
+// sameAuditState reports whether got matches want in status, prose-only flag and evidence text.
+func sameAuditState(got, want Row) bool {
+	return got.Status == want.Status && got.ProseOnly == want.ProseOnly && got.Evidence == want.Evidence
+}
+
 // TestAudit_EmptyRulesAndMaximumPointer verifies empty rule lists and pointer length boundaries.
 func TestAudit_EmptyRulesAndMaximumPointer(t *testing.T) {
 	tests := []struct {

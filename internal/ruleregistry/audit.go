@@ -228,6 +228,11 @@ func auditRule(
 		return row
 	}
 	if entry.Class == ClassGuidance {
+		if len(entry.Evidence) > 0 {
+			// Validation already refuses this entry; the row must not claim prose-only either.
+			row.Evidence = "unresolved: guidance carries evidence"
+			return row
+		}
 		return proseRow(rule, entry.Class)
 	}
 	if !validClass(entry.Class) {

@@ -814,6 +814,8 @@ file because Make can replace and re-read its rules before running the requested
 The audit checks the first existing file in the order `GNUmakefile`, `makefile`, `Makefile` and
 leaves every pointer for it unresolved if Make could rebuild it from a sibling such as `Makefile.sh`,
 `s.Makefile` or an `RCS` directory, or if the audit cannot read the directory within its 4096-entry limit.
+The sibling check is a conservative substring match: any entry whose name contains the makefile's name,
+such as `NotesAboutMakefile.md`, counts as a possible source and leaves those pointers unresolved too.
 Every pointer is also unresolved for a dot target other than `.PHONY` (including `.SUFFIXES` and
 single- or double-suffix rules), a `%` in a target or prerequisite (including static pattern
 rules), a `vpath` directive or a `VPATH` assignment. A missing target in a fully recognized file
