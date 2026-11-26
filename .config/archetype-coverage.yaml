@@ -157,6 +157,9 @@ fields:
     go: [ComplexityOverride.MaxCyclomatic, ComplexityPolicy.MaxCyclomatic]
     state: consumed
     consumers:
+      - func: internal/adopt.buildPullRequestTemplate
+        kind: reports
+        effect: states the repository's cyclomatic complexity limit in the PR template for the author
       - func: internal/config.ComplexityPolicy.Limits
         kind: reports
         effect: >-
@@ -188,6 +191,9 @@ fields:
       The HISS-04 scan measures cognitive complexity against the limit and
       reports each excess without failing any gate (hiss.SeverityReport).
     consumers:
+      - func: internal/adopt.buildPullRequestTemplate
+        kind: reports
+        effect: states the repository's cognitive complexity limit in the PR template for the author
       - func: internal/config.ComplexityPolicy.Limits
         kind: reports
         effect: >-
@@ -207,6 +213,9 @@ fields:
     go: [ComplexityOverride.MaxFuncLOC, ComplexityPolicy.MaxFuncLOC]
     state: consumed
     consumers:
+      - func: internal/adopt.buildPullRequestTemplate
+        kind: reports
+        effect: states the repository's function length limit in the PR template for the author
       - func: internal/config.ComplexityPolicy.ScanOptions
         kind: acts
         effect: >-
@@ -266,6 +275,9 @@ fields:
     go: [ComplexityOverride.MaxStatements, ComplexityPolicy.MaxStatements]
     state: consumed
     consumers:
+      - func: internal/adopt.buildPullRequestTemplate
+        kind: reports
+        effect: states the repository's per-function statement limit in the PR template for the author
       - func: internal/editor.neovimLSPBlock
         kind: acts
         effect: >-
