@@ -4,6 +4,7 @@
 package forge
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -13,29 +14,8 @@ import (
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
-// renovateBodyOutline collects headings and task items outside code using the forge validator's
-// task-list grammar. Ticking a copy lets the same matcher recognize an unchecked item.
-func renovateBodyOutline(body string) (lines []string, receiptFence bool) {
-	var fence util.MarkdownFence
-	for line := range strings.SplitSeq(body, "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		trimmed := strings.TrimSpace(line)
-		wasOpen := fence.Open()
-		if fence.Inside(trimmed) {
-			if !wasOpen && isReceiptFence(trimmed) {
-				receiptFence = true
-			}
-			continue
-		}
-		_, heading := util.MarkdownHeadingText(trimmed)
-		if heading || checkedBoxRegex.MatchString(strings.Replace(trimmed, "[ ]", "[x]", 1)) {
-			lines = append(lines, line)
-		}
-	}
-	return lines, receiptFence
-}
-
-// renovateBodyParts lists Renovate's fields in their default rendering order.
+// renovateBodyParts pins the fields declared inline in renovate.json's prBodyTemplate.
+// The source check and the sample renderer share this ordered list.
 var renovateBodyParts = [...]string{"header", "table", "warnings", "notes", "changelogs", "configDescription", "controls", "footer"}
 
 // renovateDefaultBody is the exact block of unescaped fields expected in the summary.
@@ -63,45 +43,34 @@ func renderRenovateBody(template string, notes []string) string {
 	return body
 }
 
-// checkRenovateSummary verifies the complete source block and the visibility of the expanded note.
-func checkRenovateSummary(template, body string) error {
+// checkRenovateTemplate permits exactly the configured field block before sample expansion.
+func checkRenovateTemplate(template string) error {
 	beforeRule, _, hasRule := strings.Cut(template, "\n---\n")
 	_, summary, found := strings.Cut(beforeRule, "\n"+renovateSummary+"\n")
 	if !hasRule || !found || strings.TrimSpace(summary) != renovateDefaultBody {
 		return fmt.Errorf("Summary of Changes = %q, want %q", summary, renovateDefaultBody)
 	}
-	if strings.Contains(body, "{{{") {
-		return fmt.Errorf("rendered body contains a surplus template field")
-	}
-	beforeRule, _, _ = strings.Cut(body, "\n---\n")
-	if !hasVisibleRenovateNote(beforeRule) {
-		return fmt.Errorf("rendered summary is missing the visible takeover note")
+	if strings.Contains(strings.Replace(template, renovateDefaultBody, "", 1), "{{") {
+		return fmt.Errorf("unexpected Handlebars expression outside the configured summary fields")
 	}
 	return nil
 }
 
-// hasVisibleRenovateNote follows comments and fences from the start of the body through the summary.
-func hasVisibleRenovateNote(beforeRule string) bool {
-	comments := util.CommentSyntax{Block: [][2]string{{"<!--", "-->"}}}
-	var fence util.MarkdownFence
-	var openComment string
-	var inSummary bool
-	for line := range strings.SplitSeq(beforeRule, "\n") {
-		if !fence.Open() {
-			line, openComment = util.StripComments(line, comments, openComment)
-		}
-		trimmed := strings.TrimSpace(line)
-		if fence.Inside(trimmed) {
-			continue
-		}
-		if trimmed == renovateSummary {
+// checkRenovateNote looks for the visible note in the bounded, rendered summary.
+func checkRenovateNote(body string) error {
+	beforeRule, _, _ := strings.Cut(body, "\n---\n")
+	var reader checklistReader
+	inSummary := false
+	for i, line := range strings.SplitN(beforeRule, "\n", MaxPRLinesLimit+1) {
+		visible := strings.TrimSpace(reader.visibleLine(line, i+1))
+		if visible == renovateSummary {
 			inSummary = true
 		}
-		if inSummary && trimmed == renovateNote {
-			return true
+		if inSummary && visible == renovateNote {
+			return nil
 		}
 	}
-	return false
+	return fmt.Errorf("rendered summary is missing the visible takeover note")
 }
 
 // checkRenovateOutline checks the rendered bot PR against the validator and the shipped outline.
@@ -118,17 +87,14 @@ func checkRenovateOutline(body string, wantOutline []string) error {
 	if !slices.Equal(result.Errors, unfilled.Errors) {
 		return fmt.Errorf("rendered checklist findings = %q, want %q", result.Errors, unfilled.Errors)
 	}
-	got, fence := renovateBodyOutline(body)
-	if fence {
+	if result.receiptFence {
 		return fmt.Errorf("rendered body contains a receipt fence")
 	}
-	for _, line := range got {
-		if checkedBoxRegex.MatchString(strings.TrimSpace(line)) {
-			return fmt.Errorf("rendered body contains a checked box: %q", line)
-		}
+	if result.hasTickedBox {
+		return fmt.Errorf("rendered body contains a checked box")
 	}
-	if !slices.Equal(got, wantOutline) {
-		return fmt.Errorf("rendered outline = %q, want %q", got, wantOutline)
+	if !slices.Equal(result.outline, wantOutline) {
+		return fmt.Errorf("rendered outline = %q, want %q", result.outline, wantOutline)
 	}
 	return nil
 }
@@ -138,11 +104,14 @@ func checkRenovateBody(template string, notes, wantOutline []string) error {
 	if !slices.Equal(notes, []string{renovateNote}) {
 		return fmt.Errorf("prBodyNotes = %q, want only %q", notes, renovateNote)
 	}
+	if err := checkRenovateTemplate(template); err != nil {
+		return err
+	}
 	body := renderRenovateBody(template, notes)
 	if err := checkRenovateOutline(body, wantOutline); err != nil {
 		return err
 	}
-	if err := checkRenovateSummary(template, body); err != nil {
+	if err := checkRenovateNote(body); err != nil {
 		return err
 	}
 	const receipt = "The takeover pull request for `fix/renovate-<number>` carries the signed receipt."
@@ -153,24 +122,63 @@ func checkRenovateBody(template string, notes, wantOutline []string) error {
 	return nil
 }
 
+// renovateTemplateOutline reads the shipped outline and inserts Renovate's visible
+// task item where the configured fields render it.
+func renovateTemplateOutline(shipped string) ([]string, error) {
+	if err := util.CheckLineBudget(shipped, MaxPRLinesLimit); err != nil {
+		return nil, err
+	}
+	template, err := ValidatePRChecklist(shipped)
+	if err != nil {
+		return nil, err
+	}
+	summary := slices.Index(template.outline, renovateSummary)
+	if summary < 0 {
+		return nil, fmt.Errorf("shipped pull request template is missing the summary heading: %v", template.Errors)
+	}
+	control, err := ValidatePRChecklist(renovateControl)
+	if err != nil {
+		return nil, err
+	}
+	if len(control.outline) != 1 {
+		return nil, fmt.Errorf("Renovate control outline = %q, want one task item", control.outline)
+	}
+	return slices.Insert(template.outline, summary+1, control.outline...), nil
+}
+
+// TestRenovateTemplateLineBudget exercises the shipped-template input independently
+// of the rendered body's existing limit.
+func TestRenovateTemplateLineBudget(t *testing.T) {
+	shipped := strings.TrimRight(readTemplate(t), "\n")
+	padding := MaxPRLinesLimit - (strings.Count(shipped, "\n") + 1)
+	if padding < 0 {
+		t.Fatal("shipped template already exceeds the PR line limit")
+	}
+	atLimit := strings.Repeat("\n", padding) + shipped
+	if _, err := renovateTemplateOutline(atLimit); err != nil {
+		t.Fatalf("at line limit: %v", err)
+	}
+	if _, err := renovateTemplateOutline("\n" + atLimit); !errors.Is(err, util.ErrMarkedBlockBudget) {
+		t.Fatalf("one line over: got %v, want line budget error", err)
+	}
+}
+
 // TestRenovatePRBody checks the configured notes, summary fields, repository outline and receipt.
-// Its mutations distinguish a checkbox supplied by Renovate from the same text in the template.
 func TestRenovatePRBody(t *testing.T) {
 	var config struct {
 		Template string   `yaml:"prBodyTemplate"`
 		Notes    []string `yaml:"prBodyNotes"`
 	}
 	decodeConsumer(t, filepath.Join(engineCheckout, "renovate.json"), &config)
-	want, _ := renovateBodyOutline(readTemplate(t))
-	summary := slices.Index(want, renovateSummary)
-	if summary < 0 {
-		t.Fatal("shipped pull request template is missing the summary heading")
+	want, err := renovateTemplateOutline(readTemplate(t))
+	if err != nil {
+		t.Fatal(err)
 	}
-	want = slices.Insert(want, summary+1, renovateControl)
 	template, notes := config.Template, config.Notes
 	moved := strings.Replace(template, renovateDefaultBody, "", 1)
 	receiptHeading := want[len(want)-1]
 	moved = strings.Replace(moved, receiptHeading, renovateDefaultBody+"\n\n"+receiptHeading, 1)
+	checkRenovateReviewInputs(t, template, notes, want)
 	for _, tc := range []struct {
 		name, template string
 		notes          []string
@@ -204,6 +212,36 @@ func TestRenovatePRBody(t *testing.T) {
 				t.Error("accepted invalid Renovate pull request body")
 			} else if err != nil && tc.valid {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// checkRenovateReviewInputs pins the reason each altered template fails the normal body check.
+func checkRenovateReviewInputs(t *testing.T, template string, notes, want []string) {
+	t.Helper()
+	receiptHeading := want[len(want)-1]
+	firstBox := slices.IndexFunc(want, func(line string) bool { return strings.HasPrefix(line, "- [ ] **HISS-01 ") })
+	if firstBox < 0 {
+		t.Fatal("shipped pull request template is missing the HISS-01 task item")
+	}
+	hiddenBox := strings.Replace(template, want[firstBox], "<!--\n"+want[firstBox]+"\n-->", 1)
+	conditional := "{{#if false}}\n" + strings.Replace(template, receiptHeading, "{{/if}}\n"+receiptHeading, 1)
+	for _, tc := range []struct{ name, template, finding string }{
+		{"multiline comment hides HISS-01", hiddenBox, "rendered outline"},
+		{"conditional hides everything before section 4", conditional, "unexpected Handlebars expression"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkRenovateBody(tc.template, notes, want)
+			if err == nil || !strings.Contains(err.Error(), tc.finding) {
+				t.Fatalf("got %v, want %q", err, tc.finding)
+			}
+		})
+	}
+	for _, directive := range []string{"{{/if}}", "{{else}}", "{{^notes}}", "{{! comment}}", "{{header}}", "{{> partial}}", "{{~notes~}}"} {
+		t.Run(directive, func(t *testing.T) {
+			if err := checkRenovateBody(directive+"\n"+template, notes, want); err == nil {
+				t.Fatalf("accepted surplus Handlebars expression %q", directive)
 			}
 		})
 	}

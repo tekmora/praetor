@@ -110,7 +110,7 @@ func fencedReceipt(t *testing.T, open, closing string) string {
 // Positive: only a ticked task-list item counts, whichever list marker it uses, and a
 // ~~~ receipt fence is read exactly like a ``` one (BUG-878).
 func TestChecklistCountsListItemsAndTildeReceipt(t *testing.T) {
-	boxes := "## Checklist\n* [x] HISS-16 compile-context verified\n1. [X] HISS-15 3D tests pass\n"
+	boxes := "## Checklist\n* [x] HISS-16 compile-context verified the `<!--` marker\n1. [X] HISS-15 3D tests pass\n"
 	res, err := ValidatePRChecklist(boxes + fencedReceipt(t, "~~~receipt", "~~~"))
 	if err != nil {
 		t.Fatalf("validate: %v", err)
@@ -129,6 +129,7 @@ func TestChecklistIgnoresFencedAndMidSentenceBoxes(t *testing.T) {
 	cases := map[string]string{
 		"backtick fence": "```\n- [x] HISS-16 compile-context\n- [x] HISS-15 3D tests\n```\n",
 		"tilde fence":    "~~~markdown\n- [x] HISS-16 compile-context\n- [x] HISS-15 3D tests\n~~~\n",
+		"hidden checks":  "<!--\n- [x] HISS-16 compile-context\n- [x] HISS-15 3D tests\n-->\n",
 		"mid-sentence":   "Tick [x] for HISS-16 compile-context and [x] for HISS-15 3D tests.\n",
 		"no list marker": "[x] HISS-16 compile-context\n[x] HISS-15 3D tests\n",
 	}
@@ -186,16 +187,20 @@ func TestChecklistRejectsUnterminatedFence(t *testing.T) {
 // to its text, a missing separator or a quote marker is not. A longer closing run closes.
 func TestChecklistBoxEdgeSpellings(t *testing.T) {
 	for _, line := range []string{"- [x]", "-\t[x]\tHISS-16 compile-context", "+ [X] hiss-16", "123456789) [x] a"} {
-		if !checkedBoxRegex.MatchString(line) {
+		res := &PRChecklistResult{}
+		checkLineForRequirements(line, line, res)
+		if !res.hasTickedBox {
 			t.Errorf("%q is a ticked task-list item", line)
 		}
 	}
 	for _, line := range []string{"- [x]HISS-16", "-[x] HISS-16", "> [x] HISS-16", "1234567890. [x] a"} {
-		if checkedBoxRegex.MatchString(line) {
+		res := &PRChecklistResult{}
+		checkLineForRequirements(line, line, res)
+		if res.hasTickedBox {
 			t.Errorf("%q is not a ticked task-list item", line)
 		}
 	}
-	block, err := extractReceiptBlock(strings.Split("~~~ receipt\n{\"a\":1}\n~~~~~\n", "\n"))
+	block, err := scanChecklistLines(strings.Split("~~~ receipt\n{\"a\":1}\n~~~~~\n", "\n"), &PRChecklistResult{})
 	if err != nil || block != "{\"a\":1}" {
 		t.Fatalf("a longer closing run must close the receipt fence: %q, %v", block, err)
 	}
