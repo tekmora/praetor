@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cordanaLLM/praetor/internal/admission"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
@@ -30,6 +31,11 @@ const localBusyMessage = "admit: local builders 3 of 3 busy"
 // TestLocalBuilderFixtureCLI dispatches the child test binary's arguments as a real admit.
 func TestLocalBuilderFixtureCLI(t *testing.T) {
 	if args := flag.Args(); len(args) > 0 && args[0] == "fixture-local-builder" {
+		fixtureTmp := os.Getenv("ADMIT_FIXTURE_TEMP_ROOT")
+		if fixtureTmp == "" {
+			t.Fatal("missing fixture filesystem root")
+		}
+		rootCtx = admission.WithLocalLeaseTempRoot(t.Context(), fixtureTmp)
 		if err := runAdmit(args[1:]); err != nil {
 			t.Fatal(err)
 		}
@@ -39,6 +45,9 @@ func TestLocalBuilderFixtureCLI(t *testing.T) {
 // localBuilderFixture isolates the runtime directory, scope launcher and inherited settings.
 func localBuilderFixture(t *testing.T, limit string) {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("local admission requires Linux")
+	}
 	t.Setenv(localLimitSetting, limit)
 	if limit == "" {
 		if err := os.Unsetenv(localLimitSetting); err != nil {
@@ -184,7 +193,7 @@ test "$#" -eq 1 && test -f "$1" && echo nested-one`
 	if code != 0 || !strings.Contains(out, "nested-one") {
 		t.Fatalf("nested admit: exit %d, stdout %q, stderr %q", code, out, log)
 	}
-	if runtime.GOOS == "linux" && strings.Count(log, "planted scope limits") != 1 {
+	if strings.Count(log, "planted scope limits") != 1 {
 		t.Fatalf("expected exactly one stub scope: %s", log)
 	}
 }

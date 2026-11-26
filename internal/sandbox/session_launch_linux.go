@@ -441,27 +441,7 @@ func procChildren(root string, pid int) ([]int, error) {
 	return children, nil
 }
 
-// procStartTick extracts the start tick from a bounded proc stat record and rejects malformed or missing data.
+// procStartTick reads the Linux process identity used by sandbox reservations.
 func procStartTick(root string, pid int) (uint64, error) {
-	data, err := util.ReadFileLimited(filepath.Join(root, strconv.Itoa(pid), "stat"), 65536)
-	if err != nil {
-		return 0, fmt.Errorf("read session start tick: %w", err)
-	}
-	pos := strings.LastIndex(string(data), ") ")
-	if pos < 0 {
-		return 0, errors.New("invalid session stat")
-	}
-	rest, ok := string(data)[pos+2:], true
-	if !ok {
-		return 0, errors.New("invalid session stat")
-	}
-	fields := strings.Fields(rest)
-	if len(fields) < 20 {
-		return 0, errors.New("short session stat")
-	}
-	tick, err := strconv.ParseUint(fields[19], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid session start tick: %w", err)
-	}
-	return tick, nil
+	return util.ProcStartTick(root, pid)
 }

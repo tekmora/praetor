@@ -76,11 +76,11 @@ func TestParseAdmit_Negative_Refused(t *testing.T) {
 	}
 }
 
-// Negative (planted): a heavy step asked to start under a threshold the host cannot meet is
-// held and then refused, and the command never runs. Where the host has no memory source
-// (internal/sentinel memory_other.go, macOS among them) admission admits unjudged by design, so
-// there the step runs; the branch follows the same reading admission takes, not the system name.
+// A Linux step asked to start under an impossible memory threshold waits and then refuses.
 func TestRunAdmit_Negative_UnderThresholdRefused(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("local admission requires Linux")
+	}
 	needShell(t)
 	admitStubTools(t)
 	stats, readErr := admission.HostReader(".")()
@@ -100,6 +100,9 @@ func TestRunAdmit_Negative_UnderThresholdRefused(t *testing.T) {
 
 // Boundary: the step's own exit status comes back as praetorctl's, and a passing step returns nil.
 func TestRunAdmit_Boundary_ExitStatusPassesThrough(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("local admission requires Linux")
+	}
 	needShell(t)
 	admitStubTools(t)
 	err := runAdmit([]string{"--local", "--min-available-gib", "0", "--min-swap-free-gib", "0", "--max-load", "0", "--wait", "10s", "--",
@@ -406,6 +409,10 @@ func assertEvictionAndLocalFallback(t *testing.T, host string) {
 		t.Fatalf("eviction (%s) without fallback: %d %q %q", host, code, out, log)
 	}
 	out, log, code = runAdmitCaptured(t, "--fallback", "local", "--min-available-gib", "0", "--min-swap-free-gib", "0", "--max-load", "0", "--", "sh", "-c", "echo planted-local")
+	if runtime.GOOS != "linux" {
+		assertLocalPlatformRefusal(t, out, log, code)
+		return
+	}
 	if code != 0 || out != "planted-local\n" || !strings.Contains(log, "admission fallback: running on local after executor "+host+" lost the step mid-run") {
 		t.Fatalf("eviction (%s) with fallback: %d %q %q", host, code, out, log)
 	}
@@ -566,8 +573,20 @@ func TestRunAdmit_ExecutorModeIsExplicit(t *testing.T) {
 func assertNamedLocal(t *testing.T, args []string) {
 	t.Helper()
 	out, log, code := runAdmitCaptured(t, args...)
+	if runtime.GOOS != "linux" {
+		assertLocalPlatformRefusal(t, out, log, code)
+		return
+	}
 	if code != 0 || out != "planted-local\n" || !strings.Contains(log, "on local (named)") {
 		t.Fatalf("named local: %d %q %q", code, out, log)
+	}
+}
+
+// assertLocalPlatformRefusal requires the local refusal to name the unsupported host.
+func assertLocalPlatformRefusal(t *testing.T, out, log string, code int) {
+	t.Helper()
+	if code == 0 || out != "" || !strings.Contains(log, runtime.GOOS) {
+		t.Fatalf("local admission on %s: exit %d, stdout %q, stderr %q", runtime.GOOS, code, out, log)
 	}
 }
 
@@ -669,7 +688,14 @@ func admitStubTools(t *testing.T) {
 	writeAdmitExecutable(t, bin, "nproc", "#!/bin/sh\necho 30\n")
 	t.Setenv("ADMIT_STUB_SCOPES", t.TempDir())
 	t.Setenv("ADMIT_STUB_CGROUPS", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	fixtureTmp := t.TempDir()
+	t.Setenv("ADMIT_FIXTURE_TEMP_ROOT", fixtureTmp)
+	runtimeDir := filepath.Join(fixtureTmp, fmt.Sprintf("praetor-admit-%d", os.Getuid()))
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- the fixture runtime directory requires owner search access
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ctx, err := util.WithCommandEnvironment(t.Context(), admitFixtureEnvironment())
 	if err != nil {
@@ -677,7 +703,7 @@ func admitStubTools(t *testing.T) {
 	}
 	previous := rootCtx
 	t.Cleanup(func() { rootCtx = previous })
-	rootCtx = ctx
+	rootCtx = admission.WithLocalLeaseTempRoot(ctx, fixtureTmp)
 }
 
 // writeAdmitExecutable writes an executable script into the specified directory with 0700 permissions.

@@ -26,16 +26,22 @@ func OfflineGoEnvironment() []string {
 // variable hands the result to WithCommandEnvironment, so the child keeps the BUG-886 scrub
 // instead of an unscrubbed copy of os.Environ.
 func InheritedEnvironment(overrides []string) []string {
-	names := make(map[string]bool, len(overrides)+1)
-	names[foldEnvironmentName("PWD")] = true
+	return overlayEnvironment(os.Environ(), overrides, func(name string) bool {
+		return name == "PWD" || isGitRepositoryVariable(name)
+	})
+}
+
+// overlayEnvironment filters the base and replaces all prior occurrences of overridden names.
+func overlayEnvironment(base, overrides []string, drop func(string) bool) []string {
+	names := make(map[string]bool, len(overrides))
 	for _, entry := range overrides {
 		name, _, _ := strings.Cut(entry, "=")
 		names[foldEnvironmentName(name)] = true
 	}
-	inherited := FilterEnvironment(os.Environ(), func(name string) bool {
-		return isGitRepositoryVariable(name) || names[name]
+	kept := FilterEnvironment(base, func(name string) bool {
+		return names[name] || (drop != nil && drop(name))
 	})
-	return append(inherited, overrides...)
+	return append(kept, overrides...)
 }
 
 // foldEnvironmentName folds name the way FilterEnvironment hands names to its predicate: to upper
@@ -100,11 +106,15 @@ func FilterEnvironment(environ []string, drop func(name string) bool) []string {
 // fixtures run git, would read and write that repository instead of the one in its working
 // directory, down to setting core.bare=true in it (BUG-886).
 func commandEnvironment(ctx context.Context, cmd *exec.Cmd) []string {
-	if environment, ok := ctx.Value(commandEnvironmentKey{}).([]string); ok {
-		return append([]string{}, environment...)
+	entries, _ := ctx.Value(commandEntriesKey{}).([]string)
+	if env, explicit := ctx.Value(commandEnvironmentKey{}).([]string); explicit {
+		return overlayEnvironment(env, entries, nil)
 	}
-	return FilterEnvironment(cmd.Environ(), isGitRepositoryVariable)
+	return overlayEnvironment(cmd.Environ(), entries, isGitRepositoryVariable)
 }
+
+// commandEntriesKey holds overrides applied after the command directory and base environment are known.
+type commandEntriesKey struct{}
 
 // WithCommandEnvironmentEntry sets one variable on the effective child environment,
 // preserving an explicitly isolated environment installed by WithCommandEnvironment.
@@ -112,10 +122,11 @@ func WithCommandEnvironmentEntry(ctx context.Context, name, value string) (conte
 	if ctx == nil || name == "" || strings.ContainsAny(name, "=\x00") || strings.ContainsRune(value, 0) {
 		return nil, fmt.Errorf("invalid command environment entry %q", name)
 	}
-	entry := name + "=" + value
-	if env, ok := ctx.Value(commandEnvironmentKey{}).([]string); ok {
-		key := foldEnvironmentName(name)
-		return WithCommandEnvironment(ctx, append(FilterEnvironment(env, func(n string) bool { return n == key }), entry))
+	prior, _ := ctx.Value(commandEntriesKey{}).([]string)
+	key := foldEnvironmentName(name)
+	entries := FilterEnvironment(prior, func(n string) bool { return n == key })
+	if len(entries) >= maxEnvironmentEntries {
+		return nil, fmt.Errorf("command environment overrides exceed %d entries", maxEnvironmentEntries)
 	}
-	return WithCommandEnvironment(ctx, InheritedEnvironment([]string{entry}))
+	return context.WithValue(ctx, commandEntriesKey{}, append(entries, name+"="+value)), nil
 }

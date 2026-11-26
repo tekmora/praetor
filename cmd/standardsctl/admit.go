@@ -71,6 +71,9 @@ func runAdmit(args []string) error {
 
 // runLocalAdmit waits for local host admission and holds the slot until the step exits.
 func runLocalAdmit(opts admitOptions, nested bool) (resultErr error) {
+	if err := admission.CheckLocalPlatform(); err != nil {
+		return err
+	}
 	ctx, cancel := commandContext(opts.wait)
 	defer cancel()
 	label := opts.label + " on local (named)"
@@ -226,9 +229,9 @@ func parseAdmit(args []string) (admitOptions, error) {
 	if *fallback != "" && *fallback != "local" {
 		return admitOptions{}, fmt.Errorf("--fallback %q is invalid, use local", *fallback)
 	}
-	maxBuilders, err := strconv.Atoi(*limitText)
-	if err != nil || maxBuilders < 1 {
-		return admitOptions{}, fmt.Errorf("--max-local-builders (%s) requires a positive integer, got %q", admitBuilderLimitEnv, *limitText)
+	maxBuilders, err := parseLocalBuilderLimit(*limitText)
+	if err != nil {
+		return admitOptions{}, err
 	}
 	opts := admitOptions{label: *label, policy: policy, limits: admission.Limits{MemoryHigh: *high, MemoryMax: *limit, MemorySwapMax: *swapMax},
 		maxBuilders: maxBuilders, wait: *wait, poll: *poll, timeout: *timeout, argv: argv, local: *local, defaultLoad: true, fallbackMode: *fallback}
@@ -241,6 +244,18 @@ func parseAdmit(args []string) (admitOptions, error) {
 		opts.label = argv[0]
 	}
 	return opts, opts.validate()
+}
+
+// parseLocalBuilderLimit applies the same scan bound to the flag and its environment default.
+func parseLocalBuilderLimit(value string) (int, error) {
+	limit, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("--max-local-builders (%s) requires a positive integer: %w", admitBuilderLimitEnv, err)
+	}
+	if err := admission.CheckLocalBuilderLimit(limit); err != nil {
+		return 0, fmt.Errorf("--max-local-builders (%s) %q: %w", admitBuilderLimitEnv, value, err)
+	}
+	return limit, nil
 }
 
 // localBuilderDefault supplies the fleet cap unless the operator configured a default.

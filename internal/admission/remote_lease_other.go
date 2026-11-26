@@ -13,10 +13,13 @@ import (
 
 // AdmitExecutorLease refuses on non-Unix platforms because executor leases require Unix advisory file locks.
 func AdmitExecutorLease(_ context.Context, name string, _ int) (int, func() error, error) {
+	if name == localExecutor {
+		return 0, nil, CheckLocalPlatform()
+	}
 	return 0, nil, fmt.Errorf("executor %s: executor leases require Unix advisory file locks", name)
 }
 
-// InheritedLocalLease reports no inherited lease on platforms without advisory locks.
-func InheritedLocalLease(context.Context, string) (bool, error) {
-	return false, nil
+// inheritedLocalLease refuses platforms without local admission.
+func inheritedLocalLease(context.Context, int) (bool, error) {
+	return false, CheckLocalPlatform()
 }
