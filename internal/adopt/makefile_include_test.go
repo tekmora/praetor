@@ -501,7 +501,8 @@ func TestTrackedNumericIncludeCase(t *testing.T) {
 // makeRemakeDir creates the directory and reports whether its uppercase spelling is visible.
 func makeRemakeDir(t *testing.T, repoPath, name string) bool {
 	t.Helper()
-	if err := os.Mkdir(filepath.Join(repoPath, name), 0o750); err != nil {
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a fixture directory needs the owner search bit; 0o700 is least privilege
+	if err := os.Mkdir(filepath.Join(repoPath, name), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	_, err := os.Lstat(filepath.Join(repoPath, strings.ToUpper(name)))
