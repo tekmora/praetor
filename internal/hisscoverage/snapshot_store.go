@@ -80,8 +80,10 @@ func (s *fixtureStore) load(ctx context.Context, file capturedFixture) ([]byte, 
 	return file.readSpill(ctx, s.spill)
 }
 
-// readSpill checks cancellation around the synchronous read of one captured range.
+// readSpill bounds one synchronous range read and rejects bytes returned after its deadline.
 func (file capturedFixture) readSpill(ctx context.Context, spill io.ReaderAt) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

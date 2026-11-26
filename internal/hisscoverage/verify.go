@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,7 +197,8 @@ func (r *Report) Passed() bool {
 }
 
 // Verify replays the fixture corpus and reports every claim the corpus contradicts or leaves
-// incompletely replayed.
+// incompletely replayed. Outside the verified platforms, every catalog bucket receives
+// an incomplete finding before any fixture directory is opened.
 //
 // The check runs in both directions. A state claiming detection must report each of its
 // positive fixtures, and a state claiming none must leave its gap fixtures undetected. The
@@ -222,12 +224,30 @@ func (r *Report) Passed() bool {
 // non-interruptible operations. The context is checked before and after each read.
 // If cancellation occurs during a read, the call must finish before Verify can return
 // and run its deferred cleanup.
-func Verify(ctx context.Context, rootDir string, catalog *Catalog) (_ *Report, err error) {
+func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, error) {
+	return verifyForPlatform(ctx, rootDir, catalog, runtime.GOOS)
+}
+
+// fixtureReplayPlatform checks the GOOS against the native CI replay platforms.
+func fixtureReplayPlatform(goos string) error {
+	switch goos {
+	case "linux", "darwin", "windows":
+		return nil
+	default:
+		return fmt.Errorf("%s: fixture replay is verified on linux, darwin and windows only (HISS-21)", goos)
+	}
+}
+
+// verifyForPlatform refuses unverified readers before opening the corpus, even for absent buckets.
+func verifyForPlatform(ctx context.Context, rootDir string, catalog *Catalog, goos string) (_ *Report, err error) {
 	if ctx == nil {
 		return nil, errors.New("hisscoverage: verify requires a context")
 	}
 	if err := catalog.Validate(); err != nil {
 		return nil, err
+	}
+	if err := fixtureReplayPlatform(goos); err != nil {
+		return catalog.verifyClaims(ctx, nil, err)
 	}
 	var store fixtureStore
 	defer func() { err = errors.Join(err, store.close()) }()
@@ -238,14 +258,19 @@ func Verify(ctx context.Context, rootDir string, catalog *Catalog) (_ *Report, e
 	if after, ok := ctx.Value(snapshotReadyKey{}).(func()); ok {
 		after()
 	}
+	return catalog.verifyClaims(ctx, corpus, nil)
+}
+
+// verifyClaims reports each validated claim against its snapshot or its platform refusal.
+func (catalog *Catalog) verifyClaims(ctx context.Context, corpus corpusSnapshot, platformErr error) (*Report, error) {
 	report := &Report{}
 	for i := 0; i < len(catalog.Rules); i++ {
 		rule := &catalog.Rules[i]
 		for j := 0; j < len(rule.Coverage); j++ {
 			cov := rule.Coverage[j]
 			cov.Language = cov.fixtureLanguage()
-			claim := corpus[fixtureStage{ruleID: rule.ID, language: cov.Language}]
-			if err := verifyClaim(ctx, claim, rule.ID, &cov, report); err != nil {
+			stage := fixtureStage{ruleID: rule.ID, language: cov.Language}
+			if err := stage.verifyClaim(ctx, corpus[stage], &cov, report, platformErr); err != nil {
 				return nil, err
 			}
 		}
@@ -256,9 +281,19 @@ func Verify(ctx context.Context, rootDir string, catalog *Catalog) (_ *Report, e
 	return report, nil
 }
 
-// verifyClaim replays one rule/language claim against its fixture buckets.
-func verifyClaim(ctx context.Context, claim claimSnapshot, ruleID string, cov *Coverage, report *Report) error {
+// verifyClaim records each unavailable bucket or replays the claim against its captured fixtures.
+func (stage fixtureStage) verifyClaim(ctx context.Context, claim claimSnapshot, cov *Coverage, report *Report, platformErr error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	report.Claims++
+	if platformErr != nil {
+		for _, bucket := range fixtureBuckets {
+			stage.recordFixtureError(report, bucket, "", platformErr)
+		}
+		return nil
+	}
+	ruleID := stage.ruleID
 	if err := verifyMeasured(ctx, claim, ruleID, cov, report); err != nil {
 		return err
 	}

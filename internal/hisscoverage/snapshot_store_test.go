@@ -13,6 +13,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 )
 
 // TestSnapshotSpillBoundary preserves exactly one MiB in memory and reads the excess
@@ -141,16 +143,16 @@ func checkVerifySpillOutcome(t *testing.T, outcome string, report *Report, err e
 	}
 }
 
-// cancelAfterReadAt delivers the bytes and cancels the caller before returning control.
-type cancelAfterReadAt struct {
+// afterReadAt delivers the bytes and performs a test action before returning control.
+type afterReadAt struct {
 	*bytes.Reader
-	cancel context.CancelFunc
+	after func()
 }
 
-// ReadAt models cancellation during a successful non-interruptible spill read.
-func (r cancelAfterReadAt) ReadAt(data []byte, offset int64) (int, error) {
+// ReadAt models a synchronous spill read that succeeds after cancellation or delay.
+func (r afterReadAt) ReadAt(data []byte, offset int64) (int, error) {
 	n, err := r.Reader.ReadAt(data, offset)
-	r.cancel()
+	r.after()
 	return n, err
 }
 
@@ -159,11 +161,33 @@ func (r cancelAfterReadAt) ReadAt(data []byte, offset int64) (int, error) {
 func TestSpillReadChecksCancellationOnReturn(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	reader := cancelAfterReadAt{bytes.NewReader([]byte("x")), cancel}
+	reader := afterReadAt{bytes.NewReader([]byte("x")), cancel}
 	data, err := (capturedFixture{size: 1}).readSpill(ctx, reader)
 	if data != nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("spill read completed after cancellation: data=%q, err=%v", data, err)
 	}
+}
+
+// TestSpillReadChecksFixtureDeadline exercises a successful ReadAt on either side of the
+// fixture deadline with a live parent. Late bytes must never reach the scanner.
+func TestSpillReadChecksFixtureDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		parent := t.Context()
+		file := capturedFixture{size: 1}
+		read := func(delay time.Duration) ([]byte, error) {
+			reader := afterReadAt{bytes.NewReader([]byte("x")), func() { time.Sleep(delay) }}
+			return file.readSpill(parent, reader)
+		}
+		if data, err := read(contextopt.MaxDuration - time.Second); err != nil || string(data) != "x" {
+			t.Fatalf("timely spill read: data=%q err=%v", data, err)
+		}
+		if data, err := read(contextopt.MaxDuration + time.Second); data != nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("late spill read: data=%q err=%v", data, err)
+		}
+		if err := parent.Err(); err != nil {
+			t.Fatalf("parent expired during spill read: %v", err)
+		}
+	})
 }
 
 // delayedSpill completes the synchronous write after the fixture's deadline.

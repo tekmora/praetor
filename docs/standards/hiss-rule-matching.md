@@ -743,8 +743,8 @@ and whose I/O deadlines are module arguments this scanner does not read
 
 ## HISS-20: claims are replayed
 
-Every enforcement claim in `.config/hiss/coverage.yaml` is replayed against the fixture corpus by
-`praetorctl hiss coverage --verify`, which runs inside `make verify-all`. The check runs in both
+On Linux, macOS and Windows, `praetorctl hiss coverage --verify` replays the fixture corpus for
+every claim in `.config/hiss/coverage.yaml` as part of `make verify-all`. The check runs in both
 directions: a claim of enforcement must report each of its positive fixtures, and a claim of absence
 must leave its gap fixtures undetected. A rule that silently *gains* coverage fails the gate exactly
 as one that silently loses it, so the catalog cannot drift in either direction. A `measured/`
@@ -769,11 +769,18 @@ dependency tooling as one of the repository's own manifests; inside an archive i
 archive with no file, more than 16 files, a repeated name or a path that leaves the fixture root
 fails the replay (`TestParseArchive_*` in `internal/hisscoverage/archive_test.go`).
 
-Each Verify run pins the fixture corpus directory and lists each catalog bucket once. It
-captures regular fixture bytes before replay. The verdict covers those bytes and the entries
+On every other GOOS, Verify skips the corpus and records an incomplete replay for each
+catalog bucket, including absent buckets and claims attributed to another runner. Each finding
+names the host GOOS and gives the reason `fixture replay is verified on linux, darwin and windows only (HISS-21)`.
+These findings fail verification. The Platform Neutrality workflow exercises the native readers
+in its Linux and macOS harness jobs and its Windows shard jobs. On macOS a directory on an
+`MNT_UNION` mount still receives an incomplete finding before enumeration.
+
+On a verified platform, Verify pins the fixture corpus directory, lists each present catalog
+bucket once and captures regular fixture bytes before replay. The verdict covers those bytes and the entries
 in those listings. The verifier counts names before looking up individual entries. A failed lookup
 produces an incomplete-replay finding naming the entry. After lookup, capture compares
-each regular file with the identity in the listing. On Unix, capture compares the device and inode.
+each regular file with the identity in the listing. On Linux and macOS, capture compares the device and inode.
 On Windows, listing and capture each open the file relative to the pinned parent and call
 `GetFileInformationByHandleEx(FileIdInfo)` on that handle. Capture requires the same
 64-bit volume serial number and all 128 file ID bits from `FILE_ID_INFO`. Failure to read
@@ -792,8 +799,10 @@ accumulated report strings are outside the captured-byte budget.
 Cancellation is cooperative. A local directory read and a spill-file read are
 non-interruptible operations. Verify checks cancellation before and after each read.
 If the context expires during a read, the filesystem call must return before Verify can
-finish and run its deferred cleanup, which closes and removes the spill file. A spill write
-that returns after the fixture deadline also fails, before its range is accepted.
+finish and run its deferred cleanup, which closes and removes the spill file. Each spill read has its own
+per-fixture deadline. A read or write that succeeds after its fixture deadline fails verification
+even while the parent context remains live (`TestSpillReadChecksFixtureDeadline`,
+`TestSpillWriteChecksFixtureDeadline`).
 `TestBucketListingChecksCancellationBetweenReads` covers cancellation between directory
 reads. `TestBucketListingChecksCancellationAtEOF` and `TestSpillReadChecksCancellationOnReturn`
 cover cancellation on the final read. `TestVerifyRemovesSpill` covers cancellation

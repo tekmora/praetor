@@ -13,6 +13,9 @@ import (
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
+// fixtureBuckets lists every bucket captured or reported incomplete for a catalog claim.
+var fixtureBuckets = [...]string{bucketMeasured, bucketPositive, bucketNegative, bucketGap}
+
 // corpusSnapshot owns the captured buckets for each catalog claim in one Verify run.
 type corpusSnapshot map[fixtureStage]claimSnapshot
 
@@ -84,9 +87,8 @@ func (stage fixtureStage) captureClaim(ctx context.Context, rule *contextopt.Sna
 		return nil, escapedError{fmt.Errorf("open fixture language %s: %w", stage.language, err)}
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
-	names := [...]string{bucketMeasured, bucketPositive, bucketNegative, bucketGap}
-	claim := make(claimSnapshot, len(names))
-	for _, name := range names {
+	claim := make(claimSnapshot, len(fixtureBuckets))
+	for _, name := range fixtureBuckets {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

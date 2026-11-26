@@ -1,4 +1,4 @@
-//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
+//go:build (linux && !android) || (darwin && !ios)
 
 // SPDX-License-Identifier: EUPL-1.2
 // SPDX-FileCopyrightText: 2026 Lusoris <lusoris@proton.me>
@@ -7,6 +7,7 @@ package contextopt
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -150,4 +151,24 @@ func (dir *SnapshotDirectory) observeDirent(ctx context.Context, name string, ty
 		kind = os.ModeIrregular
 	}
 	return listedName{name: name, kind: kind}
+}
+
+// direntRecordSize reads d_reclen from the native header preceding d_name.
+func direntRecordSize(record []byte) int {
+	// SAFETY: This compile-time offset precedes d_name in the checked native header.
+	return int(binary.NativeEndian.Uint16(record[unsafe.Offsetof(unix.Dirent{}.Reclen):]))
+}
+
+// observeUntypedName takes the first relative lstat when a record supplies no kind.
+// A failed observation keeps the name in its directory slot.
+func (dir *SnapshotDirectory) observeUntypedName(ctx context.Context, name string) listedName {
+	if err := ctx.Err(); err != nil {
+		return listedName{name: name, err: err}
+	}
+	info, err := dir.statListedName(name)
+	listed := listedName{name: name, err: err}
+	if err == nil {
+		listed.kind = info.Mode().Type()
+	}
+	return listed
 }

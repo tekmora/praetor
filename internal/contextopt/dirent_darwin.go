@@ -1,9 +1,12 @@
+//go:build darwin && !ios
+
 // SPDX-License-Identifier: EUPL-1.2
 // SPDX-FileCopyrightText: 2026 Lusoris <lusoris@proton.me>
 
 package contextopt
 
 import (
+	"encoding/binary"
 	"math"
 	"os"
 	"syscall"
@@ -44,4 +47,14 @@ func readDarwinDirents(fd uintptr, buf []byte, statfs func(int, *unix.Statfs_t) 
 		return 0, unix.EIO
 	}
 	return int(size), nil
+}
+
+// direntNameFits checks d_namlen against the payload of a live Darwin record.
+func direntNameFits(record []byte) bool {
+	if binary.NativeEndian.Uint64(record) == 0 {
+		return true
+	}
+	// SAFETY: This compile-time offset precedes d_name in the checked native header.
+	const off = unsafe.Offsetof(unix.Dirent{}.Namlen)
+	return int(binary.NativeEndian.Uint16(record[off:])) <= len(record)-direntNameOffset
 }

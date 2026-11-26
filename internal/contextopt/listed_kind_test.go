@@ -1,4 +1,4 @@
-//go:build unix || windows
+//go:build (linux && !android) || (darwin && !ios) || windows
 
 // SPDX-License-Identifier: EUPL-1.2
 // SPDX-FileCopyrightText: 2026 Lusoris <lusoris@proton.me>

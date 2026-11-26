@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -79,6 +80,50 @@ func TestVerifyAcceptsABackedClaim(t *testing.T) {
 	}
 	if report.Claims != 1 || report.Fixtures != 1 {
 		t.Errorf("expected one claim over one fixture, got %d/%d", report.Claims, report.Fixtures)
+	}
+}
+
+// TestFixtureReplayPlatforms admits each native CI platform.
+func TestFixtureReplayPlatforms(t *testing.T) {
+	for _, goos := range [...]string{"linux", "darwin", "windows"} {
+		if err := fixtureReplayPlatform(goos); err != nil {
+			t.Errorf("%s: %v", goos, err)
+		}
+	}
+}
+
+// TestVerifyUnverifiedPlatform refuses even a backed claim before fixture capture. Both the
+// present bucket and every absent bucket of the local and delegated claims need findings.
+func TestVerifyUnverifiedPlatform(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	catalog := catalogFor("HISS-01", "./go", StateEnforced)
+	delegated := delegatedCatalogFor("HISS-02", "go", "external")
+	catalog.Rules = append(catalog.Rules, delegated.Rules[0])
+	ctx := afterFixtureCapture(t.Context(), func() { t.Fatal("captured a corpus on an unverified platform") })
+	for _, goos := range [...]string{"android", "ios", "freebsd", "netbsd", "openbsd", "dragonfly", "aix", "solaris", "illumos", "future-os"} {
+		report, err := verifyForPlatform(ctx, root, catalog, goos)
+		if err != nil {
+			t.Fatalf("verify on %s: %v", goos, err)
+		}
+		requirePlatformRefusals(t, report, goos)
+	}
+}
+
+// requirePlatformRefusals checks the sorted report, including bucket identities and counts.
+func requirePlatformRefusals(t *testing.T, report *Report, goos string) {
+	t.Helper()
+	if report == nil || report.Passed() || report.Claims != 2 || report.Fixtures != 0 {
+		t.Fatalf("%s: expected two incomplete claims and zero replayed fixtures, got %+v", goos, report)
+	}
+	detail := "incomplete replay: " + goos + ": fixture replay is verified on linux, darwin and windows only (HISS-21)"
+	var want []Finding
+	for _, rule := range [...]string{"HISS-01", "HISS-02"} {
+		for _, bucket := range [...]string{"gap", "measured", "negative", "positive"} {
+			want = append(want, Finding{Rule: rule, Language: "go", Bucket: bucket, Detail: detail})
+		}
+	}
+	if !slices.Equal(report.Findings, want) {
+		t.Errorf("%s: got findings %v, want %v", goos, report.Findings, want)
 	}
 }
 

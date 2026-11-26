@@ -6,7 +6,6 @@
 package contextopt
 
 import (
-	"context"
 	"math"
 	"os"
 	"syscall"
@@ -14,20 +13,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-// observeUntypedName takes the first relative lstat when a record supplies no kind.
-// A failed observation keeps the name in its directory slot.
-func (dir *SnapshotDirectory) observeUntypedName(ctx context.Context, name string) listedName {
-	if err := ctx.Err(); err != nil {
-		return listedName{name: name, err: err}
-	}
-	info, err := dir.statListedName(name)
-	listed := listedName{name: name, err: err}
-	if err == nil {
-		listed.kind = info.Mode().Type()
-	}
-	return listed
-}
 
 // statListedName inspects one kernel-listed component relative to the retained descriptor.
 // AT_SYMLINK_NOFOLLOW classifies links and devices without opening them.
