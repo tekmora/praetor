@@ -1,8 +1,10 @@
 package contextopt
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +22,34 @@ func TestReplaceSnapshotIn_Positive_CreatesAndReplacesBoundSnapshot(t *testing.T
 	}
 	if got := readFileOrEmpty(t, filepath.Join(root, rel)); got != "{\"a\": 1}\n" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestReplaceSnapshotIn_RefusesMatchingCreateByDefault binds an absence observation even
+// when the existing file already holds the requested bytes at the requested mode.
+func TestReplaceSnapshotIn_RefusesMatchingCreateByDefault(t *testing.T) {
+	root := t.TempDir()
+	const name = "settings.json"
+	path := filepath.Join(root, name)
+	content := []byte("{}\n")
+	options := ReplaceOptions{Mode: 0o600}
+	if err := ReplaceSnapshotIn(t.Context(), root, name, content, options); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ReplaceSnapshotIn(t.Context(), root, name, content, options)
+	if !errors.Is(err, errSnapshotExists) || !strings.Contains(err.Error(), name) {
+		t.Errorf("default create over an identical file: got %v, want %v naming %s", err, errSnapshotExists, name)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || readFileOrEmpty(t, path) != string(content) {
+		t.Error("refused create replaced or changed the existing file")
 	}
 }
 

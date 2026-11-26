@@ -13,7 +13,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/contextopt"
@@ -386,6 +388,88 @@ func TestPRTemplateConcurrentInstallRecord(t *testing.T) {
 	}
 }
 
+// templateReadContext schedules a competitor on the first cancellation check made directly
+// on the caller's context. The bounded record read has its own child context. The first
+// direct check is ObserveSnapshot at the start of refreshPriorScaffold, before it reads the
+// template. This scheduling point also exists in the original, unlocked implementation.
+type templateReadContext struct {
+	context.Context
+	beforeRead func()
+}
+
+// Err lets the other adoption run at the template read, then forwards the caller's error.
+func (c templateReadContext) Err() error {
+	c.beforeRead()
+	return c.Context.Err()
+}
+
+// TestPRTemplateInterleavedAdoptions starts the engine writer after the limit-8 writer
+// observes its record. Both writers must succeed and leave a matching template and record.
+func TestPRTemplateInterleavedAdoptions(t *testing.T) {
+	root := t.TempDir()
+	custom := ceilingPRTemplateSession(root)
+	custom.policy.Policy.Complexity.MaxCyclomatic = 8
+	if err := reconcilePullRequestTemplate(t.Context(), custom); err != nil {
+		t.Fatal(err)
+	}
+	engine := ceilingPRTemplateSession(root)
+	synctest.Test(t, func(t *testing.T) {
+		done := make(chan error, 1)
+		ctx := templateReadContext{Context: t.Context(), beforeRead: sync.OnceFunc(func() {
+			go func() { done <- reconcilePullRequestTemplate(t.Context(), engine) }()
+			// B either finishes (unlocked) or queues behind A before A resumes.
+			synctest.Wait()
+		})}
+		if err := reconcilePullRequestTemplate(ctx, custom); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatal("engine adoption did not finish after the limit-8 adoption released the lock")
+		}
+	})
+	installed := repoText(t, root, prTemplateFile)
+	record := filepath.Join(root, workingDirPath, "adopt-installed", prTemplateFile+".sha256")
+	if got, want := mustRead(t, record), fixtureDigest(t, prTemplateFile, []byte(installed))+"\n"; got != want {
+		t.Errorf("record after interleaved adoptions = %q, installed digest = %q", got, want)
+	}
+	if installed != buildPullRequestTemplate(engine.policy.Policy.Complexity) {
+		t.Error("queued engine adoption did not install its rendering last")
+	}
+	custom.policy.Policy.Complexity.MaxCyclomatic = 7
+	if err := reconcilePullRequestTemplate(t.Context(), custom); err != nil {
+		t.Fatal(err)
+	}
+	if repoText(t, root, prTemplateFile) != buildPullRequestTemplate(custom.policy.Policy.Complexity) {
+		t.Error("readoption preserved a generated template instead of refreshing it to limit 7")
+	}
+}
+
+// TestPRTemplateAdoptionLockRefusal requires a bounded lock refusal before record validation.
+func TestPRTemplateAdoptionLockRefusal(t *testing.T) {
+	s := ceilingPRTemplateSession(t.TempDir())
+	record := filepath.Join(s.repoPath, workingDirPath, "adopt-installed", prTemplateFile+".sha256")
+	mustWrite(t, record, "invalid digest\n")
+	holdTemplateDirectoryLock(t, s.repoPath)
+	ctx, err := contextopt.WithDirectoryLockBudget(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = reconcilePullRequestTemplate(ctx, s)
+	if err == nil || !strings.Contains(err.Error(), "PR template adoption lock") || !strings.Contains(err.Error(), "0s wait budget") {
+		t.Fatalf("held adoption lock with zero wait: got %v", err)
+	}
+	assertAbsent(t, s.repoPath, prTemplateFile)
+	if mustRead(t, record) != "invalid digest\n" {
+		t.Fatal("lock refusal changed the record")
+	}
+}
+
 // TestPRTemplateFailedRefreshKeepsInstallRecord holds the template directory lock while a policy change requires a refresh.
 func TestPRTemplateFailedRefreshKeepsInstallRecord(t *testing.T) {
 	s := ceilingPRTemplateSession(t.TempDir())
@@ -399,7 +483,7 @@ func TestPRTemplateFailedRefreshKeepsInstallRecord(t *testing.T) {
 	if got := mustRead(t, record); got != want {
 		t.Fatalf("initial install record = %q, want %q", got, want)
 	}
-	holdTemplateDirectoryLock(t, s.repoPath)
+	holdTemplateDirectoryLock(t, filepath.Join(s.repoPath, filepath.Dir(prTemplateFile)))
 	ctx, err := contextopt.WithDirectoryLockBudget(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -414,10 +498,10 @@ func TestPRTemplateFailedRefreshKeepsInstallRecord(t *testing.T) {
 	}
 }
 
-// holdTemplateDirectoryLock blocks template publication while leaving the install record writable.
-func holdTemplateDirectoryLock(t *testing.T, repo string) {
+// holdTemplateDirectoryLock holds the named publication directory until the test ends.
+func holdTemplateDirectoryLock(t *testing.T, path string) {
 	t.Helper()
-	dir, err := contextopt.OpenDirectory(t.Context(), filepath.Join(repo, filepath.Dir(prTemplateFile)))
+	dir, err := contextopt.OpenDirectory(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
