@@ -86,6 +86,21 @@ func TestDirectoryAbsent_Boundary_ExistingDirectoryAndWrappedError(t *testing.T)
 	}
 }
 
+// TestDirectoryAbsent_Negative_BlockedStat checks that the boolean wrapper
+// returns at the walk deadline while the first stat is still sleeping.
+func TestDirectoryAbsent_Negative_BlockedStat(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		absent := directoryAbsentWithStat("missing", fs.ErrNotExist, func(string) (os.FileInfo, error) {
+			time.Sleep(MaxIODuration + time.Second)
+			return nil, fs.ErrPermission
+		})
+		if elapsed := time.Since(start); absent || elapsed != MaxIODuration {
+			t.Fatalf("blocked stat: absent=%v after %v, want false after %v", absent, elapsed, MaxIODuration)
+		}
+	})
+}
+
 // TestSoleCause checks wrapped and singleton joins as well as the depth limit.
 // A distinct close cause anywhere in the chain must prevent abbreviation.
 func TestSoleCause(t *testing.T) {
