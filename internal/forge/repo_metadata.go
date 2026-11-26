@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -160,8 +161,10 @@ func VisibilityDrift(declared, live string) string {
 	return fmt.Sprintf("manifest declares %s, GitHub reports %s", want, live)
 }
 
-// RepositorySettings holds the visibility and identity from one repository GET, shared by
-// the visibility and Actions checks during an audit.
+// ErrRepositoryIdentityRead marks a failed repository GET or an invalid identity in its response.
+var ErrRepositoryIdentityRead = errors.New("read repository identity")
+
+// RepositorySettings holds the visibility and validated identity from one repository GET.
 type RepositorySettings struct {
 	Visibility string
 	owner      string
@@ -169,8 +172,11 @@ type RepositorySettings struct {
 	driver     *GitHubDriver
 }
 
+// FullName returns the validated owner/name used to select repository-specific status checks.
+func (s RepositorySettings) FullName() string { return s.fullName }
+
 // ReadRepositorySettings reads the repository object at the configured coordinates, following
-// redirects through the driver's HTTP client. The response identifies its current owner and name.
+// redirects through the driver's HTTP client. It returns settings only when full_name and owner.login agree.
 func (g *GitHubDriver) ReadRepositorySettings(ctx context.Context) (RepositorySettings, error) {
 	if err := g.Authenticate(ctx); err != nil {
 		return RepositorySettings{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
@@ -180,6 +186,16 @@ func (g *GitHubDriver) ReadRepositorySettings(ctx context.Context) (RepositorySe
 	live, err := g.getRepositoryMetadata(ctx)
 	if err != nil {
 		return RepositorySettings{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
+	}
+	owner, _, err := util.SplitGitHubRepository(live.FullName)
+	if err != nil {
+		return RepositorySettings{}, fmt.Errorf("%w: full_name: %w", ErrRepositoryIdentityRead, err)
+	}
+	if err := util.ValidateGitHubOwner(live.Owner.Login); err != nil {
+		return RepositorySettings{}, fmt.Errorf("%w: owner.login: %w", ErrRepositoryIdentityRead, err)
+	}
+	if !strings.EqualFold(owner, live.Owner.Login) {
+		return RepositorySettings{}, fmt.Errorf("%w: owner.login %q disagrees with full_name %q", ErrRepositoryIdentityRead, live.Owner.Login, live.FullName)
 	}
 	return RepositorySettings{Visibility: live.Visibility, owner: live.Owner.Login, fullName: live.FullName, driver: g}, nil
 }

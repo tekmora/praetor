@@ -300,7 +300,7 @@ func (s *forgeStub) handler() http.HandlerFunc {
 			s.labels = map[string]map[string]any{}
 		}
 		if s.repo == nil {
-			s.repo = map[string]any{"visibility": "public", "topics": []any{}}
+			s.repo = fixtureRepositorySettings("public")
 		}
 		var body map[string]any
 		if r.Method != http.MethodGet {
@@ -468,6 +468,11 @@ func (s *forgeStub) serveLabel(w http.ResponseWriter, method, rest string, body 
 		s.labels[label] = body
 		stubRespond(w, http.StatusCreated, body)
 	}
+}
+
+// fixtureRepositorySettings is the repository document returned for the fixture's acme/widgets.
+func fixtureRepositorySettings(visibility string) map[string]any {
+	return map[string]any{"full_name": "acme/widgets", "owner": map[string]string{"login": "acme"}, "visibility": visibility, "topics": []any{}}
 }
 
 // serveRepository answers the repository object (GET), a repository update (PATCH) and a

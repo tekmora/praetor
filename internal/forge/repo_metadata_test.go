@@ -348,7 +348,9 @@ func TestVisibilityDrift(t *testing.T) {
 // Positive, negative and boundary: RepositoryVisibility reads the live visibility, refuses an empty token,
 // and reports a failing forge read.
 func TestGitHubDriver_RepositoryVisibility(t *testing.T) {
-	gh, _, _ := newMetadataForge(t, map[string]any{"visibility": "private"}, nil)
+	gh, _, _ := newMetadataForge(t, map[string]any{
+		"full_name": "acme/widgets", "owner": map[string]string{"login": "acme"}, "visibility": "private",
+	}, nil)
 	got, err := gh.RepositoryVisibility(context.Background())
 	if err != nil {
 		t.Fatalf("read visibility: %v", err)

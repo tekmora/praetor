@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -38,10 +39,6 @@ func printRulesUsage() {
 	fmt.Println("  audit  Resolve declared enforcement evidence for HISS and Operational Rules")
 }
 
-func runRulesAudit(args []string) error {
-	return runRulesAuditWithReader(args, nil)
-}
-
 type rulesAuditFlags struct {
 	root       string
 	jsonOutput bool
@@ -49,14 +46,15 @@ type rulesAuditFlags struct {
 	remoteOpts remoteSyncOptions
 }
 
-func runRulesAuditWithReader(args []string, injected protectionReader) error {
+// runRulesAudit checks the configured rule evidence and prints its report.
+func runRulesAudit(args []string) error {
 	flags, err := parseRulesAuditFlags(args)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := commandContext(rulesAuditTimeout)
 	defer cancel()
-	opts := ruleregistry.AuditOptions{Forge: rulesForgeProvider(flags, injected)}
+	opts := ruleregistry.AuditOptions{Forge: rulesForgeProvider(flags)}
 	report, auditErr := ruleregistry.AuditWithOptions(ctx, flags.root, opts)
 	if report != nil {
 		if printErr := printRulesReport(report, flags.jsonOutput); printErr != nil {
@@ -81,16 +79,17 @@ func parseRulesAuditFlags(args []string) (rulesAuditFlags, error) {
 	return rulesAuditFlags{root: *root, jsonOutput: *jsonOutput, remote: *remote, remoteOpts: remoteOpts()}, nil
 }
 
-func rulesForgeProvider(flags rulesAuditFlags, injected protectionReader) ruleregistry.ForgeProvider {
+// rulesForgeProvider defers forge resolution until the registry needs forge evidence.
+func rulesForgeProvider(flags rulesAuditFlags) ruleregistry.ForgeProvider {
 	return func(ctx context.Context) (map[ruleregistry.ForgeSetting]ruleregistry.ForgeState, error) {
-		return resolveRulesForge(ctx, flags, injected)
+		return resolveRulesForge(ctx, flags)
 	}
 }
 
+// resolveRulesForge compares committed assertions with remote evidence when requested.
 func resolveRulesForge(
 	ctx context.Context,
 	flags rulesAuditFlags,
-	injected protectionReader,
 ) (map[ruleregistry.ForgeSetting]ruleregistry.ForgeState, error) {
 	configPath := filepath.Join(flags.root, config.ManifestFileName)
 	manifest, err := config.LoadManifest(configPath)
@@ -101,17 +100,14 @@ func resolveRulesForge(
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge assertions: %w", err)
 	}
-	target, err := liveProtectionTarget(ctx, flags.root, manifest, policy.BranchProtection)
+	repository, reader, readErr := rulesComparisonRepository(ctx, flags, manifest.Repository)
+	target, err := liveProtectionTarget(ctx, flags.root, manifest, policy.BranchProtection, repository)
 	if err != nil {
-		return nil, fmt.Errorf("resolve forge assertion target: %w", err)
+		return nil, errors.Join(readErr, fmt.Errorf("resolve forge assertion target: %w", err))
 	}
 	states, err := assertedForgeStates(target)
-	if err != nil || !flags.remote {
-		return states, err
-	}
-	reader, err := rulesProtectionReader(ctx, flags, manifest, injected)
-	if err != nil {
-		return states, err
+	if err != nil || reader == nil {
+		return states, errors.Join(readErr, err)
 	}
 	_, findings, err := compareLiveProtection(ctx, reader, target)
 	if err != nil {
@@ -120,28 +116,22 @@ func resolveRulesForge(
 	return observedForgeStates(states, findings), nil
 }
 
-func rulesProtectionReader(
-	ctx context.Context,
-	flags rulesAuditFlags,
-	manifest *config.Manifest,
-	injected protectionReader,
-) (protectionReader, error) {
-	var token string
-	if injected == nil {
-		token = resolveSyncToken(flags.remoteOpts.token)
-		if token == "" {
-			return nil, ErrRemoteTokenMissing
-		}
+// rulesComparisonRepository selects the current identity for live evidence. Offline or after a
+// failed read, the manifest supplies local assertions and the report carries any read error.
+func rulesComparisonRepository(ctx context.Context, flags rulesAuditFlags, repo config.RepositoryMetadata) (string, protectionReader, error) {
+	declared := repo.Owner + "/" + repo.Name
+	if !flags.remote {
+		return declared, nil, nil
 	}
-	if err := verifyRemoteRepository(ctx, flags.root, manifest.Repository, flags.remoteOpts.host); err != nil {
-		return nil, err
+	live, err := openRemoteForge(ctx, flags.root, repo, flags.remoteOpts)
+	if err != nil {
+		return declared, nil, err
 	}
-	if injected != nil {
-		return injected, nil
+	settings, err := live.repository()
+	if err != nil {
+		return declared, nil, err
 	}
-	driver := forge.NewGitHubDriver(token, flags.remoteOpts.endpoint)
-	driver.SetRepository(manifest.Repository.Owner, manifest.Repository.Name)
-	return driver, nil
+	return settings.FullName(), live.protection, nil
 }
 
 func assertedForgeStates(target protectionTarget) (map[ruleregistry.ForgeSetting]ruleregistry.ForgeState, error) {

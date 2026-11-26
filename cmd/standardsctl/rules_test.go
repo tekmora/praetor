@@ -1,12 +1,10 @@
 package main
 
 import (
-	"context"
-	"errors"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/cordanaLLM/praetor/internal/forge"
 )
 
 func TestRulesAuditCLI_ReportsProseOnlyWithoutFailing(t *testing.T) {
@@ -45,74 +43,63 @@ func TestRulesAuditCLI_FailsOnUnresolvedPointer(t *testing.T) {
 	}
 }
 
+// TestRulesAuditCLI_ForgeReadbackPositiveAndOffline checks observed and local-only evidence.
 func TestRulesAuditCLI_ForgeReadbackPositiveAndOffline(t *testing.T) {
-	f := rulesAuditForgeFixture(t)
-	reader := &rulesProtectionStub{live: rulesLiveProtection("CI")}
+	stub := &forgeStub{legacy: classicProtection("CI")}
+	f := rulesAuditForgeFixture(t, stub)
 	offline, err := captureStdout(t, func() error {
-		return runRulesAuditWithReader([]string{"--root", f.dir}, reader)
+		return runRulesAudit([]string{"--root", f.dir})
 	})
-	if err != nil || reader.calls != 0 {
-		t.Fatalf("offline rules audit = (%v, calls=%d)\n%s", err, reader.calls, offline)
+	if err != nil || stub.requestCount() != 0 {
+		t.Fatalf("offline rules audit = (%v, calls=%d)\n%s", err, stub.requestCount(), offline)
 	}
 	mustContain(t, offline, "HISS-01 ci-gate asserted, not read back",
 		"asserted, not read back:", "HISS-01 forge:required_checks asserted 1", "unenforced: 21")
 
 	remote, err := captureStdout(t, func() error {
-		return runRulesAuditWithReader([]string{"--root", f.dir, "--remote", "--json"}, reader)
+		return runRulesAudit([]string{"--root", f.dir, "--remote", "--token=fixture", "--endpoint=" + actionsForgeEndpoint, "--json"})
 	})
-	if err != nil || reader.calls != 1 {
-		t.Fatalf("remote rules audit = (%v, calls=%d)\n%s", err, reader.calls, remote)
+	if err != nil {
+		t.Fatalf("remote rules audit: %v\n%s", err, remote)
+	}
+	want := []string{"/repos/acme/widgets", forgeStubRepo + "rules/branches/main", forgeStubRepo + "rulesets", forgeStubRepo + "branches/main/protection"}
+	if got := stub.readPaths(); !slices.Equal(got, want) {
+		t.Fatalf("rules audit reads = %v, want %v", got, want)
 	}
 	mustContain(t, remote, `"asserted": "1"`, `"observed": "1 of 1 required"`,
 		`"match": true`, `"read_back": true`, `"enforced": true`)
 }
 
+// TestRulesAuditCLI_ForgeReadbackNegativeAndError distinguishes drift from a failed read.
 func TestRulesAuditCLI_ForgeReadbackNegativeAndError(t *testing.T) {
-	f := rulesAuditForgeFixture(t)
-	drift := &rulesProtectionStub{live: rulesLiveProtection()}
+	f := rulesAuditForgeFixture(t, &forgeStub{legacy: classicProtection()})
 	out, err := captureStdout(t, func() error {
-		return runRulesAuditWithReader([]string{"--root", f.dir, "--remote"}, drift)
+		return runRulesAudit([]string{"--root", f.dir, "--remote", "--token=fixture", "--endpoint=" + actionsForgeEndpoint})
 	})
-	if err == nil || drift.calls != 1 {
-		t.Fatalf("drift rules audit = (%v, calls=%d)\n%s", err, drift.calls, out)
+	if err == nil {
+		t.Fatalf("drift rules audit passed:\n%s", out)
 	}
 	mustContain(t, out, "HISS-01 forge:required_checks asserted 1, observed 0 of 1 required; missing: CI, match=false",
 		"invalid: HISS-01: forge setting required_checks mismatch: asserted 1, observed 0 of 1 required; missing: CI")
 
-	unread := &rulesProtectionStub{err: errors.New("read refused")}
+	f = rulesAuditForgeFixture(t, &forgeStub{rulesStatus: http.StatusForbidden})
 	out, err = captureStdout(t, func() error {
-		return runRulesAuditWithReader([]string{"--root", f.dir, "--remote"}, unread)
+		return runRulesAudit([]string{"--root", f.dir, "--remote", "--token=fixture", "--endpoint=" + actionsForgeEndpoint})
 	})
-	if err == nil || unread.calls != 1 {
-		t.Fatalf("unread rules audit = (%v, calls=%d)\n%s", err, unread.calls, out)
+	if err == nil {
+		t.Fatalf("unread rules audit passed:\n%s", out)
 	}
-	mustContain(t, out, "invalid: forge readback failed: read the live branch protection of main: read refused")
+	mustContain(t, out, "invalid: forge readback failed: read the live branch protection of main: read the active rules of main: unexpected status 403")
 }
 
-func rulesAuditForgeFixture(t *testing.T) *auditFixture {
+// rulesAuditForgeFixture declares required-check and workflow evidence for the supplied forge.
+func rulesAuditForgeFixture(t *testing.T, stub *forgeStub) *auditFixture {
 	t.Helper()
-	f := protectedFixture(t, false, "", &forgeStub{})
+	f := protectedFixture(t, false, "", stub)
 	agents := "## Operational Rules\n\n1. The agent is told not to bypass checks.\n\n## Text Register\n"
 	writeFixtureFile(t, f.dir, "AGENTS.md", agents)
 	writeFixtureFile(t, f.dir, ".config/rules/enforcement.yaml", "version: 1\nrules:\n"+
 		"  - id: HISS-01\n    class: ci-gate\n    evidence: [forge:required_checks]\n"+
 		"  - id: AGENTS-OP-1\n    class: ci-gate\n    evidence: [workflow:ci.yml#ci]\n")
 	return f
-}
-
-type rulesProtectionStub struct {
-	live  *forge.LiveBranchProtection
-	err   error
-	calls int
-}
-
-func (s *rulesProtectionStub) ReadBranchProtection(_ context.Context, _ string) (*forge.LiveBranchProtection, error) {
-	s.calls++
-	return s.live, s.err
-}
-
-func rulesLiveProtection(checks ...string) *forge.LiveBranchProtection {
-	return &forge.LiveBranchProtection{Branch: "main", Legacy: &forge.LegacyBranchProtection{
-		RequiredStatusChecks: &forge.LegacyStatusChecks{Contexts: checks},
-	}}
 }

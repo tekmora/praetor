@@ -11,7 +11,6 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/adopt"
 	"github.com/cordanaLLM/praetor/internal/config"
-	"github.com/cordanaLLM/praetor/internal/forge"
 )
 
 // planTimeout bounds one plan run: resolving the effective policy from the pinned catalog
@@ -129,13 +128,40 @@ func runPlan(args []string) error {
 	// Without --remote the status says the live branch protection was not compared, never that
 	// no change is required (#159).
 	fmt.Println(adopt.FormatPlanStatus(missing, drift, flags.remote))
-	if err := printPlanActionsPermissions(ctx, manifest, filepath.Dir(flags.configPath), flags.offline); err != nil {
+	return planForgeComparisons(ctx, filepath.Dir(flags.configPath), manifest, policy.BranchProtection, flags)
+}
+
+// planForgeComparisons shares the selected endpoint, token and repository read across the preview.
+func planForgeComparisons(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, flags planFlags) error {
+	var live actionsForge
+	if flags.remote {
+		var err error
+		live, err = openRemoteForge(ctx, rootDir, manifest.Repository, flags.remoteOpts)
+		if err != nil {
+			return err
+		}
+	} else if manifest.Overrides.Actions != nil {
+		live = openActionsForge(ctx, rootDir, manifest.Repository, flags.offline)
+	}
+	if err := printPlanActionsPermissions(ctx, manifest.Overrides.Actions, live); err != nil {
 		return err
 	}
 	if !flags.remote {
 		return nil
 	}
-	return planRemoteProtection(ctx, filepath.Dir(flags.configPath), manifest, policy.BranchProtection, flags.remoteOpts)
+	return planRemoteProtection(ctx, rootDir, manifest, policy, live)
+}
+
+// openRemoteForge uses the explicit remote connection after verifying the checkout's origin.
+func openRemoteForge(ctx context.Context, rootDir string, repo config.RepositoryMetadata, remote remoteSyncOptions) (actionsForge, error) {
+	token := resolveSyncToken(remote.token)
+	if token == "" {
+		return actionsForge{}, ErrRemoteTokenMissing
+	}
+	if err := verifyRemoteRepository(ctx, rootDir, repo, remote.host); err != nil {
+		return actionsForge{}, err
+	}
+	return newActionsForge(ctx, repo, token, remote.endpoint), nil
 }
 
 // planRemoteProtection reads what GitHub enforces on the default branch, from its rulesets and
@@ -144,21 +170,12 @@ func runPlan(args []string) error {
 // must name the manifest's repository, as for sync --remote, and nothing is written. Drift is
 // reported with the command that reconciles it; like the local drift above it, it leaves the
 // exit status of this preview at zero.
-func planRemoteProtection(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, remote remoteSyncOptions) error {
-	token := resolveSyncToken(remote.token)
-	if token == "" {
-		return ErrRemoteTokenMissing
-	}
-	if err := verifyRemoteRepository(ctx, rootDir, manifest.Repository, remote.host); err != nil {
-		return err
-	}
-	target, err := liveProtectionTarget(ctx, rootDir, manifest, policy)
+func planRemoteProtection(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, live actionsForge) error {
+	target, err := live.protectionTarget(ctx, rootDir, manifest, policy)
 	if err != nil {
 		return err
 	}
-	gh := forge.NewGitHubDriver(token, remote.endpoint)
-	gh.SetRepository(manifest.Repository.Owner, manifest.Repository.Name)
-	drifted, err := reportLiveProtection(ctx, gh, target, "compared with the declared policy", false)
+	drifted, err := reportLiveProtection(ctx, live.protection, target, "compared with the declared policy", false)
 	if err != nil {
 		return err
 	}

@@ -34,16 +34,21 @@ type protectionReader interface {
 	ReadBranchProtection(ctx context.Context, branch string) (*forge.LiveBranchProtection, error)
 }
 
-// liveProtectionTarget is what the live branch protection of a repository is compared with: its
-// default branch (forge.RepositoryDefaultBranch), the declared policy, and the status checks sync
-// --remote requires there (remoteStatusContexts). plan --remote and sync --remote compare with it,
-// so the preview and audit judge the forge on the declaration the write applies.
-func liveProtectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy) (protectionTarget, error) {
+// protectionTarget selects required checks for the repository identified by the shared GET.
+func (live actionsForge) protectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy) (protectionTarget, error) {
+	settings, err := live.repository()
+	if err != nil {
+		return protectionTarget{}, err
+	}
+	return liveProtectionTarget(ctx, rootDir, manifest, policy, settings.FullName())
+}
+
+// liveProtectionTarget selects the default branch and the checks its workflows require in repository.
+func liveProtectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, repository string) (protectionTarget, error) {
 	branch, err := forge.RepositoryDefaultBranch(ctx, rootDir, manifest)
 	if err != nil {
 		return protectionTarget{}, err
 	}
-	repository := manifest.Repository.Owner + "/" + manifest.Repository.Name
 	contexts, _, err := remoteStatusContexts(ctx, rootDir, repository, policy.MergeQueue, nil, forge.WithDeclaredStatusContexts(policy.StatusContexts))
 	if err != nil {
 		return protectionTarget{}, err

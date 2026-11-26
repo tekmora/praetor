@@ -46,16 +46,19 @@ The audit asks only when every condition holds (`openActionsForge` in
   report never describes another repository's settings.
 - A token is found: `GITHUB_TOKEN`, then `GH_TOKEN`, then the `gh` CLI session.
 
-Otherwise each check prints `[SKIP]` with the reason, and the audit goes on. A check the forge
-refused (401, 403 or 404, a missing scope, a rate limit) or could not answer is reported the same
-way. A check that was not made is never printed as a pass
-(`TestAuditLiveActions_Boundary_ChecksNotMadeAreNamed`,
-`TestAuditLiveBranchProtection_Boundary_NotComparedIsNamed`). This repository's CI runs the
-audit without a token (`.github/workflows/ci.yml`, `.github/workflows/compliance.yml`), so there
-every check prints `[SKIP]`.
+When a precondition is missing, the live checks that would have run print `[SKIP]` with the reason.
+An online audit reads `GET /repos/{owner}/{repo}` once when the Actions, visibility or branch
+protection comparison needs it. The HTTP client follows redirects. The response must contain a
+valid `full_name` and an `owner.login` that matches its owner, ignoring case. The comparisons
+share the result, including any error. A timeout, HTTP 503 or inconsistent identity fails each
+comparison that needs the repository. After a successful identity read, an unreadable permissions
+or branch protection endpoint can still produce a skip
+(`TestActionsRepositoryReadFailure`, `TestAuditRepositoryVisibility_InvalidIdentity`).
 
-`praetorctl plan` previews the permission comparison under the same conditions and never fails on
-it, as it never fails on file drift. `plan --offline` skips it.
+`praetorctl plan` previews declared Actions permissions under the same conditions. Permission
+drift is reported with a successful exit. A failed identity GET makes the plan exit with an error.
+`plan --remote` uses its remote connection for both permissions and branch protection, sharing the
+identity GET even when both comparisons run. `plan --offline` skips the live reads.
 
 ### In Git hooks and CI
 
@@ -66,26 +69,27 @@ push ([Local Git hooks](git-hooks.md#offline-before-a-commit-online-before-a-pus
   setting. The fallback pre-commit hook, written when lefthook cannot install, is offline too.
 - A push asks the forge under the conditions above, since it needs the network anyway. A drifted
   permission verdict or drifted branch protection refuses the push until the setting the verdict
-  names is fixed.
+  names is fixed. A failed repository identity GET also refuses the push when the audit needs
+  that identity.
 - `make verify-all` and CI run the online audit. Whether they reach the forge depends on the token
   they provide.
 
-One online audit makes up to 130 requests for the Actions checks: two for the workflow
-permissions, then one or two for each workflow, at most 64. The branch protection comparison adds
-three, and one more page for each further 100 active rules or rulesets. Each request is bounded at
-15 seconds and all of them at three minutes. Without `GITHUB_TOKEN` or `GH_TOKEN` it also runs
-`gh auth token` once. A forge that does not answer costs about 45 seconds, one timed-out request
-for each check, and every check prints `[SKIP]`; an unreachable forge never refuses a push. A `lefthook.yml` an earlier release
-wrote, whose pre-commit audit still read the forge, is migrated to the offline one on a plain
-`praetorctl adopt`, without `--force`.
+Alongside the shared repository GET, the permissions comparison makes up to two requests. The run
+check makes one or two per workflow for up to 64 workflows. Branch protection reads the active
+rules, ruleset listing and legacy protection, with additional reads for pagination and merge queue
+rulesets. Each request has a 15-second timeout, and the live audit comparisons share a three-minute
+deadline. An adopted repository with an older online pre-commit hook can run `praetorctl adopt`
+to migrate it to the offline hook.
 
 ## Workflow permissions
 
-With `overrides.actions` declared, the audit reads
-`GET /repos/{owner}/{repo}/actions/permissions/workflow` and the organisation's
-`GET /orgs/{owner}/actions/permissions/workflow` (`GitHubDriver.WorkflowPermissions` in
-`internal/forge/actions_state.go`). Reading the repository value needs a token that can read its
-administration settings; the organisation value is read when the token allows it.
+With `overrides.actions` declared, the audit uses the validated repository and owner to read
+`GET /repos/{full_name}/actions/permissions/workflow` and
+`GET /orgs/{owner.login}/actions/permissions/workflow` (`RepositorySettings.WorkflowPermissions`
+in `internal/forge/actions_state.go`). The repository value requires read access to its
+administration settings. The organisation read is best effort. HTTP 401, 403 or 404 leaves the
+organisation value unknown, and the repository comparison proceeds. Other organisation read
+errors leave the permission comparison unmade.
 
 The comparison (`EvaluateLiveActionsPermissions` in `internal/forge/actions_permissions.go`) has
 one passing verdict and four failing ones. Each failing verdict fails the audit:
@@ -105,8 +109,8 @@ value is a manifest error (`internal/config/actions_policy.go`,
 
 ## Repository visibility
 
-With `repository.visibility` declared in `.standards.yaml`, the audit reads the repository object from
-GitHub (`GitHubDriver.RepositoryVisibility` in `internal/forge/repo_metadata.go`) and compares it with
+With `repository.visibility` declared in `.standards.yaml`, the audit compares the visibility from the shared
+repository GET (`GitHubDriver.ReadRepositorySettings` in `internal/forge/repo_metadata.go`) with
 the declared value (`forge.VisibilityDrift`). Drift fails the audit:
 
 | Outcome | Line |
@@ -114,7 +118,8 @@ the declared value (`forge.VisibilityDrift`). Drift fails the audit:
 | Live visibility matches declared | `[PASS] Repository visibility compared with the forge: GitHub reports <visibility>.` |
 | Live visibility differs from declared | `[FAIL] Repository visibility compared with the forge: manifest declares <declared>, GitHub reports <live>; changing visibility is the operator's decision` |
 | No `repository.visibility` declared | `[INFO] Repository visibility not compared with the forge: repository.visibility declares none.` |
-| Refused or unreadable | `[SKIP] Repository visibility not compared with the forge: <reason>` |
+| A precondition for contacting the forge is missing | `[SKIP] Repository visibility not compared with the forge: <reason>` |
+| Repository GET fails or returns invalid identity | `[FAIL] Repository visibility: read repository identity: <reason>` |
 
 A manifest without `repository.visibility` is not failed, and reports as not compared (`TestAuditRepositoryVisibility_Boundary_UndeclaredIsInfo`).
 A case-insensitive match (such as `Public` matching `public`) passes (`TestAuditRepositoryVisibility_Boundary_CaseInsensitivePasses`).
@@ -208,8 +213,10 @@ are the ones `praetorctl plan --remote` prints (`compareLiveProtection` in
   `internal/forge/branch_protection_eval.go`): pull requests, the approving review count,
   code-owner review, stale review dismissal, signed commits, linear history, deletion and force
   pushes blocked, and the required status checks: the jobs that report on every pull request in
-  that repository, read from the workflows of `origin/<default branch>` as the checkout last
-  fetched it (`forge.RequiredStatusContextsAt`, `auditProtectionTarget`).
+  that repository. Audit and remote plan evaluate the checkout's workflow guards against the
+  validated `full_name`, so a transferred repository includes jobs that run only under its
+  current name. Audit also checks what the default branch reports
+  (`forge.RequiredStatusContextsAt`, `auditProtectionTarget`).
 - When the repository has the ruleset praetor writes, `praetor-main-protection`, its enforcement
   must be `active`. GitHub applies no rule of a ruleset in `evaluate` or `disabled` mode and
   leaves its rules out of the branch's rule list, so the audit reads the mode from the ruleset
@@ -241,16 +248,17 @@ Every live check runs whatever an earlier one found: drifted workflow permission
 branch protection fail one audit together, each with its own `[FAIL]`
 (`TestAuditLiveForge_Negative_EveryDriftIsReported`). A comparison that cannot be evaluated,
 such as a negative approving review count or more required checks than a ruleset holds, is a
-local defect and fails the audit too; only a read the forge did not answer is reported as not made
+local defect and fails the audit too. An unreadable identity fails the comparison. An unanswered
+branch protection read after identity validation is reported as not made
 (`TestAuditLiveBranchProtection_Negative_UnevaluableComparisonFails`).
 
-Nothing is compared, and the audit says why, in four cases:
+The branch protection report explains each skip or decision to continue.
 
 | Case | Line |
 | :--- | :--- |
 | `adoption.decline` lists `branch-ruleset` | `[INFO] ... not compared with the forge: branch-ruleset declined by adoption.decline.` The committed ruleset gate keeps its own decline line. |
 | The policy requires neither linear history nor signed commits | `[INFO]`; the policy declares no ruleset (`adopt.RulesetRequired`, `TestAuditLiveBranchProtection_Boundary_PolicyWithoutRulesetIsNotCompared`). |
-| `--offline`, no token, no matching `origin`, or a read the forge refused | `[SKIP]` with the reason. Reading the legacy protection object needs read access to the repository's Administration permission, which a workflow's `GITHUB_TOKEN` cannot be granted. |
+| `--offline`, no token, no matching `origin`, or an unreadable branch protection endpoint after identity validation | `[SKIP]` with the reason. Reading the legacy protection object needs read access to the repository's Administration permission, which a workflow's `GITHUB_TOKEN` cannot be granted. |
 | The default branch does not exist on GitHub yet | `[SKIP] Live branch protection of main not compared with the forge: main does not exist on GitHub yet, so nothing is enforced on it.` The first push of the branch is not refused; the audit compares it once it is pushed (`TestAuditLiveBranchProtection_Boundary_UnpushedDefaultBranchIsNotCompared`). |
 | The default branch carries no `.standards.yaml` yet, as on the first push of an adoption | `[SKIP] Live branch protection of main not compared with the forge: main carries no .standards.yaml yet, so the adoption that adds it has not reached it. The comparison starts with the first push after the manifest reaches main.` The presence is read from the commit `origin/<default branch>` points at in the checkout, the ref used to prove a pending context rename, so no second forge read is made (`TestAuditLiveBranchProtection_Boundary_DefaultBranchWithoutManifestIsNotCompared`). A default branch that carries the manifest and no protection still fails. |
 | The manifest presence cannot be read, such as `origin/<default branch>` absent from the checkout | `[INFO]` naming the error, and the comparison runs: an unreadable presence never skips it (`TestAuditLiveBranchProtection_Negative_ManifestPresenceErrorDoesNotSkip`). |
@@ -296,7 +304,7 @@ the base ref, or when a partial clone lacks its workflow blobs, no rename window
 The declared checks remain the checkout's, and an absent workflow is named
 (`TestAuditLiveBranchProtection_Boundary_AbsentDefaultBranchWorkflowIsNamed`).
 
-`praetorctl plan` reads local files only unless `--remote` is passed. Its status then ends with
+`praetorctl plan` compares live branch protection only with `--remote`. Without that flag its branch protection status ends with
 `[INFO] Live branch protection not compared with the forge: this plan read local files only.`
 instead of saying that no change is required, and the MCP `standards_plan` tool prints the same
 line, from the same function (`adopt.FormatPlanStatus` in `internal/adopt/plan_drift.go`,

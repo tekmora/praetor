@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -72,10 +71,6 @@ type workflowRunsPage struct {
 	Runs       []WorkflowRunRecord `json:"workflow_runs"`
 }
 
-// ErrRepositoryIdentityRead marks a failed or inconsistent read of the repository's current
-// identity. The audit cannot choose an organisation for the comparison after this error.
-var ErrRepositoryIdentityRead = errors.New("read repository identity")
-
 // WorkflowPermissions reads the effective permissions of the repository and its current
 // owner, including after a repository transfer or rename.
 func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
@@ -89,15 +84,8 @@ func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPer
 // WorkflowPermissions reads the two permission documents named by this repository snapshot.
 // The organisation read is best effort for user-owned repositories and restricted tokens.
 func (s RepositorySettings) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
-	owner, _, err := util.SplitGitHubRepository(s.fullName)
-	if err != nil {
-		return LiveWorkflowPermissions{}, fmt.Errorf("%w: full_name: %w", ErrRepositoryIdentityRead, err)
-	}
-	if err := util.ValidateGitHubOwner(s.owner); err != nil {
-		return LiveWorkflowPermissions{}, fmt.Errorf("%w: owner.login: %w", ErrRepositoryIdentityRead, err)
-	}
-	if !strings.EqualFold(owner, s.owner) {
-		return LiveWorkflowPermissions{}, fmt.Errorf("%w: owner.login %q disagrees with full_name %q", ErrRepositoryIdentityRead, s.owner, s.fullName)
+	if s.driver == nil {
+		return LiveWorkflowPermissions{}, fmt.Errorf("%w: repository settings required", ErrRepositoryIdentityRead)
 	}
 	if ctx == nil {
 		return LiveWorkflowPermissions{}, errors.New("read workflow permissions: context required")
