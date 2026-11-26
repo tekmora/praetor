@@ -72,9 +72,11 @@ does not classify runs everything
 ([Platform Neutrality pull request scope](../guides/workflow-triggers.md#platform-neutrality-pull-request-scope)). Every leg sets Go up
 from the `go.mod` toolchain directive (setup-go `go-version-file`), so the three platforms build
 with the same Go release as the other workflows
-([Go toolchain](../guides/contributing.md#go-toolchain)). Each leg also vets and
-tests the nested module `tools/schemacheck`, which `./...` of the root module does not reach
-(`go -C tools/schemacheck test ./...`; its network checks skip with a stated reason).
+([Go toolchain](../guides/contributing.md#go-toolchain)). The root module's `./...` pattern stops
+at module boundaries. The nested module `tools/schemacheck` has its own
+"Test The Client Schema Oracle Module" step in the Linux/macOS job and on Windows
+shard 2. Both copies select `shell: bash` and run `go -C tools/schemacheck vet ./...` followed
+by `go -C tools/schemacheck test -timeout 30m ./...`. Its network checks skip with a stated reason.
 
 ### Review hold before heavy work
 
@@ -127,6 +129,13 @@ The `windows` job aggregates them under the required status name and fails when 
 cancelled or is skipped (`TestPortabilityWindowsShards_*` in `internal/forge`). Every loop that reads
 the package list stops at the workflow-level `PORTABILITY_MAX_PACKAGES` (512; the repository has about
 125 packages) and fails the step instead of truncating the list.
+
+The Linux/macOS and Windows "Test Every Package" steps each pass package names to four
+`go test` calls. The main run uses `"${packages[@]##-*}"`, the adopt run uses `"${adopt##-*}"`,
+and the two CLI halves use `"${cli##-*}"` with `-run` and `-skip`. For each package, Bash
+passes a normal import path intact. A value starting with a dash becomes one empty argument,
+so Go cannot read it as a test flag. The timeout audit checks these argument roles in
+`TestAuditTestTimeouts_ArgumentRoles` in `internal/forge/test_timeout_audit_test.go`.
 
 On a draft pull request no leg runs: the workflow follows the hosted gate shape
 ([workflows Praetor writes and runs](../guides/workflow-triggers.md#workflows-praetor-writes-and-runs)).
