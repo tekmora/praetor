@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -126,36 +125,22 @@ func physicalLines(text string) int {
 // goTestArgs returns the arguments following a supported Go test command head.
 func goTestArgs(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
 	program := words[0]
-	if !literalGoDirectory.MatchString(program.Value) {
+	if program.Text != "go" && program.Text != "go.exe" || program.Span[1]-program.Span[0] != len(program.Text) {
 		return nil
 	}
-	name := path.Base(program.Value)
-	if name != "go" && name != "go.exe" {
-		return nil
-	}
-	i := 1
-	if i+1 < len(words) && words[i].Value == "-C" && literalGoDirectory.MatchString(words[i+1].Value) {
-		i += 2
-	}
-	if i < len(words) && words[i].Value == "test" {
-		return words[i+1:]
+	tail := skipGoDirectory(words[1:])
+	if len(tail) > 0 && tail[0].Value == "test" {
+		return tail[1:]
 	}
 	return nil
 }
 
-// timeoutValue reads a -timeout or --timeout value and its last argument index.
-func timeoutValue(args []hiss.ShellCodeWord, i int) (value string, next int, ok bool) {
-	flag, value, hasEquals := strings.Cut(args[i].Value, "=")
-	if flag != "-timeout" && flag != "--timeout" {
-		return "", i, false
+// skipGoDirectory consumes the optional global -C and its literal directory as a pair.
+func skipGoDirectory(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
+	if len(words) >= 2 && timeoutTestFlags[words[0].Value] == directoryFlag && literalGoDirectory.MatchString(words[1].Value) {
+		return words[2:]
 	}
-	if hasEquals {
-		return value, i, true
-	}
-	if i+1 < len(args) {
-		return args[i+1].Value, i + 1, true
-	}
-	return "", i, true
+	return words
 }
 
 // readTestTimeoutFiles retains workflow paths and adds the optional root Makefile through the

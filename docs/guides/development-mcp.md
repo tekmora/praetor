@@ -551,16 +551,32 @@ The audit checks explicit Go test timeouts in these sources.
   followed by the job default, the workflow default and the runner default. Set `shell: bash`
   on a Bash test step in a Windows or mixed-runner job.
 - The root `Makefile` may use literal tabbed or inline recipes, including continuations.
-  A declaration of `.ONESHELL` makes candidate recipes unverifiable. The reader recognizes
-  `$(GO_TEST)` and `${GO_TEST}` as the test command. Simple Make variable references can
-  supply argument values. Make functions in a candidate recipe require expansion and fail the audit.
-- The command head must be `go test`, `go.exe test` or one of those executables followed by
-  `-C dir test`. The only supported global flag spelling is `-C` with a separate literal
-  directory argument. The test flag can be `-timeout` or `--timeout`, with a separate value
-  or an equals sign. Other arguments may be literal words or quoted shell parameters used
-  as values, including a quoted array of packages. Computed flag names are unverifiable.
-  Separate control operators from invocation words. A trailing `> file`
-  and a standalone trailing `2>&1` are supported.
+  A declaration of `.ONESHELL` makes candidate recipes unverifiable. A use of `$(GO_TEST)`
+  or `${GO_TEST}` needs one unconditional root assignment with `:=`, `::=` or `=`. The
+  audit reads its literal command and the recipe arguments together, including the
+  repository's `go run "$(CURDIR)/cmd/standardsctl" go test` wrapper. Conditional,
+  target-specific, computed or ambiguous definitions make the use unverifiable.
+- The program word must be spelled `go` or `go.exe` in the source. Before `test` it may
+  take `-C dir` with a separate literal directory. The standardsctl wrapper also accepts
+  that pair first among its test arguments. Separate control operators from invocation
+  words. A trailing `> file` and a standalone trailing `2>&1` are supported.
+
+| Test flag spellings | Accepted arguments |
+| --- | --- |
+| `-json`, `-race`, `-v` | Switch without a value |
+| `-count`, `-covermode`, `-coverprofile`, `-fuzz`, `-fuzztime`, `-run`, `-skip` | One value, separate or attached with `=` |
+| `-timeout`, `--timeout`, `-test.timeout`, `--test.timeout` | One duration, separate or attached with `=`, judged against 30 minutes |
+
+A quoted shell scalar can fill a flag's value slot, as in `-run "$pattern"`. Go accepts flags
+before and after one contiguous package list, so a free-standing `"$word"` could be a flag in either position.
+Literal package paths, `"./$pkg"`, and a quoted parameter directly following its successful
+initial package assignment (`pkg=./internal/adopt && go test "$pkg"`) establish a package
+operand. For computed import paths the portability workflow uses `"${pkg##-*}"` and
+`"${packages[@]##-*}"`. Shell prefix removal leaves a package path intact and removes the
+whole value if it starts with a dash. The array form does this for each element in Bash.
+A whole Make variable can provide a literal package path or a package list produced by
+`$(shell go list ./...)`, including the root Makefile's check of `.SHELLSTATUS`. Unknown
+flags, unproven argument expansions and extra words outside this grammar are unverifiable.
 
 The gate checks raw test tokens against the commands and comments the reader located. A step
 or recipe without such tokens skips shell parsing. If a candidate remains unexplained, the

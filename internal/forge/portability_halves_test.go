@@ -62,7 +62,7 @@ func stepHalvesProblem(step, pkg, half string) string {
 		return "the " + half + " pattern does not compile: " + err.Error()
 	}
 	for _, flag := range []string{"-run", "-skip"} {
-		want := `go test -json -timeout 30m ` + flag + ` "$` + half + `" "$` + pkg + `"`
+		want := `go test -json -timeout 30m ` + flag + ` "$` + half + `" "${` + pkg + `##-*}"`
 		if strings.Count(step, want) != 1 {
 			return "not exactly one " + want
 		}

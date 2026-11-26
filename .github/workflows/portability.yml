@@ -542,21 +542,21 @@ jobs:
           }
           status=0
           if [ "${#packages[@]}" -gt 0 ]; then
-            go test -json -timeout 30m "${packages[@]}" > "$RUNNER_TEMP/run-1.json" 2>&1 || status=$?
+            go test -json -timeout 30m "${packages[@]##-*}" > "$RUNNER_TEMP/run-1.json" 2>&1 || status=$?
             show "$RUNNER_TEMP/run-1.json"
           else
             echo "run-1 skipped: no selected packages outside adopt and CLI"
           fi
           if [ "$ADOPT" = true ]; then
-            go test -json -timeout 30m "$adopt" > "$RUNNER_TEMP/run-2.json" 2>&1 || status=$?
+            go test -json -timeout 30m "${adopt##-*}" > "$RUNNER_TEMP/run-2.json" 2>&1 || status=$?
             show "$RUNNER_TEMP/run-2.json"
           else
             echo "run-2 skipped: adopt is not selected"
           fi
           if [ "$CLI" = true ]; then
-            go test -json -timeout 30m -run "$cli_half" "$cli" > "$RUNNER_TEMP/run-3.json" 2>&1 || status=$?
+            go test -json -timeout 30m -run "$cli_half" "${cli##-*}" > "$RUNNER_TEMP/run-3.json" 2>&1 || status=$?
             show "$RUNNER_TEMP/run-3.json"
-            go test -json -timeout 30m -skip "$cli_half" "$cli" > "$RUNNER_TEMP/run-4.json" 2>&1 || status=$?
+            go test -json -timeout 30m -skip "$cli_half" "${cli##-*}" > "$RUNNER_TEMP/run-4.json" 2>&1 || status=$?
             show "$RUNNER_TEMP/run-4.json"
           else
             echo "run-3/run-4 skipped: CLI is not selected"
@@ -1009,22 +1009,22 @@ jobs:
           }
           status=0
           if [ "${#packages[@]}" -gt 0 ]; then
-            go test -json -timeout 30m "${packages[@]}" > "$RUNNER_TEMP/run-1.json" 2>&1 || status=$?
+            go test -json -timeout 30m "${packages[@]##-*}" > "$RUNNER_TEMP/run-1.json" 2>&1 || status=$?
             show "$RUNNER_TEMP/run-1.json"
           else
             echo "run-1 skipped: no selected packages outside adopt and CLI for shard $SHARD"
           fi
           if [ "$SHARD" = 1 ]; then
             if [ "$ADOPT" = true ]; then
-              go test -json -timeout 30m "$adopt" > "$RUNNER_TEMP/run-2.json" 2>&1 || status=$?
+              go test -json -timeout 30m "${adopt##-*}" > "$RUNNER_TEMP/run-2.json" 2>&1 || status=$?
               show "$RUNNER_TEMP/run-2.json"
             else
               echo "run-2 skipped: adopt is not selected"
             fi
             if [ "$CLI" = true ]; then
-              go test -json -timeout 30m -run "$cli_half" "$cli" > "$RUNNER_TEMP/run-3.json" 2>&1 || status=$?
+              go test -json -timeout 30m -run "$cli_half" "${cli##-*}" > "$RUNNER_TEMP/run-3.json" 2>&1 || status=$?
               show "$RUNNER_TEMP/run-3.json"
-              go test -json -timeout 30m -skip "$cli_half" "$cli" > "$RUNNER_TEMP/run-4.json" 2>&1 || status=$?
+              go test -json -timeout 30m -skip "$cli_half" "${cli##-*}" > "$RUNNER_TEMP/run-4.json" 2>&1 || status=$?
               show "$RUNNER_TEMP/run-4.json"
             else
               echo "run-3/run-4 skipped: CLI is not selected"

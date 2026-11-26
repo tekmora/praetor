@@ -23,6 +23,8 @@ import (
 
 var timeoutsToday = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 
+const literalWrapperDefinition = "GO_TEST := go test\n"
+
 const boundWorkflow = "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 30\n" +
 	"    steps:\n      - run: go test -timeout 30m ./...\n"
 
@@ -207,7 +209,7 @@ func TestAuditTestTimeouts_Makefile(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte("test:\n\t"+tc.command+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte("test:\n\t"+tc.command+"\n"+literalWrapperDefinition), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			out, err := auditTimeouts(t, root, tc.entries...)
@@ -269,7 +271,7 @@ func TestAuditTestTimeouts_Positive_MakefileCommentIgnored(t *testing.T) {
 	root := t.TempDir()
 	body := "test:\n\t$(GO_TEST) -race -timeout 30m ./...\n" +
 		"# -timeout replaces go test's ten-minute default per package\n" +
-		"\tgo test -timeout 45m ./control/\n"
+		"\tgo test -timeout 45m ./control/\n" + literalWrapperDefinition
 	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +320,7 @@ func TestAuditTestTimeouts_Negative_ContinuedCommentDoesNotHideCommand(t *testin
 		want string
 	}{
 		{"recipe comment before go test", "test:\n\t# note \\\n\tgo test -race -timeout 45m ./x\n", "Makefile:3 sets 45m"},
-		{"recipe comment before continued go test", "test:\n\t# note \\\n\t$(GO_TEST) -v -race \\\n\t  -timeout 45m ./internal/adopt/\n", "Makefile:3 sets 45m"},
+		{"recipe comment before continued go test", "test:\n\t# note \\\n\t$(GO_TEST) -v -race \\\n\t  -timeout 45m ./internal/adopt/\n" + literalWrapperDefinition, "Makefile:3 sets 45m"},
 		{"continued command then comment then go test", "test:\n\t@true; \\\n\t# note \\\n\tgo test -race -timeout 45m ./x\n", "Makefile:4 sets 45m"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,7 +340,7 @@ func TestAuditTestTimeouts_Negative_ContinuedCommentDoesNotHideCommand(t *testin
 // and a comment in a continued command does not inject a timeout token into that command.
 func TestAuditTestTimeouts_Positive_ContinuedCommentWithinBound(t *testing.T) {
 	root := t.TempDir()
-	body := "test:\n\t# note \\\n\tgo test -race -timeout 30m ./x\n\t$(GO_TEST) -race -timeout 30m ./a ; \\\n\t# -timeout 99m\n"
+	body := "test:\n\t# note \\\n\tgo test -race -timeout 30m ./x\n\t$(GO_TEST) -race -timeout 30m ./a ; \\\n\t# -timeout 99m\n" + literalWrapperDefinition
 	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -676,6 +678,7 @@ var makefileShellReaderCases = []struct {
 	{
 		name: "second tab stays and splits the word",
 		body: "test:\n\tgo test -time\\\n\t\tout 45m ./pkg/\n",
+		want: "Makefile:2 unverifiable test invocation: unexpanded argument",
 	},
 	{
 		name: "C13-04 inline comment timeout",
@@ -706,7 +709,7 @@ var makefileShellReaderCases = []struct {
 	},
 	{
 		name: "brace make reference stays an opaque word",
-		body: "test:\n\t${GO_TEST} --timeout=45m ./pkg/\n",
+		body: "test:\n\t${GO_TEST} --timeout=45m ./pkg/\n" + literalWrapperDefinition,
 		want: "Makefile:2 sets 45m",
 	},
 	{
@@ -741,6 +744,7 @@ var makefileShellReaderCases = []struct {
 	{
 		name: "quoted timeout text is one argument",
 		body: "test:\n\tgo test '-timeout 99m' ./pkg/\n",
+		want: "Makefile:2 unverifiable test invocation: unexpanded argument",
 	},
 	{
 		name: "quoted unreadable value keeps its blanks",
@@ -963,7 +967,7 @@ func TestAuditTestTimeouts_WorkflowShellCommands(t *testing.T) {
 		name, step, want string
 	}{
 		{"continued timeout", "      - run: |\n\n          go test \\\n            -timeout 45m ./pkg/\n", "ci.yml:8 sets 45m"},
-		{"quoted command and arguments", "      - run: |\n          'g'\\\n          'o' test '-timeout' '45'\"m\" ./pkg/\n", "ci.yml:7 sets 45m"},
+		{"quoted command and arguments", "      - run: |\n          'g'\\\n          'o' test '-timeout' '45'\"m\" ./pkg/\n", "ci.yml:7 unverifiable test invocation"},
 		{"trailing shell comment", "      - run: |\n          go test -timeout 30m ./pkg/ # -timeout 99m\n", ""},
 		{"folded value", "      - run: >-\n          go test\n          -timeout 45m ./pkg/\n", "ci.yml:6 sets 45m"},
 	} {
@@ -1102,4 +1106,117 @@ func TestAuditTestTimeouts_InheritedShell(t *testing.T) {
 	wf = strings.Replace(wf, "    steps:", "    defaults: {run: {shell: cmd}}\n    steps:", 1)
 	assertTimeoutFile(t, file, wf, `:8 unverifiable test invocation: resolved shell "cmd" must be bash or sh`)
 	assertTimeoutFile(t, file, wf+"        shell: bash\n", "")
+}
+
+// TestAuditTestTimeouts_TestFlagSpellings checks Go's timeout aliases at and above the bound.
+func TestAuditTestTimeouts_TestFlagSpellings(t *testing.T) {
+	for _, flag := range []string{"-timeout", "--timeout", "-test.timeout", "--test.timeout"} {
+		for _, sep := range []string{" ", "="} {
+			for _, tc := range []struct{ duration, want string }{
+				{"30m", ""},
+				{"45m", ":2 sets 45m, above the 30m bound"},
+			} {
+				t.Run(flag+sep+tc.duration, func(t *testing.T) {
+					cmd := "go test " + flag + sep + tc.duration + " ./..."
+					assertTimeoutFile(t, "Makefile", "test:\n\t"+cmd+"\n", tc.want)
+				})
+			}
+		}
+	}
+}
+
+// TestAuditTestTimeouts_ArgumentRoles distinguishes scalar flag values and proven package operands.
+func TestAuditTestTimeouts_ArgumentRoles(t *testing.T) {
+	const file = ".github/workflows/ci.yml"
+	const refused = ":7 unverifiable test invocation: unexpanded argument in test invocation"
+	for _, tc := range []struct{ name, command, want string }{
+		{"computed first flag", `flag=-timeout=45m; go test "$flag" ./...`, refused},
+		{"computed global flag", `go "$flag" test ./...`, ":7 unverifiable test invocation: raw test tokens do not resolve to a literal command"},
+		{"computed last flag", `flag=-test.timeout=45m; go test ./... "$flag"`, refused},
+		{"unbound package", `go test -timeout 30m "$pkg"`, refused},
+		{"literal package binding", `pkg=./internal/adopt && go test -timeout 30m "$pkg"`, ""},
+		{"quoted package path", `go test "./$pkg"`, ""},
+		{"quoted package array", `go test "${packages[@]##-*}"`, ""},
+		{"quoted value", `go test -run "$filter" ./...`, ""},
+		{"empty quoted value", `go test -run '' ./...`, ""},
+		{"value consumes flag spelling", `go test -run -timeout=45m ./...`, ""},
+		{"array in value slot", `go test -run "${args[@]}" ./...`, refused},
+		{"unknown literal flag", "go test -unknown ./...", refused},
+		{"missing value", "go test -run", refused},
+		{"resumed package list", "go test ./pkg -run Test ./other", ":7 unverifiable test invocation: package operand after the package list ended"},
+		{"words after terminator", "go test -- -test.timeout=45m", refused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := "      - run: |\n          " + tc.command + "\n"
+			assertTimeoutFile(t, file, timeoutFixtureWorkflow("ubuntu-latest", step), tc.want)
+		})
+	}
+}
+
+// TestAuditTestTimeouts_MakeArgumentRoles checks Make expansions before shell quote removal.
+func TestAuditTestTimeouts_MakeArgumentRoles(t *testing.T) {
+	const refused = ":2 unverifiable test invocation: unexpanded argument in test invocation"
+	for _, tc := range []struct{ definition, args, want string }{
+		{"FLAGS := -timeout=45m", "$(FLAGS)", refused},
+		{"FLAGS := x -timeout=45m", "-run $(FLAGS)", refused},
+		{"FLAGS := x -timeout=45m", "./... > $(FLAGS)", ":2 unverifiable test invocation: unsupported redirection or operator attached to an invocation word"},
+		{"PKG := ./internal/adopt", "$(PKG)", ""},
+		{"FILTER := TestAdopt", "-run ${FILTER} ./...", ""},
+		{"", `-run "$$filter" ./...`, ""},
+		{"", `-run "$filter" ./...`, ":2 unverifiable test invocation: unexpanded Make construct in recipe"},
+	} {
+		body := tc.definition + "\ntest: ; go test " + tc.args + "\n"
+		assertTimeoutFile(t, "Makefile", body, tc.want)
+	}
+}
+
+// TestAuditTestTimeouts_WrapperDefinition checks both halves of the effective argument list.
+func TestAuditTestTimeouts_WrapperDefinition(t *testing.T) {
+	const long = ":2 sets 45m, above the 30m bound"
+	const refused = ":2 unverifiable test invocation: GO_TEST needs one literal test command in a root Makefile assignment"
+	for _, tc := range []struct{ definition, use, want string }{
+		{"GO_TEST := go test -timeout=45m", "$(GO_TEST) ./...", long},
+		{"GO_TEST := go test -timeout=30m", "${GO_TEST} ./...", ""},
+		{"GO_TEST := go test -timeout", "$(GO_TEST) 45m ./...", long},
+		{"GO_TEST := go test -timeout=30m", "${GO_TEST} --test.timeout 45m ./...", long},
+		{"GO_TEST ?= go test", "$(GO_TEST) ./...", refused},
+		{"GO_TEST := $(COMMAND)", "${GO_TEST} ./...", refused},
+		{"GO_TEST := go test ; echo", "$(GO_TEST) ./...", refused},
+		{"test: GO_TEST := go test", "$(GO_TEST) ./...", refused},
+		{"", "${GO_TEST} -timeout 30m", refused},
+	} {
+		body := tc.definition + "\ntest: ; " + tc.use + "\n"
+		assertTimeoutFile(t, "Makefile", body, tc.want)
+	}
+	body := "GO_TEST := go test\ntest: ; $(GO_TEST) ./...\n"
+	assertTimeoutFile(t, "Makefile", body+"GO_TEST += -timeout=45m\n", refused)
+	assertTimeoutFile(t, "Makefile", body+"include flags.mk\n", refused)
+	assertTimeoutFile(t, "Makefile", body+"extra:\n\t$(eval GO_TEST += -timeout=45m)\n", refused)
+	const conditional = "ifdef EXTRA\nGO_TEST := go test\nendif\ntest: ; $(GO_TEST) ./...\n"
+	assertTimeoutFile(t, "Makefile", conditional, strings.Replace(refused, ":2", ":4", 1))
+}
+
+// TestAuditTestTimeouts_ProgramSpelling keeps every transformed executable visible to the candidate filter.
+func TestAuditTestTimeouts_ProgramSpelling(t *testing.T) {
+	const file = ".github/workflows/ci.yml"
+	const refused = ":8 unverifiable test invocation: raw test tokens do not resolve to a literal command"
+	for _, name := range []string{"go.e'xe'", `go."ex"e`, `go.ex\e`, "go.e\\\n          xe", "'go'", "/bin/go"} {
+		step := "      - shell: bash\n        run: |\n          " + name + " test -timeout 45m ./...\n"
+		assertTimeoutFile(t, file, timeoutFixtureWorkflow("windows-latest", step), refused)
+	}
+	step := "      - shell: bash\n        run: go.exe test -test.timeout=30m ./...\n"
+	assertTimeoutFile(t, file, timeoutFixtureWorkflow("windows-latest", step), "")
+}
+
+// TestAuditTestTimeouts_CheckedInEntryPoints audits each repository test source without exceptions.
+func TestAuditTestTimeouts_CheckedInEntryPoints(t *testing.T) {
+	for _, file := range []string{"Makefile", ".github/workflows/portability.yml"} {
+		t.Run(file, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(file)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertTimeoutFile(t, file, string(body), "")
+		})
+	}
 }

@@ -152,7 +152,7 @@ func makefileRecipeReferences(text string, start int) MakefileRecipe {
 		case strings.HasPrefix(text[i:], "$$"):
 			shell.WriteByte('$')
 			i += 2
-		case strings.HasPrefix(text[i:], "$("), strings.HasPrefix(text[i:], "${"):
+		case text[i] == '$':
 			end := i + makefileReferenceWidth(text[i:])
 			if recipe.LiteralSpans == nil {
 				recipe.LiteralSpans = make(map[int]int)
