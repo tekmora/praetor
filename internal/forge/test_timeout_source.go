@@ -168,7 +168,7 @@ func (s timeoutSource) check(script string, source hiss.ShellCommandSource, defa
 
 // checkCommand validates a candidate's head, redirections and argument roles at its use site.
 func (s timeoutSource) checkCommand(script string, command hiss.ShellCodeCommand, binding []int, defaults map[string]exprValue) ([]string, bool, string) {
-	args, reason := s.commandArgs(command)
+	args, reason := s.commandArgs(script, command)
 	if args == nil || reason != "" {
 		return nil, false, reason
 	}
@@ -184,13 +184,18 @@ func (s timeoutSource) checkCommand(script string, command hiss.ShellCodeCommand
 	return findings, true, reason
 }
 
-// commandArgs accepts the wrapper only when Make identified the whole program as a variable reference.
-func (s timeoutSource) commandArgs(command hiss.ShellCodeCommand) ([]hiss.ShellCodeWord, string) {
-	word := command.Words[0].Text
-	if (word == "$(GO_TEST)" || word == "${GO_TEST}") && s.literals[command.Words[0].Span[0]] == command.Words[0].Span[1] {
-		return s.wrapper.arguments(command.Words[1:])
+// commandArgs recognizes adoption's literal exec recipe head after the shell reader has
+// resolved exec. A Make variable in program position still requires the checked wrapper.
+func (s timeoutSource) commandArgs(script string, command hiss.ShellCodeCommand) ([]hiss.ShellCodeWord, string) {
+	words := command.Words
+	if s.file == "Makefile" && len(words) >= 2 && script[:words[1].Span[1]] == "exec 'go' 'test'" {
+		return words[2:], ""
 	}
-	return goTestArgs(command.Words), ""
+	program := words[0]
+	if (program.Text == "$(GO_TEST)" || program.Text == "${GO_TEST}") && s.literals[program.Span[0]] == program.Span[1] {
+		return s.wrapper.arguments(words[1:])
+	}
+	return goTestArgs(words), ""
 }
 
 // blankTimeoutSpan removes the evidence for one accounted occurrence without shifting offsets.

@@ -137,7 +137,7 @@ func goTestArgs(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
 
 // skipGoDirectory consumes the optional global -C and its literal directory as a pair.
 func skipGoDirectory(words []hiss.ShellCodeWord) []hiss.ShellCodeWord {
-	if len(words) >= 2 && timeoutTestFlags[words[0].Value] == directoryFlag && literalGoDirectory.MatchString(words[1].Value) {
+	if len(words) >= 2 && words[0].Value == "-C" && literalGoDirectory.MatchString(words[1].Value) {
 		return words[2:]
 	}
 	return words

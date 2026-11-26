@@ -1220,3 +1220,51 @@ func TestAuditTestTimeouts_CheckedInEntryPoints(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditTestTimeouts_ShippedFlags exercises the flag roles through literal workflow steps.
+func TestAuditTestTimeouts_ShippedFlags(t *testing.T) {
+	const file = ".github/workflows/ci.yml"
+	const refused = ":6 unverifiable test invocation: unexpanded argument in test invocation"
+	const long = ":6 sets 45m, above the 30m bound"
+	for _, tc := range []struct{ name, args, want string }{
+		{"release workflow", "-vet=all ./...", ""},
+		{"separate vet value", "-vet all -race -count=1 -run TestCI -timeout 30m ./...", ""},
+		{"long vet spelling", "--vet=all ./... --test.timeout=45m", long},
+		{"vet with no value", "-vet", refused},
+		{"unexpanded vet value", "-vet $VET ./...", refused},
+		{"unexpanded argument after count", "-count=1 $EXTRA ./...", refused},
+		{"vet has no test alias", "-test.vet=all ./...", refused},
+		{"repair worker", "-json -count=1 -mod=readonly -p=2 -timeout=60s ./...", ""},
+		{"wrapper and tags", "-exec 'praetorctl go test-exec' -tags=integration ./...", ""},
+		{"generated asset filter", "-count=1 -run ^TestShippedTextLedger$ ./internal/managedasset", ""},
+		{"expanded filter", "-run ^Test$FILTER ./...", refused},
+		{"forwarded options", "--test.count 1 -test.run=TestCI --test.skip=Slow ./...", ""},
+		{"boolean values", "-race=false -test.short -test.v=test2json ./...", ""},
+		{"computed boolean", "-race=$MODE ./...", refused},
+		{"golden regeneration", "./internal/adopt -run TestAdoptedHarnessGolden -update-harness-golden", ""},
+		{"golden switch for another package", "./other -update-harness-golden", refused},
+		{"arguments after golden switch", "./internal/adopt -update-harness-golden -timeout=45m", refused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := "      - run: go test " + tc.args + "\n"
+			assertTimeoutFile(t, file, timeoutFixtureWorkflow("ubuntu-latest", step), tc.want)
+		})
+	}
+}
+
+// TestAuditTestTimeouts_AdoptionRecipe checks the rendered recipe and changes to its arguments or head.
+func TestAuditTestTimeouts_AdoptionRecipe(t *testing.T) {
+	const head = "@exec 'go' 'test' "
+	const unresolved = ":2 unverifiable test invocation: raw test tokens do not resolve to a literal command"
+	for _, tc := range []struct{ name, recipe, want string }{
+		{"fresh adoption", head + "'-v' '-race' './...'", ""},
+		{"over bound", head + "'-v' '-race' '-timeout' '45m' './...'", ":2 sets 45m, above the 30m bound"},
+		{"unbound Make argument", head + "'-v' $(FLAGS) './...'", ":2 unverifiable test invocation: unexpanded argument in test invocation"},
+		{"other program", "@echo exec 'go' 'test' '-v' '-race' './...'", unresolved},
+		{"second raw invocation", head + "'./...' ; custom go test ./...", unresolved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertTimeoutFile(t, "Makefile", "test: build\n\t"+tc.recipe+"\n", tc.want)
+		})
+	}
+}

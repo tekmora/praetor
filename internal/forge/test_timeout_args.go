@@ -6,6 +6,7 @@ package forge
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/hiss"
@@ -16,30 +17,52 @@ type testFlagKind uint8
 
 const (
 	packageArg testFlagKind = iota
-	directoryFlag
 	switchFlag
+	verboseFlag
+	finalSwitchFlag
 	valueFlag
 	durationFlag
 )
 
-// timeoutTestFlags is the complete flag grammar. Go 1.27.4 registers test.timeout
-// alongside timeout in cmd/go/internal/test, and cmdflag.ParseOne accepts either dash count.
-var timeoutTestFlags = map[string]testFlagKind{
-	"-C":             directoryFlag,
-	"-json":          switchFlag,
-	"-race":          switchFlag,
-	"-v":             switchFlag,
-	"-count":         valueFlag,
-	"-covermode":     valueFlag,
-	"-coverprofile":  valueFlag,
-	"-fuzz":          valueFlag,
-	"-fuzztime":      valueFlag,
-	"-run":           valueFlag,
-	"-skip":          valueFlag,
-	"-timeout":       durationFlag,
-	"--timeout":      durationFlag,
-	"-test.timeout":  durationFlag,
-	"--test.timeout": durationFlag,
+// timeoutTestFlags describes the flags in the engine's test commands. Go 1.27.4's
+// cmd/go/internal/test/testflag.go and cmd/go/internal/work/build.go register the Go
+// flags. cmd/go/internal/test/flagdefs.go lists the flags with a test.* spelling.
+var timeoutTestFlags = map[string]struct {
+	kind      testFlagKind
+	forwarded bool
+}{
+	"count":                 {valueFlag, true},
+	"covermode":             {valueFlag, false},
+	"coverprofile":          {valueFlag, true},
+	"exec":                  {valueFlag, false},
+	"fuzz":                  {valueFlag, true},
+	"fuzztime":              {valueFlag, true},
+	"json":                  {switchFlag, false},
+	"mod":                   {valueFlag, false},
+	"p":                     {valueFlag, false},
+	"race":                  {switchFlag, false},
+	"run":                   {valueFlag, true},
+	"short":                 {switchFlag, true},
+	"skip":                  {valueFlag, true},
+	"tags":                  {valueFlag, false},
+	"timeout":               {durationFlag, true},
+	"v":                     {verboseFlag, true},
+	"vet":                   {valueFlag, false},
+	"update-harness-golden": {finalSwitchFlag, false}, // internal/adopt/harness_golden_test.go
+}
+
+// testFlagRole looks up a single- or double-dash spelling, including registered test.* aliases.
+func testFlagRole(name string) testFlagKind {
+	name, flag := strings.CutPrefix(name, "-")
+	if !flag {
+		return packageArg
+	}
+	name, alias := strings.CutPrefix(strings.TrimPrefix(name, "-"), "test.")
+	spec := timeoutTestFlags[name]
+	if alias && !spec.forwarded {
+		return packageArg
+	}
+	return spec.kind
 }
 
 const (
@@ -56,11 +79,11 @@ var (
 	initialPackageBinding = regexp.MustCompile(`^[ \t\n]*(` + parameterName + `)=` + packageSpelling + `[ \t]+&&[ \t\n]+`)
 	literalPackage        = regexp.MustCompile(`^` + packageSpelling + `$`)
 	// A quoted scalar remains one value. An array in a flag's value slot can add flags.
-	scalarFlagValue = regexp.MustCompile(`^(?:-[a-z]+=)?"` + scalarParameter + `(?:/[a-zA-Z0-9._/-]+)?"$`)
+	scalarFlagValue = regexp.MustCompile(`^(?:--?(?:test\.)?[a-z]+=)?"` + scalarParameter + `(?:/[a-zA-Z0-9._/-]+)?"$`)
 	// Literal path prefixes and longest-prefix removal both exclude a leading dash,
 	// even when the caller supplies a flag instead of a package.
 	quotedPackage   = regexp.MustCompile(`^"(?:\./` + scalarParameter + `|\$\{` + parameterName + `(?:\[@\])?##-\*\})"$`)
-	literalTestWord = regexp.MustCompile(`^(?:[a-zA-Z0-9_.,/:@+=~-]|'[^']*'|"[^"$` + "`" + `\\]*"|\\[^\n])+$`)
+	literalTestWord = regexp.MustCompile(`^(?:[a-zA-Z0-9_.,/:@+=~^-]|'[^']*'|"[^"$` + "`" + `\\]*"|\\[^\n])+\$?$`)
 	literalMakeWord = regexp.MustCompile(`^[a-zA-Z0-9_.,/:@+=~-]+$`)
 	// go list emits one import path per package. The optional Make error branch
 	// contributes no words when discovery succeeds.
@@ -136,7 +159,7 @@ func flagArgument(args []hiss.ShellCodeWord, i int) (string, int) {
 // timeoutValue reads a timeout spelling and its attached or separate duration.
 func timeoutValue(args []hiss.ShellCodeWord, i int) (string, int, bool) {
 	name, _, _ := strings.Cut(args[i].Value, "=")
-	if timeoutTestFlags[name] != durationFlag {
+	if testFlagRole(name) != durationFlag {
 		return "", i, false
 	}
 	value, next := flagArgument(args, i)
@@ -208,11 +231,11 @@ func (s timeoutSource) testArgument(args []hiss.ShellCodeWord, i int) (testArg, 
 		return testArg{kind: durationFlag, end: next, value: value}, ""
 	}
 	word := args[i]
-	name, _, attached := strings.Cut(word.Value, "=")
-	arg := testArg{kind: timeoutTestFlags[name], end: i}
+	name, value, attached := strings.Cut(word.Value, "=")
+	arg := testArg{kind: testFlagRole(name), end: i}
 	switch arg.kind {
-	case switchFlag:
-		if !attached {
+	case switchFlag, verboseFlag, finalSwitchFlag:
+		if arg.kind.acceptsSwitch(value, attached, args, i) {
 			return arg, ""
 		}
 	case valueFlag:
@@ -226,6 +249,19 @@ func (s timeoutSource) testArgument(args []hiss.ShellCodeWord, i int) (testArg, 
 		}
 	}
 	return arg, unknownTestWord
+}
+
+// acceptsSwitch follows Go's attached boolean syntax. Only the documented adopter
+// invocation can end with its package-specific golden regeneration switch.
+func (kind testFlagKind) acceptsSwitch(value string, attached bool, args []hiss.ShellCodeWord, i int) bool {
+	if kind == finalSwitchFlag && (i+1 != len(args) || args[0].Value != "./internal/adopt") {
+		return false
+	}
+	if !attached || kind == verboseFlag && value == "test2json" {
+		return true
+	}
+	_, err := strconv.ParseBool(value)
+	return err == nil
 }
 
 // timeoutArguments records a single contiguous package list and all explicit durations.
