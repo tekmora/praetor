@@ -32,8 +32,12 @@ type RepositoryMetadataReport struct {
 	VisibilityDrift string
 }
 
-// ghRepositoryMetadata is the part of GitHub's repository object this reconciliation reads.
+// ghRepositoryMetadata holds the repository fields used by the audit and reconciliation.
 type ghRepositoryMetadata struct {
+	FullName string `json:"full_name"`
+	Owner    struct {
+		Login string `json:"login"`
+	} `json:"owner"`
 	Description string   `json:"description"`
 	Homepage    string   `json:"homepage"`
 	Visibility  string   `json:"visibility"`
@@ -156,16 +160,34 @@ func VisibilityDrift(declared, live string) string {
 	return fmt.Sprintf("manifest declares %s, GitHub reports %s", want, live)
 }
 
-// RepositoryVisibility reads the repository object from GitHub and returns its visibility.
-func (g *GitHubDriver) RepositoryVisibility(ctx context.Context) (string, error) {
+// RepositorySettings holds the visibility and identity from one repository GET, shared by
+// the visibility and Actions checks during an audit.
+type RepositorySettings struct {
+	Visibility string
+	owner      string
+	fullName   string
+	driver     *GitHubDriver
+}
+
+// ReadRepositorySettings reads the repository object at the configured coordinates, following
+// redirects through the driver's HTTP client. The response identifies its current owner and name.
+func (g *GitHubDriver) ReadRepositorySettings(ctx context.Context) (RepositorySettings, error) {
 	if err := g.Authenticate(ctx); err != nil {
-		return "", err
+		return RepositorySettings{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
 	}
+	ctx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
+	defer cancel()
 	live, err := g.getRepositoryMetadata(ctx)
 	if err != nil {
-		return "", err
+		return RepositorySettings{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
 	}
-	return live.Visibility, nil
+	return RepositorySettings{Visibility: live.Visibility, owner: live.Owner.Login, fullName: live.FullName, driver: g}, nil
+}
+
+// RepositoryVisibility reads the repository object from GitHub and returns its visibility.
+func (g *GitHubDriver) RepositoryVisibility(ctx context.Context) (string, error) {
+	settings, err := g.ReadRepositorySettings(ctx)
+	return settings.Visibility, err
 }
 
 // getRepositoryMetadata reads the repository object.

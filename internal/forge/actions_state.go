@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -71,31 +72,47 @@ type workflowRunsPage struct {
 	Runs       []WorkflowRunRecord `json:"workflow_runs"`
 }
 
-// WorkflowPermissions reads GET /repos/{owner}/{repo}/actions/permissions/workflow and, for
-// the owner, GET /orgs/{owner}/actions/permissions/workflow. The repository value is required:
-// ErrActionsNotReadable when the forge refuses it. The organisation value is best effort: a
-// user-owned repository has none, and a token that may read the repository need not read its
-// organisation, so a refusal there leaves Organisation nil with the reason.
+// ErrRepositoryIdentityRead marks a failed or inconsistent read of the repository's current
+// identity. The audit cannot choose an organisation for the comparison after this error.
+var ErrRepositoryIdentityRead = errors.New("read repository identity")
+
+// WorkflowPermissions reads the effective permissions of the repository and its current
+// owner, including after a repository transfer or rename.
 func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
-	owner, _, err := g.resolveRepository()
+	settings, err := g.ReadRepositorySettings(ctx)
 	if err != nil {
 		return LiveWorkflowPermissions{}, err
 	}
-	path, err := g.repoPath("actions/permissions/workflow")
+	return settings.WorkflowPermissions(ctx)
+}
+
+// WorkflowPermissions reads the two permission documents named by this repository snapshot.
+// The organisation read is best effort for user-owned repositories and restricted tokens.
+func (s RepositorySettings) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
+	owner, _, err := util.SplitGitHubRepository(s.fullName)
 	if err != nil {
-		return LiveWorkflowPermissions{}, err
+		return LiveWorkflowPermissions{}, fmt.Errorf("%w: full_name: %w", ErrRepositoryIdentityRead, err)
 	}
-	repository, err := g.readWorkflowPermissions(ctx, path)
+	if err := util.ValidateGitHubOwner(s.owner); err != nil {
+		return LiveWorkflowPermissions{}, fmt.Errorf("%w: owner.login: %w", ErrRepositoryIdentityRead, err)
+	}
+	if !strings.EqualFold(owner, s.owner) {
+		return LiveWorkflowPermissions{}, fmt.Errorf("%w: owner.login %q disagrees with full_name %q", ErrRepositoryIdentityRead, s.owner, s.fullName)
+	}
+	if ctx == nil {
+		return LiveWorkflowPermissions{}, errors.New("read workflow permissions: context required")
+	}
+	repository, err := s.driver.readWorkflowPermissions(ctx, "/repos/"+s.fullName+"/actions/permissions/workflow")
 	if err != nil {
 		return LiveWorkflowPermissions{}, fmt.Errorf("read repository workflow permissions: %w", err)
 	}
 	live := LiveWorkflowPermissions{Repository: repository}
-	organisation, err := g.readWorkflowPermissions(ctx, "/orgs/"+url.PathEscape(owner)+"/actions/permissions/workflow")
+	organisation, err := s.driver.readWorkflowPermissions(ctx, "/orgs/"+url.PathEscape(s.owner)+"/actions/permissions/workflow")
 	switch {
 	case err == nil:
 		live.Organisation = &organisation
 	case errors.Is(err, ErrActionsNotReadable):
-		live.OrganisationUnread = fmt.Sprintf("%s is not an organisation, or the token cannot read its settings (%v)", owner, err)
+		live.OrganisationUnread = fmt.Sprintf("%s is not an organisation, or the token cannot read its settings (%v)", s.owner, err)
 	default:
 		return LiveWorkflowPermissions{}, fmt.Errorf("read organisation workflow permissions: %w", err)
 	}
@@ -104,6 +121,8 @@ func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPer
 
 // readWorkflowPermissions reads and checks one workflow permissions document.
 func (g *GitHubDriver) readWorkflowPermissions(ctx context.Context, path string) (WorkflowPermissions, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
+	defer cancel()
 	body, status, err := g.sendRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return WorkflowPermissions{}, err

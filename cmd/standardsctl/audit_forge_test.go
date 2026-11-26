@@ -25,6 +25,7 @@ import (
 // actionsStub is a stand-in forge for the live Actions checks: the workflow permissions of
 // acme/widgets and of the acme organisation, and one runs page per workflow file name.
 type actionsStub struct {
+	metadataStatus        int
 	repoStatus, orgStatus int
 	repo, org             map[string]any
 	runs                  map[string]map[string]any
@@ -66,15 +67,9 @@ func pointLiveChecksAt(t *testing.T, url string) {
 func (s *actionsStub) answer(path string) (int, any) {
 	switch {
 	case path == "/repos/acme/widgets":
-		if s.repoStatus != 0 {
-			return s.repoStatus, s.repo
+		return orOK(s.metadataStatus), map[string]any{
+			"full_name": "acme/widgets", "owner": map[string]string{"login": "acme"}, "visibility": "public",
 		}
-		if s.repo != nil {
-			if vis, ok := s.repo["visibility"]; ok {
-				return http.StatusOK, map[string]any{"visibility": vis}
-			}
-		}
-		return http.StatusOK, map[string]any{"visibility": "public"}
 	case path == "/repos/acme/widgets/actions/permissions/workflow":
 		return orOK(s.repoStatus), s.repo
 	case path == "/orgs/acme/actions/permissions/workflow":
@@ -145,7 +140,8 @@ func TestAuditLiveActions_Positive_CompliantRepositoryPasses(t *testing.T) {
 		"[PASS] Actions workflow permissions compared with the forge: live workflow permissions match the declaration.",
 		"[INFO] Workflow runs on main: no workflow under .github/workflows that runs on its own; nothing read.",
 		"Audit Summary: configured governance gates passed")
-	if got := strings.Join(stub.seen(), "\n"); !strings.Contains(got, "GET /repos/acme/widgets/actions/permissions/workflow") ||
+	if got := strings.Join(stub.seen(), "\n"); strings.Count(got+"\n", "GET /repos/acme/widgets\n") != 1 ||
+		!strings.Contains(got, "GET /repos/acme/widgets/actions/permissions/workflow") ||
 		!strings.Contains(got, "GET /orgs/acme/actions/permissions/workflow") {
 		t.Fatalf("requests = %s", got)
 	}
@@ -207,6 +203,28 @@ func TestAuditLiveActions_Boundary_ChecksNotMadeAreNamed(t *testing.T) {
 	mustContain(t, out, "[SKIP] Actions workflow permissions not compared with the forge: read repository workflow permissions: status 403")
 	if strings.Contains(out, "[PASS] Actions workflow permissions") {
 		t.Fatalf("a refused read was reported as a pass:\n%s", out)
+	}
+}
+
+// TestActionsRepositoryReadFailure verifies audit and plan fail before comparing permissions
+// when the repository GET fails, even though both permissions endpoints would answer.
+func TestActionsRepositoryReadFailure(t *testing.T) {
+	f := newAuditFixture(t)
+	f.declareActions(t, "read", false)
+	stub := &actionsStub{
+		metadataStatus: http.StatusServiceUnavailable,
+		repo:           workflowPermissions("read", false),
+		org:            workflowPermissions("read", false),
+	}
+	serveActions(t, stub)
+	_, err := f.audit(t)
+	mustErrContain(t, err, "[FAIL] Actions workflow permissions: read repository identity")
+	mustErrContain(t, err, "503")
+	_, err = runPlanCmd(t, "--config="+f.manifestPath)
+	mustErrContain(t, err, "read repository identity")
+	got := strings.Join(stub.seen(), "\n")
+	if strings.Count(got+"\n", "GET /repos/acme/widgets\n") != 2 || strings.Contains(got, "/permissions/workflow") {
+		t.Fatalf("requests across audit and plan = %s", got)
 	}
 }
 
@@ -917,7 +935,7 @@ func serveForge(t *testing.T, actions *actionsStub, protection *forgeStub) {
 	t.Helper()
 	rest := protection.handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/actions/") {
+		if r.URL.Path == "/repos/acme/widgets" || strings.Contains(r.URL.Path, "/actions/") {
 			actions.serve(t, w, r)
 			return
 		}

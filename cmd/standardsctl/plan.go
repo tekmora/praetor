@@ -129,7 +129,9 @@ func runPlan(args []string) error {
 	// Without --remote the status says the live branch protection was not compared, never that
 	// no change is required (#159).
 	fmt.Println(adopt.FormatPlanStatus(missing, drift, flags.remote))
-	printPlanActionsPermissions(ctx, manifest, filepath.Dir(flags.configPath), flags.offline)
+	if err := printPlanActionsPermissions(ctx, manifest, filepath.Dir(flags.configPath), flags.offline); err != nil {
+		return err
+	}
 	if !flags.remote {
 		return nil
 	}

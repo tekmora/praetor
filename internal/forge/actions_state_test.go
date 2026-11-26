@@ -13,12 +13,13 @@ import (
 )
 
 const (
+	repositoryPath      = "/repos/acme/widgets"
 	repoPermissionsPath = "/repos/acme/widgets/actions/permissions/workflow"
 	orgPermissionsPath  = "/orgs/acme/actions/permissions/workflow"
 	ciRunsPath          = "/repos/acme/widgets/actions/workflows/ci.yml/runs"
 )
 
-// permissionsForge answers the two workflow permission paths with the given statuses and
+// permissionsForge answers the repository GET and the two workflow permission paths with the given statuses and
 // bodies, and fails the test on any other request or any method but GET.
 func permissionsForge(t *testing.T, repoStatus int, repoBody any, orgStatus int, orgBody any) (*GitHubDriver, *fakeForgeServer) {
 	t.Helper()
@@ -27,6 +28,8 @@ func permissionsForge(t *testing.T, repoStatus int, repoBody any, orgStatus int,
 			t.Errorf("an Actions read sent %s %s", r.Method, r.URL.Path)
 		}
 		switch r.URL.Path {
+		case repositoryPath:
+			writeJSON(t, w, http.StatusOK, map[string]any{"full_name": "acme/widgets", "owner": map[string]string{"login": "acme"}})
 		case repoPermissionsPath:
 			writeJSON(t, w, repoStatus, repoBody)
 		case orgPermissionsPath:
@@ -56,7 +59,8 @@ func TestWorkflowPermissions_Positive_ReadsRepositoryAndOrganisation(t *testing.
 	if live.Organisation == nil || !live.Organisation.CanApprovePullRequestReviews || live.OrganisationUnread != "" {
 		t.Fatalf("organisation value = %+v (%q)", live.Organisation, live.OrganisationUnread)
 	}
-	if len(fake.requests) != 2 || fake.requests[0].Path != repoPermissionsPath || fake.requests[1].Path != orgPermissionsPath {
+	if len(fake.requests) != 3 || fake.requests[0].Path != repositoryPath ||
+		fake.requests[1].Path != repoPermissionsPath || fake.requests[2].Path != orgPermissionsPath {
 		t.Fatalf("requests = %+v", fake.requests)
 	}
 }
@@ -69,7 +73,7 @@ func TestWorkflowPermissions_Negative_RefusedAndMalformedReads(t *testing.T) {
 		if _, err := gh.WorkflowPermissions(t.Context()); !errors.Is(err, ErrActionsNotReadable) {
 			t.Fatalf("status %d returned %v, want ErrActionsNotReadable", status, err)
 		}
-		if len(fake.requests) != 1 {
+		if len(fake.requests) != 2 {
 			t.Fatalf("status %d still asked the organisation: %+v", status, fake.requests)
 		}
 	}
