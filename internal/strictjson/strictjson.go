@@ -9,7 +9,8 @@
 // Validate scans the document with encoding/json/jsontext and refuses input that is empty, over
 // MaxBytes or not UTF-8; a token the scanner cannot read; an escaped UTF-16 surrogate without
 // its pair, which encoding/json would replace with U+FFFD; nesting deeper than MaxDepth; more
-// than MaxTokens tokens; a null under RejectNull; one object repeating a member name; and
+// than MaxTokens tokens; too many items in a member with an ArrayLimit; a null under
+// RejectNull; one object repeating a member name; and
 // anything after the first document. Decode validates and then decodes into a Go value with
 // unknown fields disallowed.
 //
@@ -49,6 +50,7 @@ var (
 	ErrSurrogate = errors.New("JSON string holds an unpaired UTF-16 surrogate escape")
 	ErrDepth     = errors.New("JSON nesting exceeds its bound")
 	ErrTokens    = errors.New("JSON token count exceeds its bound")
+	ErrArraySize = errors.New("JSON array item count exceeds its bound")
 	ErrNull      = errors.New("JSON null is not allowed")
 	ErrDuplicate = errors.New("JSON object repeats a member name")
 	ErrTrailing  = errors.New("JSON input holds more than one document")
@@ -78,19 +80,30 @@ type Options struct {
 	RejectNull bool      // refuse every null literal
 	UseNumber  bool      // Decode keeps a number held in an interface value as json.Number
 	Messages   Messages
+
+	ArrayLimit *ArrayLimit // optional bound on one root member
+}
+
+// ArrayLimit bounds an array belonging to a named member of the root object. Member matches
+// case-insensitively so every spelling encoding/json can decode into the same field is bounded.
+type ArrayLimit struct {
+	Member   string
+	MaxItems int64
 }
 
 // Messages is the wording of each refusal; an empty field takes the default named beside it.
 // A message may carry one formatting verb for the detail its refusal supplies: the byte bound
 // (Size, %d), the scanner error (Syntax and Surrogate, %w), the nesting bound (Depth, %d), the
 // token bound (Count, %d), the repeated member name as written (Duplicate, %q) and the decoder
-// error (Decode, %w). Null and Trailing supply no detail, so their messages carry no verb.
+// error (Decode, %w). Items takes the observed and maximum item counts (%d, %d).
+// Null and Trailing supply no detail, so their messages carry no verb.
 type Messages struct {
 	Size      string // "JSON requires 1..%d UTF-8 bytes"
 	Syntax    string // "%w"
 	Surrogate string // "JSON string holds an unpaired UTF-16 surrogate escape"
 	Depth     string // "JSON nesting exceeds %d"
 	Count     string // "JSON token bound exceeded"
+	Items     string // "JSON array has %d items, exceeds %d"
 	Null      string // "JSON null is not allowed"
 	Duplicate string // "invalid or duplicate JSON key"
 	Trailing  string // "expected exactly one JSON document"
@@ -103,6 +116,7 @@ func (m Messages) withDefaults() Messages {
 	m.Surrogate = cmp.Or(m.Surrogate, ErrSurrogate.Error())
 	m.Depth = cmp.Or(m.Depth, "JSON nesting exceeds %d")
 	m.Count = cmp.Or(m.Count, "JSON token bound exceeded")
+	m.Items = cmp.Or(m.Items, "JSON array has %d items, exceeds %d")
 	m.Null = cmp.Or(m.Null, ErrNull.Error())
 	m.Duplicate = cmp.Or(m.Duplicate, "invalid or duplicate JSON key")
 	m.Trailing = cmp.Or(m.Trailing, "expected exactly one JSON document")
@@ -180,6 +194,7 @@ type scan struct {
 	decoder  *jsontext.Decoder
 	names    []map[string]bool // one entry per open container; nil for an array
 	complete bool              // the first document has been read in full
+	bounded  bool              // the current root member has an array bound
 }
 
 // accept checks one token the decoder has just read.
@@ -207,6 +222,20 @@ func (s *scan) accept(token jsontext.Token) error {
 		}
 	}
 	s.complete = depth == 0
+	return s.checkArrayItems(depth)
+}
+
+// checkArrayItems reads the decoder's own element count. Opening an object or array already
+// counts it in its parent, so the first excess record is refused at its opening token.
+func (s *scan) checkArrayItems(depth int) error {
+	const rootMemberDepth = 2
+	if !s.bounded || depth < rootMemberDepth {
+		return nil
+	}
+	kind, length := s.decoder.StackIndex(rootMemberDepth)
+	if kind == jsontext.KindBeginArray && length > s.opts.ArrayLimit.MaxItems {
+		return refuse(ErrArraySize, s.messages.Items, length, s.opts.ArrayLimit.MaxItems)
+	}
 	return nil
 }
 
@@ -216,6 +245,9 @@ func (s *scan) member(text string, depth int) error {
 	kind, length := s.decoder.StackIndex(depth)
 	if kind != jsontext.KindBeginObject || length%2 == 0 {
 		return nil
+	}
+	if depth == 1 && s.opts.ArrayLimit != nil {
+		s.bounded = strings.EqualFold(text, s.opts.ArrayLimit.Member)
 	}
 	name := text
 	if s.opts.Names == FoldedNames {
@@ -275,11 +307,11 @@ func (r *refusal) Error() string { return r.err.Error() }
 
 func (r *refusal) Unwrap() []error { return []error{r.kind, r.err} }
 
-func refuse(kind error, message string, detail any) error {
+func refuse(kind error, message string, detail ...any) error {
 	if !strings.Contains(message, "%") {
 		return &refusal{kind: kind, err: errors.New(message)}
 	}
-	return &refusal{kind: kind, err: fmt.Errorf(message, detail)}
+	return &refusal{kind: kind, err: fmt.Errorf(message, detail...)}
 }
 
 // maxFoldOrbit bounds the walk around a rune's case-folding orbit (HISS-02). Unicode orbits are

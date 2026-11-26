@@ -12,21 +12,24 @@ const maxWindowSnapshotBytes = 64 << 20
 
 // windowSnapshotSchema compiles the producer's embedded schema once per process.
 var windowSnapshotSchema = sync.OnceValues(func() (*jsonschema.Schema, error) {
-	return strictjson.CompileSchema("urn:praetor:window-snapshot", catalog.SnapshotSchema())
+	return strictjson.CompileSchemaWithFormats("urn:praetor:window-snapshot", catalog.SnapshotSchema())
 })
 
-// validateWindowSnapshotSchema checks the original JSON so missing properties, repeated keys
-// and unknown source statuses cannot disappear into the Go representation.
-func validateWindowSnapshotSchema(data []byte) error {
-	schema, err := windowSnapshotSchema()
-	if err != nil {
-		return err
+// windowSnapshotDocument counts records in the strict token walk before either decoder
+// allocates an array. It keeps the original properties for the subsequent schema check.
+func windowSnapshotDocument(data []byte) (any, error) {
+	// All v1 containers fit within four levels (e.g. snapshot, records, record, usage_window).
+	options := strictjson.Options{
+		MaxBytes:   maxWindowSnapshotBytes,
+		MaxDepth:   4,
+		Names:      strictjson.ExactNames,
+		UseNumber:  true,
+		ArrayLimit: &strictjson.ArrayLimit{Member: "records", MaxItems: catalog.MaxSnapshotRecords},
+		Messages:   strictjson.Messages{Items: "record count before decode: snapshot has %d records, exceeds %d"},
 	}
 	var document any
-	// All v1 containers fit within four levels (e.g. snapshot, records, record, usage_window).
-	options := strictjson.Options{MaxBytes: maxWindowSnapshotBytes, MaxDepth: 4, Names: strictjson.ExactNames, UseNumber: true}
 	if err := strictjson.Decode(data, &document, options); err != nil {
-		return err
+		return nil, err
 	}
-	return schema.Validate(document)
+	return document, nil
 }

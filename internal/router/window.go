@@ -173,11 +173,19 @@ func LoadWindowSnapshot(ctx context.Context, path string) (catalog.Snapshot, err
 	}
 	// Whitespace counts toward the file limit but carries no snapshot fields.
 	data = bytes.Trim(data, " \t\r\n")
+	document, err := windowSnapshotDocument(data)
+	if err != nil {
+		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
+	}
 	snapshot, err := catalog.ParseSnapshot(data)
 	if err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w; re-run epitropctl sync --out <window-file> to write a fresh version %d snapshot", path, err, catalog.SnapshotSchemaVersion)
 	}
-	if err := validateWindowSnapshotSchema(data); err != nil {
+	schema, err := windowSnapshotSchema()
+	if err != nil {
+		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
+	}
+	if err := schema.Validate(document); err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
 	}
 	if err := ctx.Err(); err != nil {

@@ -107,11 +107,25 @@ jobs:
           set -euo pipefail
           release="$(sed -n 's/^toolchain go\([0-9][0-9a-z.]*\)$/\1/p' go.mod)"
           if [ -z "$release" ]; then
-            release="$(sed -n 's/^go \([0-9][0-9a-z.]*\)$/\1/p' go.mod)"
-          fi
-          if [ -z "$release" ]; then
-            echo "adopt: go.mod at the pull request head names no Go release" >&2
-            exit 1
+            # Before setup-go, use the go directive grammar from x/mod/modfile.GoVersionRE.
+            release="$(LC_ALL=C awk '
+              { sub(/\/\/.*/, ""); sub(/\r$/, "") }
+              block { if ($1 == ")") block = 0; next }
+              /^[[:blank:]]*(module|godebug|require|exclude|replace|retract|tool|ignore)[[:blank:]]*\([[:blank:]]*$/ { block = 1; next }
+              $1 == "go" {
+                count++
+                release = $2
+                valid = NF == 2 && release ~ /^[1-9][0-9]*\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?([a-z]+[0-9]+)?$/
+              }
+              END {
+                if (!count) reason = "no go directive"
+                else if (count > 1) reason = "multiple go directives"
+                else if (!valid) reason = "invalid go directive"
+                else { print release; exit }
+                print "adopt: go.mod at the pull request head has " reason > "/dev/stderr"
+                exit 1
+              }
+            ' go.mod)"
           fi
           echo "go-version=$release" >> "$GITHUB_OUTPUT"
 

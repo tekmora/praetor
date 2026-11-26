@@ -523,6 +523,40 @@ func runHeadLookup(t *testing.T, number, answer string, code int) stepOutcome {
 // its commit on the next.
 func headAnswer(repository, sha string) string { return repository + "\n" + sha }
 
+// TestAdoptWorkflowGoRelease exercises the shipped fallback with the pull request's go.mod.
+func TestAdoptWorkflowGoRelease(t *testing.T) {
+	job := adoptJob(t, parseAdoptWorkflow(t), adoptCommentJob)
+	index := mustStepIndex(t, job, func(step workflowStep) bool { return step.ID == "go-release" })
+	body := "cd \"$RUNNER_TEMP\" || exit 1\n" + job.Steps[index].Run
+	cases := [...]struct {
+		name, directives, release, refusal string
+	}{
+		{"comment", "go 1.27.4 // minimum", "1.27.4", ""},
+		{"whitespace", "replace (\n go => ./local\n)\n\tgo\t1.27rc1\r", "1.27rc1", ""},
+		{"malformed", "go 1..4", "", "invalid go directive"},
+		{"multiple", "go 1.27.3\ngo 1.27.4", "", "multiple go directives"},
+		{"missing", "// go 1.27.4", "", "no go directive"},
+		{"toolchain", "go 1.27.3\ntoolchain go1.27.4", "1.27.4", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := executeShellBody(t, body, "go", func(_, temp string) []string {
+				writeForgeTestFile(t, temp, "go.mod", "module example.org/adopter\n\n"+tc.directives+"\n")
+				return nil
+			})
+			if tc.refusal != "" {
+				if got.exitCode == 0 || len(got.outputs) != 0 || !strings.Contains(got.combined, tc.refusal) {
+					t.Fatalf("want %q and no output, got exit %d, outputs %v, log %s", tc.refusal, got.exitCode, got.outputs, got.combined)
+				}
+				return
+			}
+			if got.exitCode != 0 || got.outputs["go-version"] != tc.release {
+				t.Fatalf("want release %s, got exit %d, outputs %v, log %s", tc.release, got.exitCode, got.outputs, got.combined)
+			}
+		})
+	}
+}
+
 // Positive: the lookup asks the pulls API for the comment's pull request, with the token, and
 // publishes the head it answered when that head lives in this repository.
 func TestAdoptWorkflow_Positive_HeadLookupPublishesTheAnsweredHead(t *testing.T) {

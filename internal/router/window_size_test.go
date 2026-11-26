@@ -55,7 +55,7 @@ func checkWindowRecordLimit(t *testing.T, seed string, tc windowContractCase) {
 	t.Helper()
 	count := tc.Generate.Records
 	if tc.Expect.Result == "refused" {
-		requireWindowReadError(t, generatedWindowInput(t, seed, count), tc.Expect.Says)
+		requireWindowReadError(t, generatedWindowInput(t, seed, count), "record count before decode: "+tc.Expect.Says)
 		return
 	}
 	for _, size := range [...]int{20001, count} {
@@ -64,6 +64,18 @@ func checkWindowRecordLimit(t *testing.T, seed string, tc windowContractCase) {
 			last := contractSubscription + "-" + strconv.Itoa(size-1)
 			now := time.Date(2026, 10, 18, 9, 5, 0, 0, time.UTC)
 			requireWindowRoute(t, path, last, now, WindowWarn, "")
+		})
+	}
+}
+
+// TestWindowRecordCountStopsAtFirstExcessToken leaves record 25,001 unfinished. A decoder
+// that reads its contents, or attempts to decode the first number as a record, fails differently.
+func TestWindowRecordCountStopsAtFirstExcessToken(t *testing.T) {
+	const want = "record count before decode: snapshot has 25001 records, exceeds 25000"
+	for _, member := range [...]string{"records", `rec\u006frds`, "RECORDS"} {
+		t.Run(member, func(t *testing.T) {
+			body := `{"` + member + `":[` + strings.Repeat("0,", 25000) + "{"
+			requireWindowReadError(t, routingInput(t, body), want)
 		})
 	}
 }

@@ -262,6 +262,21 @@ entries:
       - "go.mod"
     packages:
       - "go:github.com/tekmora/epitrop"
+  - name: "jsonschema"
+    url: "https://github.com/santhosh-tekuri/jsonschema"
+    detail: "(`v6.0.3`)"
+    section: "shipped"
+    kind: "dependency"
+    relation: "shipped"
+    license: "Apache-2.0"
+    use: >-
+      Validates Epitrop catalog snapshots against their JSON Schema in `standardsctl` and serves as
+      the reference validator in the `tools/schemacheck` tests
+    paths:
+      - "go.mod"
+      - "tools/schemacheck/go.mod"
+    packages:
+      - "go:github.com/santhosh-tekuri/jsonschema/v6"
   - name: "go-yaml v3"
     url: "https://github.com/yaml/go-yaml"
     detail: "(`go.yaml.in/yaml/v3` v3.0.6)"
@@ -352,20 +367,6 @@ entries:
       - "internal/clientschema/upstream/manifest.json"
     match:
       - "anomalyco/opencode"
-  - name: "jsonschema"
-    url: "https://github.com/santhosh-tekuri/jsonschema"
-    detail: "(`v6.0.3`)"
-    section: "development"
-    kind: "dependency"
-    relation: "used by CI"
-    license: "Apache-2.0"
-    use: >-
-      The JSON Schema oracle of the test-only module `tools/schemacheck`; the production module does not
-      link it
-    paths:
-      - "tools/schemacheck/go.mod"
-    packages:
-      - "go:github.com/santhosh-tekuri/jsonschema/v6"
   - name: "go-toml v2"
     url: "https://github.com/pelletier/go-toml"
     detail: "(`v2.4.3`)"

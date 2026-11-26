@@ -103,6 +103,7 @@ func replayWindowContract(t *testing.T, dir string, tc windowContractCase) {
 	case "valid":
 		checkValidContractWindow(t, path, tc.Expect.Headroom[0].Now)
 		checkWindowEnvelope(t, path)
+		checkWindowTimestampFormat(t, path)
 		checkWindowByteLimit(t, path)
 	case "stale":
 		t.Run("at-max-age", func(t *testing.T) {
@@ -122,6 +123,31 @@ func replayWindowContract(t *testing.T, dir string, tc windowContractCase) {
 	default:
 		t.Fatalf("unhandled catalog contract case %q", tc.ID)
 	}
+}
+
+// checkWindowTimestampFormat distinguishes the RFC 3339 fraction separator from the comma
+// that time.Time also accepts. Both cases change only generated_at in the same snapshot.
+func checkWindowTimestampFormat(t *testing.T, path string) {
+	t.Helper()
+	const field = `"generated_at": "2026-10-18T09:00:00`
+	t.Run("comma-fraction", func(t *testing.T) {
+		bad := mutateWindowFixture(t, path, field+"Z", field+",5Z")
+		message := requireWindowReadError(t, bad, "/generated_at")
+		if !strings.Contains(message, "date-time") {
+			t.Fatalf("expected date-time format refusal, got %s", message)
+		}
+	})
+	t.Run("dot-fraction", func(t *testing.T) {
+		good := mutateWindowFixture(t, path, field+"Z", field+".5Z")
+		snapshot, err := LoadWindowSnapshot(testsupport.DeadlineContext(t), good)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := time.Date(2026, 10, 18, 9, 0, 0, 500_000_000, time.UTC)
+		if !snapshot.GeneratedAt.Equal(want) {
+			t.Fatalf("generated_at = %v, want %v", snapshot.GeneratedAt, want)
+		}
+	})
 }
 
 // checkWindowSourceRuns matches all producer outcomes, including the failed source's explanation.
