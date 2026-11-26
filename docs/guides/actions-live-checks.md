@@ -47,10 +47,12 @@ The audit asks only when every condition holds (`openActionsForge` in
 - A token is found: `GITHUB_TOKEN`, then `GH_TOKEN`, then the `gh` CLI session.
 
 When a precondition is missing, the live checks that would have run print `[SKIP]` with the reason.
-An online audit reads `GET /repos/{owner}/{repo}` once when the Actions, visibility or branch
-protection comparison needs it. The HTTP client follows redirects. The response must contain a
+An online audit shares one `GET /repos/{owner}/{repo}` across workflow history, job durations,
+release evidence, permissions, visibility and branch protection. The identity GET follows
+redirects only within the configured API scheme, hostname and port. The response must contain a
 valid `full_name` and an `owner.login` that matches its owner, ignoring case. The comparisons
-share the result, including any error. A timeout, HTTP 503 or inconsistent identity fails each
+use the returned coordinates for all later requests. An identity failure skips workflow history.
+A timeout, HTTP 503, cross-origin redirect or inconsistent identity fails each
 comparison that needs the repository. After a successful identity read, an unreadable permissions
 or branch protection endpoint can still produce a skip
 (`TestActionsRepositoryReadFailure`, `TestAuditRepositoryVisibility_InvalidIdentity`).
@@ -58,7 +60,9 @@ or branch protection endpoint can still produce a skip
 `praetorctl plan` previews declared Actions permissions under the same conditions. Permission
 drift is reported with a successful exit. A failed identity GET makes the plan exit with an error.
 `plan --remote` uses its remote connection for both permissions and branch protection, sharing the
-identity GET even when both comparisons run. `plan --offline` skips the live reads.
+identity GET even when both comparisons run. Remote sync uses that identity for rulesets,
+labels and repository metadata. Subsequent requests use the canonical paths and reject redirects.
+`plan --offline` skips the live reads.
 
 ### In Git hooks and CI
 
@@ -85,7 +89,7 @@ to migrate it to the offline hook.
 
 With `overrides.actions` declared, the audit uses the validated repository and owner to read
 `GET /repos/{full_name}/actions/permissions/workflow` and
-`GET /orgs/{owner.login}/actions/permissions/workflow` (`RepositorySettings.WorkflowPermissions`
+`GET /orgs/{owner.login}/actions/permissions/workflow` (`ResolvedRepository.WorkflowPermissions`
 in `internal/forge/actions_state.go`). The repository value requires read access to its
 administration settings. The organisation read is best effort. HTTP 401, 403 or 404 leaves the
 organisation value unknown, and the repository comparison proceeds. Other organisation read
@@ -264,7 +268,7 @@ The branch protection report explains each skip or decision to continue.
 | The manifest presence cannot be read, such as `origin/<default branch>` absent from the checkout | `[INFO]` naming the error, and the comparison runs: an unreadable presence never skips it (`TestAuditLiveBranchProtection_Negative_ManifestPresenceErrorDoesNotSkip`). |
 
 The declared status checks come from the checkout's workflows, using the same rendering as
-`plan --remote` and ruleset apply (`auditProtectionTarget`, `liveProtectionTarget`), less any
+`plan --remote` and ruleset apply (`auditProtectionTarget`, `declaredProtectionTarget`), less any
 declared check that the default branch does not report yet (`forge.UnreportedStatusContexts`).
 With a workflow-run report (`forge.AuditWorkflowRunHealth`), a check whose workflow has no
 completed run on the default branch is not compared yet

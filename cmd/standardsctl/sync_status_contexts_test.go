@@ -49,7 +49,7 @@ func TestDeclaredStatusContextsLiveAndDocumentation(t *testing.T) {
 	}
 	policy := config.DefaultPolicy().BranchProtection
 	policy.StatusContexts = []string{"evaluator/status"}
-	target, err := liveProtectionTarget(t.Context(), f.dir, manifest, policy, "acme/widgets")
+	target, err := declaredProtectionTarget(t.Context(), f.dir, manifest, policy, forge.ResolvedRepository{})
 	if err != nil || !slices.Equal(target.contexts, policy.StatusContexts) {
 		t.Fatalf("live comparison contexts = %v, error %v", target.contexts, err)
 	}

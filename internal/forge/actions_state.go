@@ -83,19 +83,20 @@ func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPer
 
 // WorkflowPermissions reads the two permission documents named by this repository snapshot.
 // The organisation read is best effort for user-owned repositories and restricted tokens.
-func (s RepositorySettings) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
-	if s.driver == nil {
+func (s ResolvedRepository) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
+	if s.session == nil {
 		return LiveWorkflowPermissions{}, fmt.Errorf("%w: repository settings required", ErrRepositoryIdentityRead)
 	}
 	if ctx == nil {
 		return LiveWorkflowPermissions{}, errors.New("read workflow permissions: context required")
 	}
-	repository, err := s.driver.readWorkflowPermissions(ctx, "/repos/"+s.fullName+"/actions/permissions/workflow")
+	driver := s.driver()
+	repository, err := driver.readWorkflowPermissions(ctx, "/repos/"+s.FullName()+"/actions/permissions/workflow")
 	if err != nil {
 		return LiveWorkflowPermissions{}, fmt.Errorf("read repository workflow permissions: %w", err)
 	}
 	live := LiveWorkflowPermissions{Repository: repository}
-	organisation, err := s.driver.readWorkflowPermissions(ctx, "/orgs/"+url.PathEscape(s.owner)+"/actions/permissions/workflow")
+	organisation, err := driver.readWorkflowPermissions(ctx, "/orgs/"+url.PathEscape(s.owner)+"/actions/permissions/workflow")
 	switch {
 	case err == nil:
 		live.Organisation = &organisation

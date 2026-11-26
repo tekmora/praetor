@@ -239,7 +239,7 @@ func TestLiveMergeQueueFindings(t *testing.T) {
 	if findings, err := LiveMergeQueueFindings(t.Context(), root, "acme/widgets", nil); err != nil || findings != nil {
 		t.Fatalf("nil live: %+v, %v", findings, err)
 	}
-	for _, repository := range [...]string{"", "missing-owner-and-slash"} {
+	for _, repository := range [...]string{"", "missing-owner-and-slash", "acme/.."} {
 		live := &LiveBranchProtection{Branch: "main", Rules: []LiveBranchRule{queue, checks}}
 		if _, err := LiveMergeQueueFindings(t.Context(), root, repository, live); err == nil {
 			t.Errorf("live queue accepted invalid repository %q", repository)

@@ -6,6 +6,7 @@ package forge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,12 +55,17 @@ func (f *repositoryTransport) RoundTrip(r *http.Request) (*http.Response, error)
 // read starts at the clone's configured owner and name and executes only against this transport.
 func (f *repositoryTransport) read(t *testing.T) (LiveWorkflowPermissions, error) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), defaultHTTPTimeout)
+	defer cancel()
+	return f.driver().WorkflowPermissions(ctx)
+}
+
+// driver configures the bootstrap reader with the old coordinates and the in-memory transport.
+func (f *repositoryTransport) driver() *GitHubDriver {
 	driver := NewGitHubDriver("fixture", "https://forge.invalid")
 	driver.SetRepository("old-org", "imago")
 	driver.HTTPClient.Transport = f
-	ctx, cancel := context.WithTimeout(t.Context(), defaultHTTPTimeout)
-	defer cancel()
-	return driver.WorkflowPermissions(ctx)
+	return driver
 }
 
 // repositoryFixture answers old repository permission URLs as a transferred repository would.
@@ -142,5 +148,76 @@ func TestWorkflowPermissionsUnreadableRepository(t *testing.T) {
 				t.Fatalf("requests after repository read failed = %v", stub.paths)
 			}
 		})
+	}
+}
+
+// TestRepositoryIdentityRedirectOrigin checks scheme, hostname and port on every redirect hop.
+func TestRepositoryIdentityRedirectOrigin(t *testing.T) {
+	const current = "/repos/new-org/imago"
+	for _, tc := range [...]struct {
+		origin string
+		allow  bool
+	}{
+		{"https://FORGE.invalid:443", true},
+		{"http://forge.invalid", false},
+		{"https://other.invalid", false},
+		{"https://forge.invalid:444", false},
+	} {
+		t.Run(tc.origin, func(t *testing.T) {
+			stub, paths := repositoryFixture("new-org", "imago")
+			stub.replies[fixtureRepository] = repositoryReply{status: http.StatusFound, location: "/redirect"}
+			stub.replies["/redirect"] = repositoryReply{status: http.StatusFound, location: tc.origin + current}
+			_, err := stub.read(t)
+			want := []string{fixtureRepository, "/redirect"}
+			if tc.allow {
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = append(want, paths[1:]...)
+			} else if !errors.Is(err, ErrRepositoryIdentityRead) {
+				t.Errorf("identity error = %v, want ErrRepositoryIdentityRead", err)
+			}
+			if !slices.Equal(stub.paths, want) {
+				t.Errorf("requests = %v, want %v", stub.paths, want)
+			}
+		})
+	}
+}
+
+// TestResolvedPermissionsRefuseRedirect rejects an attempt to read another repository's permissions.
+func TestResolvedPermissionsRefuseRedirect(t *testing.T) {
+	stub, _ := repositoryFixture("new-org", "imago")
+	const current = "/repos/new-org/imago"
+	stub.replies[current+workflowSuffix] = repositoryReply{
+		status: http.StatusTemporaryRedirect, location: fixtureRepository + workflowSuffix,
+	}
+	_, err := stub.read(t)
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Errorf("redirected permissions error = %v", err)
+	}
+	if want := []string{fixtureRepository, current, current + workflowSuffix}; !slices.Equal(stub.paths, want) {
+		t.Errorf("requests = %v, want %v", stub.paths, want)
+	}
+}
+
+// TestResolvedRepositoryKeepsConnection checks that retargeting the bootstrap driver cannot move a snapshot.
+func TestResolvedRepositoryKeepsConnection(t *testing.T) {
+	current, paths := repositoryFixture("new-org", "imago")
+	other, _ := repositoryFixture("new-org", "imago")
+	reader := current.driver()
+	ctx, cancel := context.WithTimeout(t.Context(), defaultHTTPTimeout)
+	defer cancel()
+	repository, err := reader.ReadRepositorySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.Endpoint = "https://other.invalid"
+	reader.SetRepository("other-org", "other-repo")
+	reader.HTTPClient.Transport = other
+	if _, err := repository.WorkflowPermissions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(current.paths, paths) || len(other.paths) != 0 {
+		t.Errorf("permission reads moved with the bootstrap driver: current %v, other %v", current.paths, other.paths)
 	}
 }

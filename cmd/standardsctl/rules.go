@@ -100,16 +100,16 @@ func resolveRulesForge(
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge assertions: %w", err)
 	}
-	repository, reader, readErr := rulesComparisonRepository(ctx, flags, manifest.Repository)
-	target, err := liveProtectionTarget(ctx, flags.root, manifest, policy.BranchProtection, repository)
+	repository, readErr := rulesComparisonRepository(ctx, flags, manifest.Repository)
+	target, err := declaredProtectionTarget(ctx, flags.root, manifest, policy.BranchProtection, repository)
 	if err != nil {
 		return nil, errors.Join(readErr, fmt.Errorf("resolve forge assertion target: %w", err))
 	}
 	states, err := assertedForgeStates(target)
-	if err != nil || reader == nil {
+	if err != nil || readErr != nil || !flags.remote {
 		return states, errors.Join(readErr, err)
 	}
-	_, findings, err := compareLiveProtection(ctx, reader, target)
+	_, findings, err := compareLiveProtection(ctx, target)
 	if err != nil {
 		return states, err
 	}
@@ -118,20 +118,15 @@ func resolveRulesForge(
 
 // rulesComparisonRepository selects the current identity for live evidence. Offline or after a
 // failed read, the manifest supplies local assertions and the report carries any read error.
-func rulesComparisonRepository(ctx context.Context, flags rulesAuditFlags, repo config.RepositoryMetadata) (string, protectionReader, error) {
-	declared := repo.Owner + "/" + repo.Name
+func rulesComparisonRepository(ctx context.Context, flags rulesAuditFlags, repo config.RepositoryMetadata) (forge.ResolvedRepository, error) {
 	if !flags.remote {
-		return declared, nil, nil
+		return forge.ResolvedRepository{}, nil
 	}
 	live, err := openRemoteForge(ctx, flags.root, repo, flags.remoteOpts)
 	if err != nil {
-		return declared, nil, err
+		return forge.ResolvedRepository{}, err
 	}
-	settings, err := live.repository()
-	if err != nil {
-		return declared, nil, err
-	}
-	return settings.FullName(), live.driver, nil
+	return live.repository()
 }
 
 func assertedForgeStates(target protectionTarget) (map[ruleregistry.ForgeSetting]ruleregistry.ForgeState, error) {

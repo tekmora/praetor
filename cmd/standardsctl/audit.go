@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/adopt"
@@ -177,6 +178,7 @@ func resolveCompanion(rootDir, explicit, name string) string {
 // runAuditGates executes every governance gate in order, stopping at the first failure.
 func runAuditGates(ctx context.Context, manifest *config.Manifest, opts *auditOptions) error {
 	rootDir := opts.rootDir
+	live := sync.OnceValue(func() actionsForge { return openActionsForge(ctx, rootDir, manifest.Repository, opts.offline) })
 	gates := []func() error{
 		func() error { return auditRepoIdentity(manifest, rootDir) },
 		// Order: engine-fr-rule-checks-20261027; CLI and MCP share these gates.
@@ -206,11 +208,11 @@ func runAuditGates(ctx context.Context, manifest *config.Manifest, opts *auditOp
 		},
 		func() error { return auditWorkflowTriggers(ctx, manifest, rootDir, opts.offline) },
 		func() error { return auditTestTimeouts(ctx, manifest, rootDir) },
-		func() error { return auditJobTimeouts(ctx, manifest, rootDir, opts.offline) },
+		func() error { return auditJobTimeouts(ctx, manifest, rootDir, live()) },
 		func() error { return auditBuildWarnings(ctx, manifest, rootDir) },
 		func() error { return auditReleaseToken(ctx, manifest, rootDir) },
 		func() error { return auditReleaseE2E(ctx, manifest, rootDir, opts.release) },
-		func() error { return auditReleaseTestLevels(ctx, manifest, rootDir, opts.release, opts.offline) },
+		func() error { return auditReleaseTestLevels(ctx, manifest, rootDir, opts.release, live()) },
 		func() error { return auditDeclaredLinters(ctx, manifest, rootDir, opts.effective, opts.linterLog) },
 		func() error { return auditPaperclipHarness(ctx, manifest, opts) },
 		func() error { return auditCavemanConfiguredSources(ctx, manifest, rootDir) },
@@ -223,7 +225,7 @@ func runAuditGates(ctx context.Context, manifest *config.Manifest, opts *auditOp
 		func() error { return auditBacklogCaps(ctx, rootDir, opts.effective) },
 		func() error { return auditModelCatalog(ctx, rootDir, time.Now()) },
 		func() error { return auditUIGates(rootDir, manifest) },
-		func() error { return auditLiveForge(ctx, manifest, rootDir, &opts.effective.Policy, opts.offline) },
+		func() error { return auditLiveForge(ctx, manifest, rootDir, &opts.effective.Policy, live()) },
 		func() error { return auditExpiredExceptions(manifest, time.Now()) },
 	}
 
@@ -627,18 +629,17 @@ func auditTestTimeouts(ctx context.Context, manifest *config.Manifest, rootDir s
 
 // auditJobTimeouts runs the job-timeout gate (forge.AuditJobTimeouts): every job running steps
 // declares timeout-minutes; findings warn and the gate passes.
-func auditJobTimeouts(ctx context.Context, manifest *config.Manifest, rootDir string, offline bool) error {
+func auditJobTimeouts(ctx context.Context, manifest *config.Manifest, rootDir string, live actionsForge) error {
 	branch, branchErr := forge.RepositoryDefaultBranch(ctx, rootDir, manifest)
-	live := openActionsForge(ctx, rootDir, manifest.Repository, offline)
-	offlineReason := live.notMade
-	if live.reader != nil && branchErr != nil && offlineReason == "" {
+	reader, offlineReason := live.actionsReader()
+	if reader != nil && branchErr != nil {
 		offlineReason = fmt.Sprintf("could not determine repository default branch: %v", branchErr)
 	}
 	out, err := forge.AuditJobTimeouts(ctx, forge.JobTimeoutOptions{
 		Root:          rootDir,
 		Exceptions:    manifest.Exceptions,
 		Today:         time.Now(),
-		Reader:        live.reader,
+		Reader:        reader,
 		OfflineReason: offlineReason,
 		Branch:        branch,
 	})

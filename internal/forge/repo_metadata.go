@@ -164,40 +164,35 @@ func VisibilityDrift(declared, live string) string {
 // ErrRepositoryIdentityRead marks a failed repository GET or an invalid identity in its response.
 var ErrRepositoryIdentityRead = errors.New("read repository identity")
 
-// RepositorySettings holds the visibility and validated identity from one repository GET.
-type RepositorySettings struct {
-	Visibility string
-	owner      string
-	fullName   string
-	driver     *GitHubDriver
-}
-
-// FullName returns the validated owner/name used to select repository-specific status checks.
-func (s RepositorySettings) FullName() string { return s.fullName }
-
-// ReadRepositorySettings reads the repository object at the configured coordinates, following
-// redirects through the driver's HTTP client. It returns settings only when full_name and owner.login agree.
-func (g *GitHubDriver) ReadRepositorySettings(ctx context.Context) (RepositorySettings, error) {
+// ReadRepositorySettings resolves a repository through its API, allowing redirects within that origin.
+func (g *GitHubDriver) ReadRepositorySettings(ctx context.Context) (ResolvedRepository, error) {
 	if err := g.Authenticate(ctx); err != nil {
-		return RepositorySettings{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
+		return ResolvedRepository{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
 	defer cancel()
-	live, err := g.getRepositoryMetadata(ctx)
+	reader := *g
+	client := identityHTTPClient(g.HTTPClient)
+	reader.HTTPClient = &client
+	live, err := reader.getRepositoryMetadata(ctx)
 	if err != nil {
-		return RepositorySettings{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
+		return ResolvedRepository{}, fmt.Errorf("%w: %w", ErrRepositoryIdentityRead, err)
 	}
-	owner, _, err := util.SplitGitHubRepository(live.FullName)
+	owner, name, err := util.SplitGitHubRepository(live.FullName)
 	if err != nil {
-		return RepositorySettings{}, fmt.Errorf("%w: full_name: %w", ErrRepositoryIdentityRead, err)
+		return ResolvedRepository{}, fmt.Errorf("%w: full_name: %w", ErrRepositoryIdentityRead, err)
 	}
 	if err := util.ValidateGitHubOwner(live.Owner.Login); err != nil {
-		return RepositorySettings{}, fmt.Errorf("%w: owner.login: %w", ErrRepositoryIdentityRead, err)
+		return ResolvedRepository{}, fmt.Errorf("%w: owner.login: %w", ErrRepositoryIdentityRead, err)
 	}
 	if !strings.EqualFold(owner, live.Owner.Login) {
-		return RepositorySettings{}, fmt.Errorf("%w: owner.login %q disagrees with full_name %q", ErrRepositoryIdentityRead, live.Owner.Login, live.FullName)
+		return ResolvedRepository{}, fmt.Errorf("%w: owner.login %q disagrees with full_name %q", ErrRepositoryIdentityRead, live.Owner.Login, live.FullName)
 	}
-	return RepositorySettings{Visibility: live.Visibility, owner: live.Owner.Login, fullName: live.FullName, driver: g}, nil
+	client.CheckRedirect = refuseRepositoryRedirect
+	return ResolvedRepository{
+		apiBase: reader.Endpoint, owner: owner, name: name, Visibility: live.Visibility,
+		session: &repositorySession{token: reader.Token, client: client},
+	}, nil
 }
 
 // RepositoryVisibility reads the repository object from GitHub and returns its visibility.

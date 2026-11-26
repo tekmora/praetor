@@ -94,7 +94,7 @@ func TestAuditReleaseTestLevels_GateAndAuditWiring(t *testing.T) {
 	manifest := &config.Manifest{Profiles: []string{"framework"}}
 	// Non-release context warns without failing.
 	warnOut, warnErr := captureStdout(t, func() error {
-		return auditReleaseTestLevels(t.Context(), manifest, f.dir, false, true)
+		return auditReleaseTestLevels(t.Context(), manifest, f.dir, false, actionsForge{notMade: "--offline"})
 	})
 	if warnErr != nil || !strings.Contains(warnOut, "[WARN] Release test levels:") {
 		t.Fatalf("expected [WARN] outside release context, got out=%q err=%v", warnOut, warnErr)
@@ -165,7 +165,7 @@ func TestAuditReleaseTestLevels_LiveForgeHealthAndOffline(t *testing.T) {
 		return auditReleaseTestLevels(t.Context(), &config.Manifest{
 			Repository: config.RepositoryMetadata{Owner: "acme", Name: "widgets"},
 			Profiles:   []string{"framework"},
-		}, f.dir, true, true)
+		}, f.dir, true, actionsForge{notMade: "--offline"})
 	})
 	if offErr == nil || !strings.Contains(offErr.Error(), "no Actions reader") {
 		t.Fatalf("expected --offline release test levels to refuse missing live access, got out=%q err=%v", offOut, offErr)

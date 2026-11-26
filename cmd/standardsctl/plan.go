@@ -175,7 +175,7 @@ func planRemoteProtection(ctx context.Context, rootDir string, manifest *config.
 	if err != nil {
 		return err
 	}
-	drifted, err := reportLiveProtection(ctx, live.driver, target, "compared with the declared policy", false)
+	drifted, err := reportLiveProtection(ctx, target, "compared with the declared policy", false)
 	if err != nil {
 		return err
 	}

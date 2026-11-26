@@ -21,17 +21,11 @@ var protectionTags = map[forge.ProtectionVerdict]string{
 // protectionTarget is the branch whose live protection is compared, and what it is compared
 // with: the resolved branch protection policy and the status checks the ruleset requires there.
 type protectionTarget struct {
-	repository string
+	repository forge.ResolvedRepository
 	branch     string
 	policy     config.BranchProtectionPolicy
 	contexts   []string
 	renames    []forge.StatusContextRename
-}
-
-// protectionReader reads what the forge enforces on a branch: forge.GitHubDriver, or a stand-in
-// in tests.
-type protectionReader interface {
-	ReadBranchProtection(ctx context.Context, branch string) (*forge.LiveBranchProtection, error)
 }
 
 // protectionTarget selects required checks for the repository identified by the shared GET.
@@ -40,16 +34,21 @@ func (live actionsForge) protectionTarget(ctx context.Context, rootDir string, m
 	if err != nil {
 		return protectionTarget{}, err
 	}
-	return liveProtectionTarget(ctx, rootDir, manifest, policy, settings.FullName())
+	return declaredProtectionTarget(ctx, rootDir, manifest, policy, settings)
 }
 
-// liveProtectionTarget selects the default branch and the checks its workflows require in repository.
-func liveProtectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, repository string) (protectionTarget, error) {
+// declaredProtectionTarget selects the default branch and required checks. Only local assertions
+// use the manifest coordinates when the command has no resolved repository.
+func declaredProtectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, repository forge.ResolvedRepository) (protectionTarget, error) {
 	branch, err := forge.RepositoryDefaultBranch(ctx, rootDir, manifest)
 	if err != nil {
 		return protectionTarget{}, err
 	}
-	contexts, _, err := remoteStatusContexts(ctx, rootDir, repository, policy.MergeQueue, nil, forge.WithDeclaredStatusContexts(policy.StatusContexts))
+	fullName := repository.FullName()
+	if fullName == "" {
+		fullName = manifest.Repository.Owner + "/" + manifest.Repository.Name
+	}
+	contexts, _, err := remoteStatusContexts(ctx, rootDir, fullName, policy.MergeQueue, nil, forge.WithDeclaredStatusContexts(policy.StatusContexts))
 	if err != nil {
 		return protectionTarget{}, err
 	}
@@ -65,12 +64,12 @@ func (e *forgeReadError) Error() string { return e.err.Error() }
 
 func (e *forgeReadError) Unwrap() error { return e.err }
 
-// compareLiveProtection reads what the forge enforces on the target branch through reader, from
+// compareLiveProtection reads what the forge enforces on the target branch through its resolved repository, from
 // its rulesets and its legacy protection object alike (forge.GitHubDriver.ReadBranchProtection),
 // and compares it with the declared policy property by property (forge.EvaluateBranchProtection).
 // A failed read is a *forgeReadError; a failed comparison is not.
-func compareLiveProtection(ctx context.Context, reader protectionReader, target protectionTarget) (*forge.LiveBranchProtection, []forge.ProtectionFinding, error) {
-	live, err := reader.ReadBranchProtection(ctx, target.branch)
+func compareLiveProtection(ctx context.Context, target protectionTarget) (*forge.LiveBranchProtection, []forge.ProtectionFinding, error) {
+	live, err := target.repository.ReadBranchProtection(ctx, target.branch)
 	if err != nil {
 		return nil, nil, &forgeReadError{err: fmt.Errorf("read the live branch protection of %s: %w", target.branch, err)}
 	}
@@ -84,14 +83,14 @@ func compareLiveProtection(ctx context.Context, reader protectionReader, target 
 // reportLiveProtection compares the live branch protection of the target branch with the
 // declared policy (compareLiveProtection), prints it under heading, and returns the declared
 // properties the branch does not enforce. driftOnly prints only those, and the mechanisms found.
-func reportLiveProtection(ctx context.Context, reader protectionReader, target protectionTarget, heading string, driftOnly bool) ([]string, error) {
-	live, findings, err := compareLiveProtection(ctx, reader, target)
+func reportLiveProtection(ctx context.Context, target protectionTarget, heading string, driftOnly bool) ([]string, error) {
+	live, findings, err := compareLiveProtection(ctx, target)
 	if err != nil {
 		return nil, err
 	}
 	drifted := forge.ProtectionDrifts(findings)
 	fmt.Printf("  [INFO] Live branch protection of %s on GitHub for %s, %s: %s\n",
-		target.branch, target.repository, heading, describeMechanisms(live))
+		target.branch, target.repository.FullName(), heading, describeMechanisms(live))
 	stricter := false
 	for i := 0; i < len(findings); i++ {
 		finding := findings[i]

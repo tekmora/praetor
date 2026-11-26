@@ -13,6 +13,7 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/util"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -295,8 +296,8 @@ func LiveMergeQueueFindings(ctx context.Context, repoPath, repository string, li
 	if live == nil || !live.HasActiveRule(MergeQueueRule) {
 		return nil, nil
 	}
-	if !config.ValidRepositoryIdentity(repository) {
-		return nil, fmt.Errorf("live merge queue requires an owner/name repository, got %q", repository)
+	if _, _, err := util.SplitGitHubRepository(repository); err != nil {
+		return nil, fmt.Errorf("live merge queue requires an owner/name repository: %w", err)
 	}
 	enforcement, err := collectEnforcement(live)
 	if err != nil {
