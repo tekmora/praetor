@@ -854,8 +854,8 @@ unenforced rules. In `standardsctl rules audit --json`, each rule carries both `
 | `present` | `false` | every declared pointer is local and resolved structurally in the working tree |
 | `forge-observed` | `true` | every declared pointer resolved, no required forge setting is pending, and at least one `forge:` setting matched live read-back |
 | `forge-pending` | `false` | every local pointer resolved and at least one required `forge:` setting is asserted without live read-back |
-| `unresolved` | `false` | a declared pointer failed structural resolution, lacked evidence, or mismatched live forge read-back |
-| `guidance` | `false` | the rule has class `guidance` or no registry entry (`prose-only`); reported without failing |
+| `unresolved` | `false` | a declared pointer failed structural resolution, lacked evidence, or mismatched live forge read-back; also a `guidance` entry that declares evidence, which fails registry validation (`unresolved: guidance carries evidence`) |
+| `guidance` | `false` | the rule has class `guidance` with no declared evidence, or no registry entry (`prose-only`); reported without failing |
 
 The registry runs no local gate and reads no receipt, so structural pointer resolution alone reports
 `status` `present` with `enforced: false`. A committed branch-protection policy is an assertion, not
