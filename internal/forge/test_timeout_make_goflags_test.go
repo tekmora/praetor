@@ -72,6 +72,7 @@ func TestAuditTestTimeouts_MakeImplicitGOFLAGS(t *testing.T) {
 	}
 }
 
+// assertMakeGOFLAGSReference verifies that the go env GOFLAGS process launched by the GNU Make recipe prints exactly want for the requested goals.
 func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []string) {
 	t.Helper()
 
@@ -84,10 +85,19 @@ func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []stri
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	// Seed Go's native telemetry mode before any recipe starts a Go process.
+	// The test-harness override keeps telemetry out of the user's config dir.
+	telemetryDir := filepath.Join(dir, "telemetry")
+	if err := os.Mkdir(telemetryDir, util.SecureDirPerm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(telemetryDir, "mode"), []byte("off\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	bin := filepath.Join(runtime.GOROOT(), "bin")
-	env := []string{"PATH=" + bin, "LC_ALL=C", "HOME=" + dir, "GOENV=off", "GOTOOLCHAIN=local", "GOFLAGS="}
+	env := []string{"PATH=" + bin, "LC_ALL=C", "GOENV=off", "GOTOOLCHAIN=local", "GOFLAGS=", "TEST_TELEMETRY_DIR=" + telemetryDir}
 	if runtime.GOOS == "windows" {
 		for _, key := range []string{"ComSpec", "SystemRoot"} {
 			if value, ok := os.LookupEnv(key); ok {
