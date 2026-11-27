@@ -9,7 +9,9 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -460,6 +462,78 @@ func TestTestPrepare_Negative_CommandNotOnPathFailsByName(t *testing.T) {
 				assertMissingBinaryStageFailure(t, kind, tc.yaml, tc.missing)
 			})
 		}
+	}
+}
+
+// TestHostToolchainHave checks explicit worktree paths and unchanged bare-name lookups.
+func TestHostToolchainHave(t *testing.T) {
+	dir := t.TempDir()
+	const present = "prep-tool.exe"
+	const missing = "missing-tool.exe"
+	if err := os.WriteFile(filepath.Join(dir, present), []byte("lookup only\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := stageConfig{lookPath: exec.LookPath}
+	have := cfg.hostToolchain().have
+	explicit := "." + string(filepath.Separator)
+	if err := have(t.Context(), dir, explicit+present); err != nil {
+		t.Fatalf("worktree command was not found: %v", err)
+	}
+	if err := have(t.Context(), dir, explicit+missing); !errors.Is(err, errNotOnPath) {
+		t.Fatalf("missing worktree command: got %v, want errNotOnPath", err)
+	}
+
+	var calls []string
+	lookupErr := errors.New("injected lookup failure")
+	cfg.lookPath = func(name string) (string, error) {
+		calls = append(calls, name)
+		return "", lookupErr
+	}
+	checked := cfg.hostToolchain().have
+	bareNames := []string{"prep-tool"}
+	if !os.IsPathSeparator('\\') {
+		bareNames = append(bareNames, `prep\tool`)
+	}
+	for _, name := range bareNames {
+		if err := checked(t.Context(), dir, name); !errors.Is(err, lookupErr) || !errors.Is(err, errNotOnPath) {
+			t.Fatalf("lookup for %q did not preserve both errors: %v", name, err)
+		}
+	}
+	if !slices.Equal(calls, bareNames) {
+		t.Fatalf("lookup got %q, want unchanged bare names %q", calls, bareNames)
+	}
+	calls = nil
+	if err := checked(t.Context(), ".", explicit+present); !errors.Is(err, lookupErr) || !errors.Is(err, errNotOnPath) {
+		t.Fatalf("explicit lookup from dot did not preserve both errors: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("explicit lookup from dot: got %d calls, want one", len(calls))
+	}
+	if prefix, _ := filepath.Split(calls[0]); prefix == "" {
+		t.Fatalf("explicit lookup from dot became a bare-name lookup: %q", calls[0])
+	}
+}
+
+// TestHostToolchainHaveSymlinkParent checks that the filesystem resolves .. after a symlink.
+func TestHostToolchainHaveSymlinkParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix symlink traversal semantics")
+	}
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "physical")
+	subdir := filepath.Join(parent, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(subdir, filepath.Join(dir, "via")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "prep"), []byte("lookup only\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := stageConfig{lookPath: exec.LookPath}
+	if err := cfg.hostToolchain().have(t.Context(), dir, "./via/../prep"); err != nil {
+		t.Fatalf("command in the symlink target's parent was not found: %v", err)
 	}
 }
 
