@@ -85,40 +85,15 @@ func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []stri
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	// Seed Go's native telemetry mode before any recipe starts a Go process.
-	// The test-harness override keeps telemetry out of the user's config dir.
-	telemetryDir := filepath.Join(dir, "telemetry")
-	if err := os.Mkdir(telemetryDir, util.SecureDirPerm); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(telemetryDir, "mode"), []byte("off\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	bin := filepath.Join(runtime.GOROOT(), "bin")
-	env := []string{"PATH=" + bin, "LC_ALL=C", "GOENV=off", "GOTOOLCHAIN=local", "GOFLAGS=", "TEST_TELEMETRY_DIR=" + telemetryDir}
-	if runtime.GOOS == "windows" {
-		for _, key := range []string{"ComSpec", "SystemRoot"} {
-			if value, ok := os.LookupEnv(key); ok {
-				env = append(env, key+"="+value)
-			}
-		}
-	}
-	ctx, err = util.WithCommandEnvironment(ctx, env)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ctx, goCommand := makeGOFLAGSCommandContext(t, ctx, dir)
 	if out, err := util.RunCommand(ctx, dir, makePath, "--version"); err != nil || !strings.HasPrefix(out, "GNU Make ") {
 		t.Skip("GNU Make is not available")
 	}
 
 	// Only the Make oracle copy is rewritten. Relative redirections work in
 	// both sh and cmd without interpolating the temporary directory into a recipe.
-	goCommand := "go"
-	if runtime.GOOS == "windows" {
-		goCommand = "go.exe"
-	}
 	oracle := strings.NewReplacer(
 		"go test -timeout=30m ./...", goCommand+" env GOFLAGS > goflags.log",
 		"; @:\n", "; @echo noop > noop.log\n",
@@ -133,9 +108,72 @@ func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != want {
+	if strings.ReplaceAll(string(got), "\r\n", "\n") != want {
 		t.Fatalf("Make recipe's go env GOFLAGS emitted %q; want %q", got, want)
 	}
+}
+
+// installMakeGOFLAGSTelemetryOff installs the telemetry-off marker before
+// toolchain discovery and returns the directory to pass to Make recipes.
+func installMakeGOFLAGSTelemetryOff(t *testing.T, dir string) string {
+	t.Helper()
+
+	telemetryDir := filepath.Join(dir, "telemetry")
+	if err := os.Mkdir(telemetryDir, util.SecureDirPerm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(telemetryDir, "mode"), []byte("off\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_TELEMETRY_DIR", telemetryDir)
+	return telemetryDir
+}
+
+// makeGOFLAGSCommandContext discovers the installed toolchain with the host
+// environment, then gives Make only the toolchain's native bin directory on PATH.
+func makeGOFLAGSCommandContext(t *testing.T, ctx context.Context, dir string) (context.Context, string) {
+	t.Helper()
+
+	telemetryDir := installMakeGOFLAGSTelemetryOff(t, dir)
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goPath, err = filepath.Abs(goPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the host environment for discovery: the host's go may be a shim.
+	root, err := util.RunCommand(ctx, dir, goPath, "env", "GOROOT")
+	if err != nil {
+		t.Fatalf("go env GOROOT: %v", err)
+	}
+	root = strings.TrimRight(root, "\r\n")
+	if !filepath.IsAbs(root) {
+		t.Fatalf("go env GOROOT returned a non-absolute path: %q", root)
+	}
+	bin := filepath.Join(root, "bin")
+	goCommand := "go"
+	if runtime.GOOS == "windows" {
+		goCommand = "go.exe"
+	}
+	if _, err := exec.LookPath(filepath.Join(bin, goCommand)); err != nil {
+		t.Fatalf("installed Go executable: %v", err)
+	}
+
+	env := []string{"PATH=" + bin, "LC_ALL=C", "GOENV=off", "GOTOOLCHAIN=local", "GOFLAGS=", "TEST_TELEMETRY_DIR=" + telemetryDir}
+	if runtime.GOOS == "windows" {
+		for _, key := range []string{"ComSpec", "SystemRoot"} {
+			if value, ok := os.LookupEnv(key); ok {
+				env = append(env, key+"="+value)
+			}
+		}
+	}
+	childCtx, err := util.WithCommandEnvironment(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return childCtx, goCommand
 }
 
 // writeMakeGOFLAGSFixture installs the oracle Makefile and prerequisite files.
