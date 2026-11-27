@@ -1130,6 +1130,7 @@ func replayMakefileRecipeWithGNU(t *testing.T, makePath string, probe []byte, en
 	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(oracle), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission, go_file-permissions_rule-fileperm -- GNU Make executes this native probe directly, so the private copy needs owner execute permission on Unix.
 	if err := os.WriteFile(filepath.Join(root, "recipe-probe.exe"), probe, 0o700); err != nil {
 		t.Fatal(err)
 	}

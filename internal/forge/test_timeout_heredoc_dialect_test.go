@@ -26,17 +26,11 @@ func TestTimeoutAudit_HeredocDialect(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			dir := filepath.Join(root, ".github", "workflows")
-			if err := os.MkdirAll(dir, 0700); err != nil {
-				t.Fatal(err)
-			}
 			yaml := "name: timeout\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: " + tc.shell + "\n        run: |\n"
 			for _, line := range strings.Split(strings.TrimSuffix(tc.script, "\n"), "\n") {
 				yaml += "          " + line + "\n"
 			}
-			if err := os.WriteFile(filepath.Join(dir, "timeout.yml"), []byte(yaml), 0600); err != nil {
-				t.Fatal(err)
-			}
+			writeWorkflowFixture(t, root, "timeout.yml", yaml)
 			out, err := AuditTestTimeouts(context.Background(), TestTimeoutOptions{Root: root})
 			assertHeredocAuditResult(t, out, err, tc.want)
 		})

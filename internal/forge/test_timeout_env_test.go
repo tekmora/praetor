@@ -6,8 +6,6 @@ package forge
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -92,13 +90,7 @@ func TestAuditTestTimeouts_WorkflowProofRegressions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			dir := filepath.Join(root, ".github", "workflows")
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "ci.yml"), []byte(header+tc.steps), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeWorkflowFixture(t, root, "ci.yml", header+tc.steps)
 			out, err := AuditTestTimeouts(context.Background(), TestTimeoutOptions{Root: root})
 			assertWorkflowProofResult(t, out, err, tc.want)
 		})
