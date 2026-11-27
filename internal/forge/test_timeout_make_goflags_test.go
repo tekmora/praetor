@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cordanaLLM/praetor/internal/testsupport"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
@@ -75,20 +76,29 @@ func TestAuditTestTimeouts_MakeImplicitGOFLAGS(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertTimeoutFile(t, "Makefile", tc.fixture, tc.audit)
-			assertMakeGOFLAGSReference(t, tc.fixture, tc.flags, tc.goals)
+			t.Run("oracle", func(t *testing.T) {
+				var makePath string
+				if tc.name == "private builtin parent" {
+					makePath = testsupport.GNUMake(t)
+				}
+				assertMakeGOFLAGSReference(t, makePath, tc.fixture, tc.flags, tc.goals)
+			})
 		})
 	}
 }
 
 // assertMakeGOFLAGSReference verifies that the go env GOFLAGS process launched by the GNU Make recipe prints exactly want for the requested goals.
-func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []string) {
+func assertMakeGOFLAGSReference(t *testing.T, makePath, fixture, want string, goals []string) {
 	t.Helper()
 
-	makePath, err := exec.LookPath("make")
-	if err != nil {
-		t.Skip("GNU Make is not available")
+	if makePath == "" {
+		var err error
+		makePath, err = exec.LookPath("make")
+		if err != nil {
+			t.Skip("GNU Make is not available")
+		}
 	}
-	makePath, err = filepath.Abs(makePath)
+	makePath, err := filepath.Abs(makePath)
 	if err != nil {
 		t.Fatal(err)
 	}
