@@ -468,11 +468,8 @@ func TestTestPrepare_Negative_CommandNotOnPathFailsByName(t *testing.T) {
 // TestHostToolchainHave checks explicit worktree paths and unchanged bare-name lookups.
 func TestHostToolchainHave(t *testing.T) {
 	dir := t.TempDir()
-	const present = "prep-tool.exe"
-	const missing = "missing-tool.exe"
-	if err := os.WriteFile(filepath.Join(dir, present), []byte("lookup only\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	present := filepath.Base(testsupport.BuildExecutable(t, dir, "prep-tool", "package main\nfunc main() {}\n"))
+	missing := testsupport.ExecutableName("missing-tool")
 	cfg := stageConfig{lookPath: exec.LookPath}
 	have := cfg.hostToolchain().have
 	explicit := "." + string(filepath.Separator)
@@ -520,19 +517,20 @@ func TestHostToolchainHaveSymlinkParent(t *testing.T) {
 		t.Skip("requires Unix symlink traversal semantics")
 	}
 	dir := t.TempDir()
-	parent := filepath.Join(dir, "physical")
-	subdir := filepath.Join(parent, "subdir")
-	if err := os.MkdirAll(subdir, 0o755); err != nil {
+	parent, err := os.MkdirTemp(dir, "physical")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subdir, err := os.MkdirTemp(parent, "subdir")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(subdir, filepath.Join(dir, "via")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(parent, "prep"), []byte("lookup only\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	present := filepath.Base(testsupport.BuildExecutable(t, parent, "prep", "package main\nfunc main() {}\n"))
 	cfg := stageConfig{lookPath: exec.LookPath}
-	if err := cfg.hostToolchain().have(t.Context(), dir, "./via/../prep"); err != nil {
+	if err := cfg.hostToolchain().have(t.Context(), dir, "./via/../"+present); err != nil {
 		t.Fatalf("command in the symlink target's parent was not found: %v", err)
 	}
 }
