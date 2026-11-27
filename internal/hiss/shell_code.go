@@ -15,7 +15,7 @@ import (
 // here-document bodies blanked. A spliced line's code starts in the first slot of the join.
 // ok is false if the line bound is exceeded or the lexer leaves a construct unreadable or open.
 func ShellCode(script string, maxLines int) (lines []string, ok bool) {
-	reader, ok := newShellCodeReader(script, maxLines)
+	reader, ok := newShellCodeReader(script, maxLines, false)
 	if !ok {
 		return nil, false
 	}
@@ -50,7 +50,7 @@ type shellCodeReader struct {
 }
 
 // newShellCodeReader constructs a shellCodeReader by splitting script lines and resolving backslash splices up to maxLines.
-func newShellCodeReader(script string, maxLines int) (shellCodeReader, bool) {
+func newShellCodeReader(script string, maxLines int, portableHeredoc bool) (shellCodeReader, bool) {
 	physical := strings.Split(strings.ReplaceAll(script, "\r\n", "\n"), "\n")
 	if len(physical) > maxLines {
 		return shellCodeReader{}, false
@@ -76,7 +76,7 @@ func newShellCodeReader(script string, maxLines int) (shellCodeReader, bool) {
 		}
 	}
 	text := flat.String()
-	return shellCodeReader{text: text, code: text, lines: lines}, true
+	return shellCodeReader{text: text, code: text, lines: lines, lex: shellLexer{portableHeredoc: portableHeredoc}}, true
 }
 
 // readable reports whether the lexer finished without parsing errors or unclosed shell structures.
@@ -90,14 +90,18 @@ func (r *shellCodeReader) read(emit func(int, string)) {
 	for r.physical < len(r.lines) && !r.lex.misread {
 		start := r.physical
 		if len(r.lex.bodies) > 0 {
-			r.lex.bodyLine(r.lines[start].raw)
+			line := r.lines[start]
+			r.lex.bodyLine(line.raw, line.spliced)
 			r.finishLine()
 		} else {
 			code := r.scanLine()
 			if emit != nil {
 				emit(start, code)
 			}
-			r.lex.startBodies()
+			// scanLine has crossed any code splices, but stops at a comment's physical newline.
+			if r.physical+1 < len(r.lines) {
+				r.lex.startBodies()
+			}
 		}
 		r.physical++
 	}

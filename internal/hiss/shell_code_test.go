@@ -94,6 +94,71 @@ func TestShellCode_ContinuationBoundaries(t *testing.T) {
 	}
 }
 
+func TestShellCode_HeredocNewlineAndDelimiterBoundaries(t *testing.T) {
+	const after = "go test -timeout 45m"
+	for _, tc := range []struct {
+		name   string
+		before string
+		ok     bool
+	}{
+		{"newline on opening line", "cat <<EOF\ngo test -timeout 99m\nEOF\n", true},
+		{"newline inside single quote", "cat <<EOF; echo 'one\nEOF\ntwo'\ngo test -timeout 99m\nEOF\n", true},
+		{"newline inside double quote after code splice", "cat <<EOF; \\\necho \"one\ntwo\"\ngo test -timeout 99m\nEOF\n", true},
+		{"comment ends despite trailing backslash", "cat <<EOF # comment\\\ngo test -timeout 99m\nEOF\n", true},
+		{"substitution activates only its own body", "cat <<OUT; echo \"$(cat <<IN\ngo test -timeout 99m\nI\\\nN\nprintf x\n)\"\ngo test -timeout 99m\nOUT\n", true},
+		{"unquoted delimiter across three physical lines", "cat <<EOF\ngo test -timeout 99m\nE\\\nO\\\nF\n", true},
+		{"even trailing backslashes do not join", "cat <<EOF\ngo test -timeout 99m\\\\\nEOF\n", true},
+		{"queued tab-stripped and quoted delimiters", "cat <<-ONE <<'TWO'\n\tO\\\nNE\nT\\\nWO\ngo test -timeout 99m\nTWO\n", true},
+		{"quote never reaches a shell newline", "cat <<EOF; echo 'one\nEOF\n", false},
+		{"quoted delimiter cannot close across a splice", "cat <<'EOF'\nE\\\nOF\n", false},
+		{"delimiter-looking suffix of joined body line", "cat <<EOF\nnot-\\\nEOF\n", false},
+		{"tabs inside joined delimiter are not stripped", "cat <<-EOF\nE\\\n\tOF\n", false},
+		{"matching prefix still continues", "cat <<EOF\nEOF\\\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkHeredocBoundary(t, tc.before, after, tc.ok)
+		})
+	}
+}
+
+// checkHeredocBoundary checks that both parsers agree on validity and hide the body when valid.
+func checkHeredocBoundary(t *testing.T, before, after string, ok bool) {
+	t.Helper()
+	script := before + after
+	limit := strings.Count(script, "\n") + 1
+	lines, codeOK := ShellCode(script, limit)
+	commands, commandsOK := ShellCodeCommands(script, limit, nil)
+	if codeOK != ok || commandsOK != ok {
+		t.Fatalf("ShellCode ok = %v, ShellCodeCommands ok = %v; want %v", codeOK, commandsOK, ok)
+	}
+	if !ok {
+		return
+	}
+	if len(lines) != limit || lines[limit-1] != after || strings.Contains(strings.Join(lines, "\n"), "99m") {
+		t.Fatalf("ShellCode = %q; want body commands blanked and %q in the last slot", lines, after)
+	}
+	checkHeredocTrailingGoCommand(t, commands, limit-1, len(before), after)
+}
+
+// checkHeredocTrailingGoCommand checks that only the source-aligned go command after the body remains.
+func checkHeredocTrailingGoCommand(t *testing.T, commands []ShellCodeCommand, line, offset int, after string) {
+	t.Helper()
+	var goCommands []ShellCodeCommand
+	for _, command := range commands {
+		if command.Words[0].Value == "go" {
+			goCommands = append(goCommands, command)
+		}
+	}
+	if len(goCommands) != 1 || goCommands[0].Line != line {
+		t.Fatalf("go commands = %+v; want only the command after the body on line %d", goCommands, line)
+	}
+	words := goCommands[0].Words
+	if len(words) != 4 || words[0].Span != [2]int{offset, offset + len("go")} ||
+		words[1].Value != "test" || words[2].Value != "-timeout" || words[3].Value != "45m" {
+		t.Fatalf("words = %+v; want source-aligned %q", words, after)
+	}
+}
+
 // TestShellCodeCommands_SourceWords tests extraction of command words, source text, and values across substitutions and continuations.
 func TestShellCodeCommands_SourceWords(t *testing.T) {
 	script := "NOTE=$(printf x)#tag go test -time\\\nout \"45m\" # -timeout 99m\\\ntrue"

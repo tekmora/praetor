@@ -20,13 +20,16 @@ type timeoutEnvWrite struct {
 
 const timeoutEnvPath = `(?:"\$(?:GITHUB_ENV|\{GITHUB_ENV\})"|\$(?:GITHUB_ENV\b|\{GITHUB_ENV\}))`
 
+// Guarded expansions establish a possible sink, not a proven literal append.
+const timeoutEnvSinkPath = `(?:` + timeoutEnvPath + `|"\$\{GITHUB_ENV:\?\}"|\$\{GITHUB_ENV:\?\})`
+
 var (
 	// Recognize an explicit PowerShell sink without interpreting its arguments as records.
 	timeoutEnvPowerShell = regexp.MustCompile(`(?im)^[ \t]*Add-Content[ \t]+(?:-LiteralPath[ \t]+|-Path[ \t]+)?(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:[ \t;\n]|$)`)
 	// PowerShell redirection is an unknown write; its payload is not parsed.
 	timeoutEnvPowerShellRedirect = regexp.MustCompile(`(?im)>>?[ \t]*(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:$|[ \t\n;&|)])`)
-	timeoutEnvRedirect           = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
-	timeoutEnvTee                = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
+	timeoutEnvRedirect           = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvSinkPath + `(?:$|[ \t\n;&|)])`)
+	timeoutEnvTee                = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvSinkPath + `(?:$|[ \t\n;&|)])`)
 	literalEnvEcho               = regexp.MustCompile(`^echo[ \t]+(.+?)[ \t]+>>[ \t]*` + timeoutEnvPath + `$`)
 	envRecordName                = regexp.MustCompile(`^` + parameterName + `=`)
 	runnerPathRecord             = regexp.MustCompile(`^"` + parameterName + `=\$(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE|\{(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE)\})(?:/[A-Za-z0-9_./-]*)?"$`)
@@ -40,10 +43,10 @@ func workflowTimeoutEnvWrite(spec *ghworkflow.Spec, run ghworkflow.RunStep) time
 	}
 	script := strings.ReplaceAll(run.Step.Run, "\r\n", "\n")
 	shell := ghworkflow.StepShell(spec, run.Job, run.Step)
-	if shell != "bash" && shell != "sh" {
+	if shell != "bash" && shell != "sh" || !supportedTimeoutShellTemplate(ghworkflow.StepShellValue(spec, run.Job, run.Step)) {
 		return nonPOSIXTimeoutEnvWrite(script, shell)
 	}
-	return posixTimeoutEnvWrite(script, run)
+	return posixTimeoutEnvWrite(script, run, shell)
 }
 
 // nonPOSIXTimeoutEnvWrite reports explicit environment-file sinks without assuming their records are known.
@@ -55,11 +58,11 @@ func nonPOSIXTimeoutEnvWrite(script, shell string) timeoutEnvWrite {
 }
 
 // posixTimeoutEnvWrite inspects shell commands in source order after masking parsed comments.
-func posixTimeoutEnvWrite(script string, run ghworkflow.RunStep) timeoutEnvWrite {
+func posixTimeoutEnvWrite(script string, run ghworkflow.RunStep, shell string) timeoutEnvWrite {
 	if !strings.Contains(script, "GITHUB_ENV") {
 		return timeoutEnvWrite{}
 	}
-	source, ok := hiss.WorkflowShellCommandSource(script, maxTimeoutWorkflowLines)
+	source, ok := hiss.WorkflowShellCommandSourceForShell(script, maxTimeoutWorkflowLines, shell)
 	if !ok {
 		return timeoutEnvWrite{set: mentionsTimeoutEnvSink([]byte(script))}
 	}

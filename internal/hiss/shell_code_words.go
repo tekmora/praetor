@@ -45,7 +45,11 @@ type ShellCommandSource struct {
 
 // ReadShellCommandSource retains locations so a caller can account for raw text the shell reader skipped.
 func ReadShellCommandSource(script string, maxLines int, literals map[int]int) (ShellCommandSource, bool) {
-	reader, ok := newShellCodeReader(script, maxLines)
+	return readShellCommandSource(script, maxLines, literals, false)
+}
+
+func readShellCommandSource(script string, maxLines int, literals map[int]int, portableHeredoc bool) (ShellCommandSource, bool) {
+	reader, ok := newShellCodeReader(script, maxLines, portableHeredoc)
 	if !ok || !reader.maskLiterals(literals) {
 		return ShellCommandSource{}, false
 	}

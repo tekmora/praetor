@@ -24,7 +24,7 @@ import (
 const (
 	// maxShellNesting bounds the stack of open quotes and substitutions (HISS-02).
 	maxShellNesting = 32
-	// maxShellHeredocs bounds the here-documents one line may open (HISS-02).
+	// maxShellHeredocs bounds the number of pending here-documents (HISS-02).
 	maxShellHeredocs = 16
 	// shellExpansion stands in for a parameter or arithmetic expansion.
 	shellExpansion = "$_"
@@ -53,19 +53,24 @@ type shellFrame struct {
 
 // shellHeredoc is a here-document whose body is still to be read.
 type shellHeredoc struct {
-	delimiter string
-	stripTabs bool
+	delimiter    string
+	stripTabs    bool
+	quoted       bool
+	commandDepth int
 }
 
 // shellLexer carries the cross-line state of one script.
 type shellLexer struct {
 	stack []shellFrame
 	word  bool
-	// pending holds the here-documents the current line opened; their bodies start on the
-	// next line, in order.
+	// pending holds here-documents until a shell newline in their command context.
 	pending []shellHeredoc
 	// bodies holds the here-documents whose bodies are being read.
 	bodies []shellHeredoc
+	// bodyMatch is the delimiter prefix matched on a continued body line, or -1 on mismatch.
+	bodyMatch int
+	// portableHeredoc declines when physical and Bash-style delimiter matching disagree.
+	portableHeredoc bool
 	// misread records a construct the lexer could not follow: a delimiter it cannot read, or a
 	// bound exceeded. The file is then declined.
 	misread bool
@@ -75,32 +80,83 @@ type shellLexer struct {
 // here-document body.
 func (l *shellLexer) line(text string) (string, bool) {
 	if len(l.bodies) > 0 {
-		l.bodyLine(text)
+		l.bodyLine(text, util.EndsWithUnescapedBackslash(text))
 		return "", true
 	}
 	l.word = false
 	var b strings.Builder
 	for i := 0; i < len(text); {
+		continued := i == len(text)-1 && text[i] == '\\' && shellReadsCommands(l.top())
 		i = l.step(text, i, &b)
+		if continued {
+			return b.String(), false
+		}
 	}
 	l.startBodies()
 	return b.String(), false
 }
 
-// startBodies transfers pending here-document descriptors into the active bodies list.
+// startBodies activates pending here-documents at a newline token in their command context.
 func (l *shellLexer) startBodies() {
-	l.bodies = append(l.bodies, l.pending...)
-	l.pending = l.pending[:0]
+	if !shellReadsCommands(l.top()) {
+		return
+	}
+	depth := len(l.stack)
+	keep := l.pending[:0]
+	for _, h := range l.pending {
+		if h.commandDepth == depth {
+			l.bodies = append(l.bodies, h)
+		} else {
+			keep = append(keep, h)
+		}
+	}
+	l.pending = keep
 }
 
-// bodyLine reads one line of a here-document body, closing it at its delimiter line.
-func (l *shellLexer) bodyLine(text string) {
-	h := l.bodies[0]
+// matchesPhysicalLine reports whether an unjoined line closes the here-document.
+func (h shellHeredoc) matchesPhysicalLine(text string) bool {
 	if h.stripTabs {
 		text = strings.TrimLeft(text, "\t")
 	}
-	if text == h.delimiter {
-		l.bodies = l.bodies[1:]
+	return text == h.delimiter
+}
+
+// bodyLine reads a physical body line. Unquoted delimiters are matched after joining
+// backslash-newline pairs; only the matched prefix length needs to survive the join.
+func (l *shellLexer) bodyLine(text string, spliced bool) {
+	h := l.bodies[0]
+	checkPhysical := l.portableHeredoc && !h.quoted
+	physicalClose := checkPhysical && h.matchesPhysicalLine(text)
+	continued := spliced && !h.quoted
+	if continued {
+		text = text[:len(text)-1]
+	}
+	l.matchBodyPrefix(h, text)
+	joinedClose := !continued && l.bodyMatch == len(h.delimiter)
+	if checkPhysical && physicalClose != joinedClose {
+		l.misread = true
+		return
+	}
+	if !continued {
+		if joinedClose {
+			l.bodies = l.bodies[1:]
+		}
+		l.bodyMatch = 0
+	}
+}
+
+// matchBodyPrefix updates the delimiter match with one fragment of the joined body line.
+func (l *shellLexer) matchBodyPrefix(h shellHeredoc, text string) {
+	if h.stripTabs && l.bodyMatch == 0 {
+		text = strings.TrimLeft(text, "\t")
+	}
+	if l.bodyMatch < 0 {
+		return
+	}
+	if strings.HasPrefix(h.delimiter[l.bodyMatch:], text) {
+		l.bodyMatch += len(text)
+	} else {
+		l.bodyMatch = -1
 	}
 }
 
@@ -125,6 +181,10 @@ func (l *shellLexer) push(ctx shellContext) {
 }
 
 func (l *shellLexer) pop() {
+	// A substitution cannot leave pending bodies for another command context.
+	if n := len(l.pending); n > 0 && l.pending[n-1].commandDepth == len(l.stack) {
+		l.misread = true
+	}
 	l.stack = l.stack[:len(l.stack)-1]
 }
 
@@ -291,12 +351,14 @@ func (l *shellLexer) heredoc(text string, i int) int {
 	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
 		i++
 	}
-	delimiter, _, width, err := util.ShellHereDocDelimiter(text[i:])
+	delimiter, quoted, width, err := util.ShellHereDocDelimiter(text[i:])
 	if err != nil || len(l.pending) >= maxShellHeredocs {
 		l.misread = true
 		return len(text)
 	}
 	h.delimiter = delimiter
+	h.quoted = quoted
+	h.commandDepth = len(l.stack)
 	l.pending = append(l.pending, h)
 	return i + width
 }

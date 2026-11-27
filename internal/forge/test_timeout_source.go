@@ -42,10 +42,14 @@ var (
 	testWord = candidateWord("test")
 )
 
+// A numeric descriptor must be separated from the preceding word: go2>out
+// is not the same command head as go 2>out. This is discovery, not proof.
+const candidateRedirect = `(?:[ \t]*|` + wordSpace + `[0-9]+)(?:[<>]&[ \t]*(?:[0-9]+|-)|[<>][ \t]*` + wordPart + `*)`
+
 // testInvocation captures a Go command head or a Make wrapper independently of shell parsing.
 var testInvocation = regexp.MustCompile(`(?:^|[[:space:]/\\'"$,=;&|<>()\x60])[ @+\t-]*(` +
-	goWord + `(?:` + flagWord + `(?:` + wordSpace + wordPart + `+)?)*` +
-	`(?:[ \t]*[<>]` + wordPart + `*)?` + wordSpace + wordJoint + testWord + `)` +
+	goWord + `(?:` + flagWord + `(?:` + wordSpace + wordPart + `+)?|` + candidateRedirect + `)*` +
+	wordSpace + wordJoint + testWord + `)` +
 	wordJoint + `(?:$|[[:space:],;&|<>()\x60])|(\$\(GO_TEST\)|\$\{GO_TEST\})`)
 
 var (

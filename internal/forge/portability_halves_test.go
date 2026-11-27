@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 )
 
 // portabilityWorkflow is the engine's platform matrix, read from the repository root.
@@ -61,6 +62,10 @@ func stepHalvesProblem(step, pkg, half string) string {
 	if _, err := regexp.Compile(m[1]); err != nil {
 		return "the " + half + " pattern does not compile: " + err.Error()
 	}
+	source, ok := hiss.WorkflowShellCommandSource(step, maxTimeoutWorkflowLines)
+	if !ok {
+		return "unreadable shell run script or shell reader bound"
+	}
 	for _, args := range []string{
 		`"${packages[@]##-*}"`,
 		`"${adopt##-*}"`,
@@ -68,7 +73,15 @@ func stepHalvesProblem(step, pkg, half string) string {
 		`-skip "$` + half + `" "${` + pkg + `##-*}"`,
 	} {
 		want := `go test -json -timeout 30m ` + args
-		if strings.Count(step, want) != 1 {
+		expected := strings.Fields(want)
+		count := 0
+		for _, command := range source.Commands {
+			words := command.Words
+			if halvesCommandHasPrefix(expected, len(words), func(i int) string { return words[i].Text }) {
+				count++
+			}
+		}
+		if count != 1 {
 			return "not exactly one " + want
 		}
 	}
@@ -76,6 +89,56 @@ func stepHalvesProblem(step, pkg, half string) string {
 		return "the main run does not leave out $" + pkg
 	}
 	return ""
+}
+
+// halvesCommandHasPrefix compares the expected words with the start of a command.
+func halvesCommandHasPrefix(expected []string, wordCount int, wordAt func(int) string) bool {
+	// Admit the literal command wrapper, not arbitrary prefixes or its options.
+	start := 0
+	if wordCount > 0 && wordAt(0) == "command" {
+		start = 1
+	}
+	if wordCount-start < len(expected) {
+		return false
+	}
+	for i, word := range expected {
+		if wordAt(start+i) != word {
+			return false
+		}
+	}
+	return true
+}
+
+func TestPortability_CommentCannotSupplyPackageSelection(t *testing.T) {
+	const head = `go test -json -timeout 30m`
+	const main = head + ` "${packages[@]##-*}"`
+	const adopt = head + ` "${adopt##-*}"`
+	step := strings.Join([]string{
+		`cli_half='^TestA$'`,
+		`grep -v -e "$cli" input`,
+		main,
+		adopt,
+		head + ` -run "$cli_half" "${cli##-*}"`,
+		head + ` -skip "$cli_half" "${cli##-*}"`,
+	}, "\n")
+	if problem := stepHalvesProblem(step, "cli", "cli_half"); problem != "" {
+		t.Fatalf("valid step: %s", problem)
+	}
+	if problem := stepHalvesProblem(strings.Replace(step, main, "command "+main, 1), "cli", "cli_half"); problem != "" {
+		t.Errorf("command-prefixed main invocation: %s", problem)
+	}
+	for _, replacement := range []string{"# command " + main + "\n" + head, "echo command " + main} {
+		mutant := strings.Replace(step, main, replacement, 1)
+		if got, want := stepHalvesProblem(mutant, "cli", "cli_half"), "not exactly one "+main; got != want {
+			t.Errorf("replacement %q: got %q, want %q", replacement, got, want)
+		}
+	}
+	for _, command := range []string{main, adopt} {
+		mutant := strings.Replace(step, command, "# "+command+"\n"+head, 1)
+		if got, want := stepHalvesProblem(mutant, "cli", "cli_half"), "not exactly one "+command; got != want {
+			t.Errorf("comment-only %s: got %q, want %q", command, got, want)
+		}
+	}
 }
 
 func readPortability(t *testing.T) string {

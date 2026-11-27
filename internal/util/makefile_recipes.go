@@ -20,7 +20,7 @@ type MakefileRecipe struct {
 	LiteralSpans map[int]int
 	// Unresolved names the reader limit or Make mode that prevents interpreting this source.
 	Unresolved string
-	// GOFLAGSProblem describes a possible target-specific export at this recipe.
+	// GOFLAGSProblem describes a possible inherited export or why graph inference was refused.
 	GOFLAGSProblem string
 	owners         []string
 }
@@ -55,21 +55,32 @@ func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 		if err != nil {
 			return MakefileRecipeFile{}, err
 		}
+		if !found && reason == "" {
+			reader.graph.readSourceExpansion(parts, inDefinition)
+		}
 		if found {
+			reader.graph.readRecipeExpansion(recipe)
 			file.Recipes = append(file.Recipes, recipe)
 		} else if !inDefinition && reader.depth == 0 {
-			file.MayExportGOFLAGS = file.MayExportGOFLAGS || makefileMayExportGOFLAGS(makefileJoinSyntax(parts))
-			if command, ok := makefileShellAssignment(parts, start); ok {
-				file.ShellAssignments = append(file.ShellAssignments, command)
-			}
-			if immediate, ok := makefileImmediateSource(parts, start); ok {
-				file.Immediate = append(file.Immediate, immediate)
-			}
+			makefileRecordTopLevelSource(&file, parts, start)
 		}
 		start = end
 	}
+	file.MayExportGOFLAGS = file.MayExportGOFLAGS || reader.blanketExport
 	reader.graph.annotate(file.Recipes)
 	return file, nil
+}
+
+// makefileRecordTopLevelSource records possible GOFLAGS exports, shell assignments,
+// and immediate expansions from a top-level non-recipe group.
+func makefileRecordTopLevelSource(file *MakefileRecipeFile, parts []string, start int) {
+	file.MayExportGOFLAGS = file.MayExportGOFLAGS || makefileMayExportGOFLAGS(makefileJoinSyntax(parts))
+	if command, ok := makefileShellAssignment(parts, start); ok {
+		file.ShellAssignments = append(file.ShellAssignments, command)
+	}
+	if immediate, ok := makefileImmediateSource(parts, start); ok {
+		file.Immediate = append(file.Immediate, immediate)
+	}
 }
 
 // makefileMayExportGOFLAGS recognizes direct export directives without assuming
@@ -90,9 +101,21 @@ func makefileDirectExportsGOFLAGS(text string) bool {
 	if len(text) <= len("export") || !strings.HasPrefix(text, "export") || !strings.ContainsRune(" \t", rune(text[len("export")])) {
 		return false
 	}
-	rest := strings.TrimSpace(text[len("export"):])
-	if assign, _, _ := makefileSplit(rest); assign >= 0 {
-		return strings.TrimSpace(makefileSkipAssignmentModifiers(rest[:assign])) == "GOFLAGS"
+	return makefileExportOperandsMayNameGOFLAGS(strings.TrimSpace(text[len("export"):]))
+}
+
+// makefileExportOperandsMayNameGOFLAGS checks the assignment name or export list
+// following an export directive for a possible GOFLAGS name.
+func makefileExportOperandsMayNameGOFLAGS(rest string) bool {
+	if assign, colon, _ := makefileSplit(rest); assign >= 0 && (colon < 0 || assign < colon) {
+		if names := makefileNameWords(rest[:assign]); len(names) == 1 {
+			return makefileNameMayBe(names[0], "GOFLAGS")
+		}
+	}
+	// Make expands the export list before splitting it into names. A reference
+	// can introduce a separate GOFLAGS word even if it has literal affixes.
+	if makefileSplitName(rest).computed {
+		return true
 	}
 	for _, name := range strings.Fields(rest) {
 		if name == "GOFLAGS" {
@@ -109,15 +132,17 @@ const maxMakefileGraphEntries = 65536
 const makefileExportGOFLAGSProblem = "cannot verify inherited GOFLAGS from Make exports"
 
 type makefileGOFLAGSGraph struct {
-	seeds       map[string]bool // true if at least one export can be inherited
-	edges       map[string][]string
-	phony       map[string]bool
-	explicit    map[string]bool
-	doubleColon map[string]bool
-	conditional int
-	entries     int
-	seen        bool
-	problem     string
+	seeds               map[string]bool // true if at least one export can be inherited
+	edges               map[string][]string
+	phony               map[string]bool
+	explicit            map[string]bool
+	doubleColon         map[string]bool
+	conditional         int
+	entries             int
+	seen                bool
+	problem             string
+	sourceEval          bool
+	recipeReferenceLine int // one-based; zero means no Make reference was seen
 }
 
 // refuse records the first reason the literal graph cannot be trusted.
@@ -335,8 +360,50 @@ func (g *makefileGOFLAGSGraph) addExportSeeds(names []string, private bool, line
 	}
 }
 
+// readSourceExpansion remembers eval outside recipes: a recursively expanded
+// variable or define can defer that eval until a recipe references it.
+func (g *makefileGOFLAGSGraph) readSourceExpansion(parts []string, inDefinition bool) {
+	if g.sourceEval {
+		return
+	}
+	text := makefileJoinSyntax(parts)
+	if !inDefinition {
+		text = makefileImmediateSyntax(text)
+	}
+	if strings.Contains(text, "$") {
+		g.sourceEval = makefileRecipeCallsEval(makefileRecipeReferences(text, 0))
+	}
+}
+
+func makefileRecipeCallsEval(recipe MakefileRecipe) bool {
+	// These spans retain Make references, not the shell dollars produced from $$.
+	for start, end := range recipe.LiteralSpans {
+		if makefileCallsEval(recipe.Text[start:end]) {
+			return true
+		}
+	}
+	return false
+}
+
+// readRecipeExpansion refuses graph inference when recipe expansion may change exports.
+func (g *makefileGOFLAGSGraph) readRecipeExpansion(recipe MakefileRecipe) {
+	if g.recipeReferenceLine == 0 && len(recipe.LiteralSpans) != 0 {
+		g.recipeReferenceLine = recipe.Line + 1
+	}
+	if makefileRecipeCallsEval(recipe) {
+		g.seen = true
+		g.refuse(recipe.Line, "recipe expansion may change GOFLAGS exports")
+	}
+}
+
 // annotate marks recipes whose runtime GOFLAGS cannot be verified from the file.
 func (g *makefileGOFLAGSGraph) annotate(recipes []MakefileRecipe) {
+	// Do not resolve variable values or assume that the source eval was immediate.
+	// Without a Make reference in a recipe, there is no such recipe-time path.
+	if g.sourceEval && g.recipeReferenceLine != 0 {
+		g.seen = true
+		g.refuse(g.recipeReferenceLine-1, "recipe reference may invoke eval and change GOFLAGS exports")
+	}
 	if !g.seen {
 		return
 	}
@@ -463,10 +530,12 @@ func makefileRecipeEnd(physical []string, start, maxLines int) (int, string) {
 // makefileRecipeReader records literal rule names while classifying logical lines.
 type makefileRecipeReader struct {
 	makefileScanner
-	targets      map[string]bool
-	customPrefix bool
-	owners       []string
-	graph        makefileGOFLAGSGraph
+	targets                map[string]bool
+	customPrefix           bool
+	definitionMaySetPrefix bool
+	blanketExport          bool
+	owners                 []string
+	graph                  makefileGOFLAGSGraph
 }
 
 // readGroup preserves unread recipe text for the caller. A lost rule boundary can also
@@ -518,8 +587,11 @@ func makefileSkipAssignmentModifiers(line string) string {
 	return line
 }
 
-// makefileChangesRecipePrefix recognizes direct assignments that might select a non-tab prefix.
+// makefileChangesRecipePrefix recognizes assignments that might select a non-tab prefix.
 func makefileChangesRecipePrefix(line string) bool {
+	if makefileComputedAssignmentMaySetRecipePrefix(line) {
+		return true
+	}
 	rest, found := strings.CutPrefix(makefileSkipAssignmentModifiers(line), ".RECIPEPREFIX")
 	if !found {
 		return false
@@ -530,6 +602,17 @@ func makefileChangesRecipePrefix(line string) bool {
 			value = strings.TrimLeft(value, " \t")
 			return op == "!=" || (value != "" && value[0] != '#')
 		}
+	}
+	return false
+}
+
+// makefileComputedAssignmentMaySetRecipePrefix reports whether an assignment
+// with a reference in its name could set .RECIPEPREFIX.
+func makefileComputedAssignmentMaySetRecipePrefix(line string) bool {
+	assign, colon, ref := makefileSplit(line)
+	if assign >= 0 && ref >= 0 && ref < assign && (colon < 0 || assign < colon) {
+		names := makefileNameWords(line[:assign])
+		return len(names) == 1 && makefileNameMayBe(names[0], ".RECIPEPREFIX")
 	}
 	return false
 }
@@ -564,7 +647,10 @@ func (s *makefileRecipeReader) recipeText(parts []string, start int) (MakefileRe
 		return recipe, true
 	}
 	syntax := makefileJoinSyntax(parts)
-	if s.next(syntax) != makefileSyntaxLine {
+	depth := s.depth
+	kind := s.nextWithDeferredDefinePrefix(syntax, true)
+	s.trackDefinePrefix(syntax, depth, start)
+	if kind != makefileSyntaxLine {
 		if makefileDefineParsesText(syntax) {
 			s.graph.refuse(start, "define may evaluate Make syntax")
 		}
@@ -575,6 +661,21 @@ func (s *makefileRecipeReader) recipeText(parts []string, start int) (MakefileRe
 		return MakefileRecipe{}, false
 	}
 	return s.ruleRecipeText(parts, syntax, trimmed, start)
+}
+
+// trackDefinePrefix records a possible prefix binding at a define opener and applies it at the close.
+func (s *makefileRecipeReader) trackDefinePrefix(syntax string, previousDepth, start int) {
+	switch {
+	case previousDepth == 0 && s.depth != 0:
+		name, bound := makefileBoundName(strings.TrimSpace(syntax))
+		s.definitionMaySetPrefix = makefileMayBindRecipePrefix(syntax) || (bound && makefileNameMayBe(name, ".RECIPEPREFIX"))
+	case previousDepth != 0 && s.depth == 0:
+		if s.definitionMaySetPrefix {
+			s.customPrefix = true
+			s.graph.refuse(start, "non-tab .RECIPEPREFIX prevents reading the target graph")
+		}
+		s.definitionMaySetPrefix = false
+	}
 }
 
 // tabbedRecipeText extracts a tabbed recipe and attaches its current rule owners.
@@ -632,6 +733,9 @@ func (s *makefileRecipeReader) ruleRecipeText(parts []string, syntax, trimmed st
 	s.owners = names
 	for _, name := range names {
 		s.targets[name] = true
+		if makefileGraphKey(name) == ".EXPORT_ALL_VARIABLES" {
+			s.blanketExport = true
+		}
 	}
 	recipe, found := makefileInlineRecipe(parts, start)
 	recipe.owners = names

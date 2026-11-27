@@ -277,7 +277,7 @@ func TestAuditTestTimeouts_ScanBound(t *testing.T) {
 func TestAuditTestTimeouts_Positive_MakefileCommentIgnored(t *testing.T) {
 	root := t.TempDir()
 	body := "test:\n\t$(GO_TEST) -race -timeout 30m ./...\n" +
-		"# -timeout replaces go test's ten-minute default per package\n" +
+		"# go test -timeout 99m ./...\n" +
 		"\tgo test -timeout 45m ./control/\n" + literalWrapperDefinition
 	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -920,6 +920,28 @@ func checkRepositoryTestPackages(t *testing.T, repoRoot string) {
 	}
 }
 
+func TestSharedTestSelectsAdopt_PackageOperandsOnly(t *testing.T) {
+	const head = "go test -timeout 30m "
+	adopt := gomanifest.EngineModulePath + "/internal/adopt"
+	control := gomanifest.EngineModulePath + "/internal/control"
+	for _, tc := range []struct {
+		name, args string
+		wantAdopt  bool
+	}{
+		{"package operand", control + " " + adopt, true},
+		{"separate run value", "-run " + adopt + " " + control, false},
+		{"attached run value", control + " -run=" + adopt, false},
+		{"package operands after run value", "-run TestExample " + control + " " + adopt, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recipe := head + tc.args
+			if got := sharedTestSelectsAdopt(t, recipe); got != tc.wantAdopt {
+				t.Fatalf("sharedTestSelectsAdopt(%q) = %v, want %v", recipe, got, tc.wantAdopt)
+			}
+		})
+	}
+}
+
 // sharedTestSelectsAdopt checks membership on the 30m Go test command that also selects the control package.
 func sharedTestSelectsAdopt(t *testing.T, recipe string) bool {
 	t.Helper()
@@ -927,20 +949,25 @@ func sharedTestSelectsAdopt(t *testing.T, recipe string) bool {
 	if !ok {
 		t.Fatalf("unreadable expanded test recipe:\n%s", recipe)
 	}
+	var source timeoutSource
 	for _, command := range commands {
 		args := goTestArgs(command.Words)
-		var values []string
+		var packages []string
 		var timeout string
 		for i := 0; i < len(args); i++ {
-			if value, next, found := timeoutValue(args, i); found {
-				timeout = value
-				i = next
-			} else {
-				values = append(values, args[i].Value)
+			arg, reason := source.testArgument(args, i)
+			if reason == "" {
+				switch arg.kind {
+				case durationFlag:
+					timeout = arg.value
+				case packageArg:
+					packages = append(packages, args[i].Value)
+				}
 			}
+			i = arg.end
 		}
-		if timeout == "30m" && slices.Contains(values, gomanifest.EngineModulePath+"/internal/control") {
-			return slices.Contains(values, gomanifest.EngineModulePath+"/internal/adopt")
+		if timeout == "30m" && slices.Contains(packages, gomanifest.EngineModulePath+"/internal/control") {
+			return slices.Contains(packages, gomanifest.EngineModulePath+"/internal/adopt")
 		}
 	}
 	t.Fatalf("missing shared 30m go test for the control package:\n%s", recipe)

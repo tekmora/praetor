@@ -45,8 +45,8 @@ type TestTimeoutOptions struct {
 }
 
 // AuditTestTimeouts checks workflow and root Makefile lines against the per-package timeout
-// bound. It proves commands in bash or sh workflow steps (step, job, workflow, then runner
-// default) and literal Makefile recipes without .ONESHELL, including named test-command assignments.
+// bound. It proves commands in supported bash or sh invocations (step, job, workflow, then
+// runner default) and literal Makefile recipes without .ONESHELL, including named test-command assignments.
 // Workflow GOFLAGS comes from the command, step, earlier run-step environment-file
 // writes, job, or workflow, in that order.
 // Explicit command-line timeout flags follow GOFLAGS; the last valid setting decides the bound.
@@ -243,6 +243,19 @@ func workflowTimeouts(rel string, data []byte) ([]string, error) {
 	return out, errors.Join(failures...)
 }
 
+// supportedTimeoutShellTemplate admits built-ins and a bounded set of templates that
+// pass the temporary script as a file, without interpreting arbitrary shell options.
+// An empty value uses the runner default; callers also check the resolved program.
+func supportedTimeoutShellTemplate(value string) bool {
+	switch value {
+	case "", "bash", "sh", "bash {0}", "sh {0}", "bash -e {0}", "sh -e {0}",
+		"bash --noprofile --norc -e {0}", "bash --noprofile --norc -eo pipefail {0}":
+		return true
+	default:
+		return false
+	}
+}
+
 // workflowRunTimeouts checks candidate-bearing steps under their resolved interpreter.
 func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunStep, defaults map[string]exprValue, writes ...timeoutEnvWrite) ([]string, error) {
 	script := strings.ReplaceAll(run.Step.Run, "\r\n", "\n")
@@ -255,22 +268,38 @@ func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunSt
 	if shell != "bash" && shell != "sh" {
 		return nil, location.refuse(script, candidate[0], fmt.Sprintf("resolved shell %q must be bash or sh", shell))
 	}
-	source, ok := hiss.WorkflowShellCommandSource(script, maxTimeoutWorkflowLines)
+	if value := ghworkflow.StepShellValue(spec, run.Job, run.Step); !supportedTimeoutShellTemplate(value) {
+		return nil, location.refuse(script, candidate[0], fmt.Sprintf("unsupported shell template %q", value))
+	}
+	source, ok := hiss.WorkflowShellCommandSourceForShell(script, maxTimeoutWorkflowLines, shell)
 	if !ok {
 		return nil, location.refuse(script, candidate[0], "unreadable shell run script or shell reader bound")
 	}
-	flags, known := ghworkflow.LiteralEnvValue("GOFLAGS", &run.Step.Env, &run.Job.Env, &spec.Env)
+	setWorkflowRunGOFLAGS(&location, spec, run, writes)
+	return location.check(script, source, defaults)
+}
+
+// literalSuccessConjunction recognizes only success() joined to literal true.
+var literalSuccessConjunction = regexp.MustCompile(`^success\(\)\s*&&\s*true$`)
+
+// setWorkflowRunGOFLAGS resolves GOFLAGS for the run step and records any
+// uncertainty about an inherited GITHUB_ENV write.
+func setWorkflowRunGOFLAGS(location *timeoutSource, spec *ghworkflow.Spec, run ghworkflow.RunStep, writes []timeoutEnvWrite) {
+	runnerOS := ghworkflow.RunnerOS(&run.Job.RunsOn)
+	flags, _, known := ghworkflow.LiteralRunnerEnvValue("GOFLAGS", runnerOS, &run.Step.Env, &run.Job.Env, &spec.Env)
 	location.envGOFLAGS, location.unknownEnvGOFLAGS = flags, !known
 	if len(writes) != 0 && writes[0].set {
-		_, stepSet, _ := ghworkflow.EnvValue("GOFLAGS", &run.Step.Env)
-		_, stepKnown := ghworkflow.LiteralEnvValue("GOFLAGS", &run.Step.Env)
+		_, stepSet, stepKnown := ghworkflow.LiteralRunnerEnvValue("GOFLAGS", runnerOS, &run.Step.Env)
 		if !stepSet && stepKnown {
 			location.envGOFLAGS = writes[0].value
 			location.unknownEnvGOFLAGS = false
-			if !writes[0].known {
+			// A known write currently proves a success-gated writer only.
+			// A consumer that can run after failure may have skipped that writer.
+			condition := strings.TrimSpace(run.Step.If)
+			successOnly := condition == "" || condition == "success()" || literalSuccessConjunction.MatchString(condition)
+			if !writes[0].known || !successOnly {
 				location.goFlagsProblem = "cannot verify inherited GOFLAGS from prior GITHUB_ENV write"
 			}
 		}
 	}
-	return location.check(script, source, defaults)
 }
