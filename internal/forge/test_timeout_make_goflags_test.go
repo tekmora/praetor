@@ -119,7 +119,7 @@ func writeMakeGOFLAGSFixture(t *testing.T, dir, fixture string) {
 		{"go", "#!/bin/sh\nprintf '%s\\n' \"${GOFLAGS-}\" > goflags.log\n", 0700},
 	} {
 		path := filepath.Join(dir, f.name)
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), util.SecureDirPerm); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(path, []byte(f.text), f.mode); err != nil {
