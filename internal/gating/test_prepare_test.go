@@ -330,10 +330,11 @@ func runBoundedTestStage(t *testing.T, cfg *stageConfig) (StageResult, error) {
 func TestTestPrepare_Positive_FixtureRedWithoutPrepareAndGreenWithPrepare(t *testing.T) {
 	pub := sandboxReceiptKey(t)
 	logs := installPrepShims(t)
-	t.Setenv("REQUIRE_WORKTREE_FILE", "zig-out/lib/libnative.a")
+	const fixturePath = "zig-out/lib/libnative.a"
+	t.Setenv("REQUIRE_WORKTREE_FILE", fixturePath)
 
 	unpreparedCargo := newCargoPrepareConfig(t, "version: 1\n")
-	if err := runThroughReceipt(t, unpreparedCargo); err == nil || !strings.Contains(err.Error(), "zig-out/lib/libnative.a") {
+	if err := runThroughReceipt(t, unpreparedCargo); err == nil || !strings.Contains(err.Error(), filepath.FromSlash(fixturePath)) {
 		t.Fatalf("unprepared Cargo fixture must fail naming missing artefact, got %v", err)
 	}
 
