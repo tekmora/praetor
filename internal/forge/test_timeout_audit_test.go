@@ -226,6 +226,13 @@ func TestAuditTestTimeouts_Makefile(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_MakefileRecipePrefix distinguishes a custom prefix from an unrelated assignment.
+func TestAuditTestTimeouts_MakefileRecipePrefix(t *testing.T) {
+	assertTimeoutFile(t, "Makefile", ".RECIPEPREFIX := x\ntest:\nxgo test -timeout 45m ./...\n",
+		":3 unverifiable test invocation: non-tab .RECIPEPREFIX prevents reading recipes")
+	assertTimeoutFile(t, "Makefile", ".RECIPEPREFIX_OTHER := x\ntest:\n\tgo test -timeout 30m ./...\n", "")
+}
+
 // TestAuditTestTimeouts_MakefileDanglingContinuation refuses a Makefile whose last line ends in a
 // continuation, naming that line.
 func TestAuditTestTimeouts_MakefileDanglingContinuation(t *testing.T) {
@@ -1286,6 +1293,29 @@ func TestAuditTestTimeouts_NamedMakeCommands(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_ImmediateMakeExpansion compares Make expansion with shell execution
+// in a recipe and with assignments that merely store command text.
+func TestAuditTestTimeouts_ImmediateMakeExpansion(t *testing.T) {
+	const refused = " unverifiable test invocation: evaluated Make function outside recipe"
+	for _, tc := range []struct{ name, body, want string }{
+		{"immediate shell", "RESULT := $(shell go test -timeout 45m ./...)\n", ":1" + refused},
+		{"at bound still unverifiable", "RESULT := ${shell go test -timeout 30m ./...}\n", ":1" + refused},
+		{"continued expansion", "RESULT := $(shell \\\n  go test -timeout 45m ./...)\n", ":2" + refused},
+		{"nested shell", "RESULT := $(strip $(shell go test -timeout 45m ./...))\n", ":1" + refused},
+		{"another function", "RESULT := $(call RUN,go test -timeout 45m ./...)\n", ":1" + refused},
+		{"named command", "CHECK := go test -timeout 45m\nRESULT := $(shell $(CHECK) ./...)\n", ":2" + refused},
+		{"unused literal", "RESULT := go test -timeout 45m ./...\n", ""},
+		{"unused deferred shell", "RESULT = $(shell go test -timeout 45m ./...)\n", ""},
+		{"escaped function", "RESULT := $$(shell go test -timeout 45m ./...)\n", ""},
+		{"Make comment", "RESULT := ok # $(shell go test -timeout 45m ./...)\n", ""},
+		{"recipe measures timeout", "test:\n\tgo test -timeout 45m ./...\n", ":2 sets 45m, above the 30m bound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertTimeoutFile(t, "Makefile", tc.body, tc.want)
+		})
+	}
+}
+
 // TestAuditTestTimeouts_PositiveDeadline includes disallowed durations and the smallest positive duration.
 func TestAuditTestTimeouts_PositiveDeadline(t *testing.T) {
 	const file = ".github/workflows/ci.yml"
@@ -1341,6 +1371,62 @@ func TestAuditTestTimeouts_CommandLocalGOFLAGS(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuditTestTimeouts_WorkflowGOFLAGS compares scope precedence and explicit flags
+// at the duration and reader bounds, including cases where a value cannot be proved.
+func TestAuditTestTimeouts_WorkflowGOFLAGS(t *testing.T) {
+	const file = ".github/workflows/ci.yml"
+	const long = ":9 sets 45m, above the 30m bound"
+	const refused = ":9 unverifiable test invocation: "
+	const unknown = refused + "cannot verify inherited GOFLAGS from workflow environment"
+	const dynamic = `${{ fromJSON(vars.TEST_ENV) }}`
+	const atBound = "{GOFLAGS: '-timeout=30m'}"
+	const overBound = "{GOFLAGS: '-timeout=45m'}"
+	const empty = "{GOFLAGS: ''}"
+	boundFlags := "{GOFLAGS: '" + strings.TrimSpace(strings.Repeat("-timeout=30m ", maxTimeoutFlagsPerCommand)) + "'}"
+	for _, tc := range []struct{ name, workflow, job, step, command, want string }{
+		{"workflow at bound", atBound, "{}", "{}", "go test ./...", ""},
+		{"workflow just over bound", "{GOFLAGS: '-timeout=30m1ns'}", "{}", "{}", "go test ./...", ":9 sets 30m1ns, above the 30m bound"},
+		{"unrelated job and step keys", overBound, "{OTHER: x}", "{OTHER: y}", "go test ./...", long},
+		{"job overrides workflow", overBound, atBound, "{}", "go test ./...", ""},
+		{"step overrides job", atBound, atBound, overBound, "go test ./...", long},
+		{"empty step overrides all", overBound, overBound, empty, "go test ./...", ""},
+		{"local overrides step", atBound, atBound, overBound, "GOFLAGS=-timeout=30m go test ./...", ""},
+		{"empty local overrides unknown step", overBound, overBound, dynamic, "GOFLAGS= go test ./...", ""},
+		{"literal step overrides unknown scopes", dynamic, dynamic, atBound, "go test ./...", ""},
+		{"unknown step can shadow a known job", atBound, atBound, dynamic, "go test ./... -timeout=30m", unknown},
+		{"unknown job can shadow a known workflow", atBound, dynamic, "{}", "go test ./...", unknown},
+		{"unknown workflow with no override", dynamic, "{}", "{}", "go test ./...", unknown},
+		{"expression in value", atBound, "{}", "{GOFLAGS: '-timeout=${{ vars.DURATION }}'}", "go test ./... -timeout=30m", unknown},
+		{"sequence value", atBound, "{}", "{GOFLAGS: ['-timeout=30m']}", "go test ./...", unknown},
+		{"null value is not an empty string", overBound, "{}", "{GOFLAGS: null}", "go test ./...", unknown},
+		{"merge can introduce GOFLAGS", atBound, "{}", "{<<: {GOFLAGS: '-timeout=45m'}}", "go test ./...", unknown},
+		{"dynamic local does not fall back", atBound, "{}", "{}", `GOFLAGS="$FLAGS" go test ./... -timeout=30m`, refused + "cannot verify dynamic command-local GOFLAGS assignment"},
+		{"explicit timeout overrides inherited", overBound, "{}", "{}", "go test ./... -test.timeout=30m", ""},
+		{"explicit timeout can exceed bound", atBound, "{}", "{}", "go test ./... -timeout=45m", long},
+		{"last inherited timeout wins", "{GOFLAGS: '-timeout=45m -timeout=30m'}", "{}", "{}", "go test ./...", ""},
+		{"inherited timeout must still parse", "{GOFLAGS: '-timeout=bogus'}", "{}", "{}", "go test ./... -timeout=30m", refused + "bogus is an unreadable timeout"},
+		{"inherited timeout must be attached", "{GOFLAGS: '-timeout 30m'}", "{}", "{}", "go test ./... -timeout=30m", refused + "GOFLAGS timeout requires an attached duration"},
+		{"inherited timeout can disable deadline", "{GOFLAGS: '-timeout=0'}", "{}", "{}", "go test ./...", refused + "0 disables the test deadline"},
+		{"timeout count at bound", boundFlags, "{}", "{}", "go test ./...", ""},
+		{"combined timeout count over bound", boundFlags, "{}", "{}", "go test ./... -timeout=30m", refused + "timeout flag count exceeds the reader bound"},
+		{"no test to audit", dynamic, dynamic, dynamic, "echo hello", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf("on: push\nenv: %s\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env: %s\n    steps:\n      - env: %s\n        run: %s\n", tc.workflow, tc.job, tc.step, tc.command)
+			assertTimeoutFile(t, file, body, tc.want)
+		})
+	}
+}
+
+// TestAuditTestTimeouts_WorkflowGOFLAGSCommandIsolation ensures a local override
+// does not replace the step environment for a later command.
+func TestAuditTestTimeouts_WorkflowGOFLAGSCommandIsolation(t *testing.T) {
+	step := "      - env: {GOFLAGS: '-timeout=45m'}\n        run: |\n" +
+		"          GOFLAGS= go test ./...\n          go test ./...\n"
+	assertTimeoutFile(t, ".github/workflows/ci.yml", timeoutFixtureWorkflow("ubuntu-latest", step),
+		":9 sets 45m, above the 30m bound")
 }
 
 // TestAuditTestTimeouts_IndependentCommands requires every command's source line in either order.

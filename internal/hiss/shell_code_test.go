@@ -103,7 +103,9 @@ func TestShellCodeCommands_SourceWords(t *testing.T) {
 			{Code: "printf", Text: "printf", Value: "printf", Span: [2]int{7, 13}},
 			{Code: "x", Text: "x", Value: "x", Span: [2]int{14, 15}},
 		}},
-		{Line: 0, Words: []ShellCodeWord{
+		{Line: 0, Prefix: []ShellCodeWord{
+			{Code: "NOTE=___________#tag", Text: "NOTE=$(printf x)#tag", Value: "NOTE=$(printf x)#tag", Span: [2]int{0, 20}},
+		}, Words: []ShellCodeWord{
 			{Code: "go", Text: "go", Value: "go", Span: [2]int{21, 23}},
 			{Code: "test", Text: "test", Value: "test", Span: [2]int{24, 28}},
 			{Code: "-timeout", Text: "-timeout", Value: "-timeout", Span: [2]int{29, strings.Index(script, " \"45m\"")}},

@@ -47,9 +47,13 @@ type TestTimeoutOptions struct {
 // AuditTestTimeouts checks workflow and root Makefile lines against the per-package timeout
 // bound. It proves commands in bash or sh workflow steps (step, job, workflow, then runner
 // default) and literal Makefile recipes without .ONESHELL, including named test-command assignments.
+// Workflow GOFLAGS comes from the command, step, job, or workflow, in that order.
+// Explicit command-line timeout flags follow GOFLAGS; the last valid setting decides the bound.
 // Before test, go or go.exe may take only the two-word -C dir. Each raw candidate must map to
 // a resolved command or shell comment. Unknown shells, enclosing Make functions, attached
 // operators and incomplete reads report an unverifiable test invocation at its source line.
+// Outside recipes, candidate-bearing functions in immediate Make expansions are refused,
+// not interpreted as shell commands.
 func AuditTestTimeouts(ctx context.Context, opts TestTimeoutOptions) (string, error) {
 	files, err := readTestTimeoutFiles(ctx, opts.Root)
 	if err != nil {
@@ -246,5 +250,7 @@ func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunSt
 	if !ok {
 		return nil, location.refuse(script, candidate[0], "unreadable shell run script or shell reader bound")
 	}
+	flags, known := ghworkflow.LiteralEnvValue("GOFLAGS", &run.Step.Env, &run.Job.Env, &spec.Env)
+	location.envGOFLAGS, location.unknownEnvGOFLAGS = flags, !known
 	return location.check(script, source, defaults)
 }

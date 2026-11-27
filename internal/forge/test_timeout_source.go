@@ -56,13 +56,15 @@ var (
 
 // timeoutSource maps a shell reader's zero-based lines to a workflow or Makefile.
 type timeoutSource struct {
-	file        string
-	line        func(int) int
-	literals    map[int]int
-	assignments map[string]string
-	wrappers    map[string]timeoutWrapper
-	packageName string
-	goFlags     []string // timeout values from this command's GOFLAGS, in order
+	file              string
+	line              func(int) int
+	literals          map[int]int
+	assignments       map[string]string
+	wrappers          map[string]timeoutWrapper
+	packageName       string
+	envGOFLAGS        string   // literal workflow environment before command-local overrides
+	unknownEnvGOFLAGS bool     // the deciding workflow environment is not provably literal
+	goFlags           []string // timeout values from this command's effective GOFLAGS, in order
 }
 
 // rawTestCandidate returns the candidate's byte interval, excluding its word delimiters.
@@ -87,7 +89,7 @@ func (s timeoutSource) refuse(script string, offset int, reason string) error {
 	return unverifiableTestInvocation(s.file, s.line(strings.Count(script[:offset], "\n")), reason)
 }
 
-// makefileTimeouts checks the bounded Make reader's recipes and keeps all independent findings.
+// makefileTimeouts checks recipes and immediate Make expansions, keeping independent findings.
 func makefileTimeouts(text string) ([]string, error) {
 	file, err := util.MakefileRecipes(text, maxTimeoutWorkflowLines)
 	if err != nil {
@@ -101,7 +103,7 @@ func makefileTimeouts(text string) ([]string, error) {
 	oneShell := file.Targets[".ONESHELL"] || util.MakefileHasTarget(text, ".ONESHELL")
 	source := makefileTimeoutSource(text)
 	for _, recipe := range file.Recipes {
-		if oneShell {
+		if oneShell && recipe.Unresolved == "" {
 			recipe.Unresolved = ".ONESHELL recipes share a shell"
 		}
 		result, err := source.recipeTimeouts(recipe)
@@ -110,7 +112,45 @@ func makefileTimeouts(text string) ([]string, error) {
 		}
 		findings = append(findings, result...)
 	}
+	for _, immediate := range file.Immediate {
+		if err := source.immediateMakeTimeout(immediate); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	return findings, errors.Join(failures...)
+}
+
+// immediateMakeTimeout refuses candidate-bearing Make functions rather than treating
+// their arguments as shell code. Literal command assignments are not execution sites.
+func (s timeoutSource) immediateMakeTimeout(source util.MakefileRecipe) error {
+	first := len(source.Text)
+	for start, end := range source.LiteralSpans {
+		ref := source.Text[start:end]
+		if len(ref) < 4 || (ref[1] != '(' && ref[1] != '{') {
+			continue
+		}
+		body := ref[2 : len(ref)-1]
+		space := strings.IndexAny(body, " \t\n")
+		if space <= 0 {
+			continue
+		}
+		args := body[space+1:]
+		if at := rawTestCandidate(args); at != nil {
+			first = min(first, start+2+space+1+at[0])
+			continue
+		}
+		for _, at := range makeReferences.FindAllStringIndex(args, -1) {
+			if _, known := s.wrapperName(args[at[0]:at[1]]); known {
+				first = min(first, start+2+space+1+at[0])
+				break
+			}
+		}
+	}
+	if first == len(source.Text) {
+		return nil
+	}
+	s.line = func(n int) int { return source.Line + n + 1 }
+	return s.refuse(source.Text, first, "evaluated Make function outside recipe")
 }
 
 // makefileTimeoutSource separates evidence that a variable can invoke tests from proof of

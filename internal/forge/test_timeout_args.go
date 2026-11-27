@@ -275,8 +275,9 @@ func allowsCommandGOFLAGS(word hiss.ShellCodeWord) bool {
 	return localAssignment.MatchString(word.Code) || word.Text == "env" || word.Text == "exec" || word.Text == "command"
 }
 
-// commandGOFLAGS reads the last command-local assignment. A wrapper that may
-// change the environment cannot be assumed to pass an assignment through.
+// commandGOFLAGS reads the last command-local assignment, falling back to the
+// workflow environment only if there is no local assignment. A wrapper that may
+// change the environment cannot be assumed to pass GOFLAGS through.
 func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, string) {
 	var assignment *hiss.ShellCodeWord
 	for i := range prefix {
@@ -284,19 +285,25 @@ func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, st
 			assignment = &prefix[i]
 		}
 	}
-	if assignment == nil {
+	flags, origin := s.envGOFLAGS, "inherited"
+	if assignment != nil {
+		origin = "command-local"
+		raw := strings.TrimPrefix(assignment.Text, "GOFLAGS=")
+		if strings.Contains(raw, "${{") || s.hasMakeReference(*assignment) || !literalGoFlags.MatchString(raw) {
+			return nil, "cannot verify dynamic command-local GOFLAGS assignment"
+		}
+		flags = strings.TrimPrefix(assignment.Value, "GOFLAGS=")
+	} else if s.unknownEnvGOFLAGS {
+		return nil, "cannot verify inherited GOFLAGS from workflow environment"
+	} else if flags == "" {
 		return nil, ""
 	}
 	for _, word := range prefix {
 		if !allowsCommandGOFLAGS(word) {
-			return nil, "cannot verify command-local GOFLAGS through shell wrapper"
+			return nil, "cannot verify " + origin + " GOFLAGS through shell wrapper"
 		}
 	}
-	raw := strings.TrimPrefix(assignment.Text, "GOFLAGS=")
-	if strings.Contains(raw, "${{") || s.hasMakeReference(*assignment) || !literalGoFlags.MatchString(raw) {
-		return nil, "cannot verify dynamic command-local GOFLAGS assignment"
-	}
-	return goFlagsTimeouts(strings.TrimPrefix(assignment.Value, "GOFLAGS="))
+	return goFlagsTimeouts(flags)
 }
 
 const goFlagsBlanks = " \t\r\n"

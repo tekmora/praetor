@@ -182,8 +182,12 @@ func (w *shellCodeWords) flush(view *shellCodeView) {
 		}
 		start := len(cmd.words) - len(invocation.args) - 1
 		words := view.sourceWords(cmd, 0)
+		var prefix []ShellCodeWord
+		if start > 0 {
+			prefix = words[:start:start]
+		}
 		w.commands = append(w.commands, ShellCodeCommand{
-			Line: view.line, Prefix: words[:start:start], Words: words[start:],
+			Line: view.line, Prefix: prefix, Words: words[start:],
 		})
 	}
 }

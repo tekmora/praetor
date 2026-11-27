@@ -240,6 +240,60 @@ func EnvValue(name string, scopes ...*yaml.Node) (value string, set, known bool)
 	return "", false, true
 }
 
+// LiteralEnvValue reads a variable from innermost to outermost scope, like EnvValue,
+// but requires proof of a literal string. An absent variable has the same result as
+// an empty string. An opaque scope, ambiguous key, or nonliteral winning value
+// makes known false rather than falling through to a less specific scope.
+func LiteralEnvValue(name string, scopes ...*yaml.Node) (value string, known bool) {
+	for _, scope := range scopes {
+		if scope == nil || scope.Kind == 0 || scope.Kind == yaml.ScalarNode && scope.ShortTag() == "!!null" {
+			continue
+		}
+		entry, known := literalEnvEntry(scope, name)
+		if !known {
+			return "", false
+		}
+		if entry == nil {
+			continue
+		}
+		if !isLiteralEnvString(entry) {
+			return "", false
+		}
+		return entry.Value, true
+	}
+	return "", true
+}
+
+// literalEnvEntry checks the mapping and all its keys before accepting a match.
+// It returns nil, true for a missing name and nil, false if the scope cannot
+// establish whether name has an unambiguous binding.
+func literalEnvEntry(scope *yaml.Node, name string) (*yaml.Node, bool) {
+	if scope.Kind != yaml.MappingNode || scope.ShortTag() != "!!map" || len(scope.Content)%2 != 0 {
+		return nil, false
+	}
+	var entry *yaml.Node
+	for i := 0; i < len(scope.Content); i += 2 {
+		key := scope.Content[i]
+		if !isLiteralEnvString(key) || key.Value == "<<" {
+			return nil, false
+		}
+		if key.Value != name {
+			continue
+		}
+		if entry != nil || scope.Content[i+1] == nil {
+			return nil, false
+		}
+		entry = scope.Content[i+1]
+	}
+	return entry, true
+}
+
+// isLiteralEnvString reports whether node is a YAML string scalar with no
+// GitHub Actions expression opener.
+func isLiteralEnvString(node *yaml.Node) bool {
+	return node != nil && node.Kind == yaml.ScalarNode && node.ShortTag() == "!!str" && !strings.Contains(node.Value, "${{")
+}
+
 // EnvNames returns every variable name scopes declare, in the order EnvValue reads them, each
 // name once. known is false when a scope is one expression, an env: whose variables the file
 // cannot show, so any other name may be set there.

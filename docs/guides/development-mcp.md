@@ -550,7 +550,7 @@ The audit checks explicit Go test timeouts in these sources.
 - A workflow `run` step must resolve to `bash` or `sh`. The step's shell takes precedence,
   followed by the job default, the workflow default and the runner default. Set `shell: bash`
   on a Bash test step in a Windows or mixed-runner job.
-- The root `Makefile` may use literal tabbed or inline recipes, including continuations.
+- The root `Makefile` may use literal tabbed or inline recipes, including continuations. A non-tab `.RECIPEPREFIX` makes candidate recipes unverifiable. An assignment to `.RECIPEPREFIX_OTHER` does not change recipe parsing.
   A declaration of `.ONESHELL` makes candidate recipes unverifiable. A recipe can invoke a
   named test command as `$(TEST_CMD)` or `${TEST_CMD}`. The gate reads its definition and
   recipe arguments together if one unconditional root assignment with `:=`, `::=` or `=`
@@ -558,7 +558,7 @@ The audit checks explicit Go test timeouts in these sources.
   `go run "$(CURDIR)/cmd/standardsctl" go test` wrapper. If an assignment contains test
   tokens but its value is conditional, target-specific or ambiguous, its use is unverifiable.
   This also applies to `define` bodies and assignments that refer to another test command.
-  `GO_TEST` always requires a provable definition.
+  `GO_TEST` always requires a provable definition. A test invocation in an immediately expanded Make function outside a recipe is unverifiable even at the timeout bound. This includes nested `shell` calls, `shell` calls that reference a named test command, and `call` expansions containing test tokens. Unused literal command text, unused deferred `shell` calls, escaped function text, and Make comments do not trigger this finding.
 - The program word must be spelled `go` or `go.exe` in the source. Before `test` it may
   take `-C dir` with a separate literal directory. The standardsctl wrapper also accepts
   that pair first among its test arguments. Separate control operators from invocation
@@ -575,7 +575,7 @@ The audit checks explicit Go test timeouts in these sources.
 | `-update-harness-golden` | A switch in the final argument position when the first test argument is `./internal/adopt`. | |
 
 Each listed spelling also accepts two leading dashes. For example, `--timeout` and
-`--test.timeout` both take a duration. The audit reads explicit timeout settings in command-local `GOFLAGS` first, then those on the command line. The last explicit setting wins, but malformed earlier values are still rejected. A final zero or negative duration disables the deadline and fails the gate; a final positive duration is bounded at 30 minutes. For example, `GOFLAGS='-timeout=45m' go test -timeout=10m ./...` has an effective deadline of 10 minutes. Dynamic command-local `GOFLAGS` that cannot be verified is reported as unverifiable. The input default of a reusable workflow follows the same duration rules.
+`--test.timeout` both take a duration. For workflow commands, the audit resolves `GOFLAGS` from the command-local assignment, step environment, job environment, and workflow environment in that order. A literal value, including an empty string, overrides lower scopes, but a command-local assignment does not affect later commands. Unrelated environment keys do not override `GOFLAGS`. If the effective inherited `GOFLAGS` cannot be verified, the invocation is unverifiable even with a literal timeout on the command line. The audit reads timeout settings in the effective `GOFLAGS` before those on the command line. A timeout in inherited `GOFLAGS` must have an attached duration, and inherited and command-line timeout flags count toward the same reader bound. The last explicit setting wins, but malformed earlier values are still rejected. A final zero or negative duration disables the deadline and fails the gate; a final positive duration is bounded at 30 minutes. For example, `GOFLAGS='-timeout=45m' go test -timeout=10m ./...` has an effective deadline of 10 minutes. Dynamic command-local `GOFLAGS` is unverifiable and does not fall back to inherited `GOFLAGS`. The input default of a reusable workflow follows the same duration rules.
 
 A quoted shell scalar can fill a flag's value slot, as in `-run "$pattern"`. Go accepts flags
 before and after one contiguous package list, so a free-standing `"$word"` could be a flag in either position.
