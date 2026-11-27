@@ -5,10 +5,18 @@
 package forge
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
+// TestAuditTestTimeouts_MakeGOFLAGSGraph checks export detection and inheritance across literal rules.
 func TestAuditTestTimeouts_MakeGOFLAGSGraph(t *testing.T) {
 	const export = "release: export GOFLAGS := -timeout=0\n"
 	const check = "check: ; go test -timeout=30m ./...\n"
@@ -23,6 +31,10 @@ func TestAuditTestTimeouts_MakeGOFLAGSGraph(t *testing.T) {
 		{"private direct", "check: private export GOFLAGS := -timeout=0\n" + check, ":2 unverifiable test invocation: " + inherited},
 		{"private prerequisite", "release: export private GOFLAGS := -timeout=0\nrelease: check\n" + check, ""},
 		{"phony is not an edge", "release: export GOFLAGS := -timeout=0\n.PHONY: release check\nrelease: ; @true\n" + check, ""},
+		{"phony suppresses implicit search", "release.o: export GOFLAGS := -timeout=0\n.PHONY: release.o\nrelease.c: ; go test -timeout=30m ./...\n", ""},
+		{"conditional recipe does not prove implicit search is blocked", "release.o: export GOFLAGS := -timeout=0\nifdef EXPLICIT\nrelease.o: ; @true\nendif\nrelease.c: ; go test -timeout=30m ./...\n", ":5 unverifiable test invocation: " + inherited},
+		{"unrelated export assignment value", "export LOG_FIELDS := package GOFLAGS\n" + check, ""},
+		{"global export assignment", "export GOFLAGS := -timeout=0\n" + check, ":2 unverifiable test invocation: " + inherited},
 		{"global named export", "export GOFLAGS\nGOFLAGS = -timeout=0\n" + check, ":3 unverifiable test invocation: " + inherited},
 		{"global blanket export", ".EXPORT_ALL_VARIABLES:\nGOFLAGS = -timeout=0\n" + check, ":3 unverifiable test invocation: " + inherited},
 		{"read-time command has no target environment", export + "RESULT != go test -timeout=30m ./...\n", ""},
@@ -32,5 +44,86 @@ func TestAuditTestTimeouts_MakeGOFLAGSGraph(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertTimeoutFile(t, "Makefile", tc.makefile, tc.want)
 		})
+	}
+}
+
+// TestAuditTestTimeouts_MakeImplicitGOFLAGS compares the audit with GNU Make
+// in isolated directories using fixture Makefiles and a logging go stub.
+func TestAuditTestTimeouts_MakeImplicitGOFLAGS(t *testing.T) {
+	const export = "release.o: export GOFLAGS := -timeout=0\n"
+	const check = "release.c:\n\tgo test -timeout=30m ./...\n"
+	const inherited = "unverifiable test invocation: cannot verify inherited GOFLAGS from Make exports"
+	for _, tc := range []struct {
+		name, fixture, audit, flags string
+		goals                       []string
+	}{
+		{"builtin C rule", export + check, ":3 " + inherited, "-timeout=0\n", []string{"release.o"}},
+		{"independent explicit recipes", export + "release.o: ; @:\n" + check, "", "\n", []string{"release.o", "release.c"}},
+		{"explicit prerequisite still inherits", export + "release.o: release.c ; @:\n" + check, ":4 " + inherited, "-timeout=0\n", []string{"release.o"}},
+		{"private builtin parent", "release.o: private export GOFLAGS := -timeout=0\n" + check, "", "\n", []string{"release.o"}},
+		{"distinct directories", "left/release.o: export GOFLAGS := -timeout=0\nright/" + check, "", "\n", []string{"left/release.o", "right/release.c"}},
+		{"same basename phony goals", "left/check: export GOFLAGS := -timeout=0\n.PHONY: left/check right/check\nright/check: ; go test -timeout=30m ./...\n", "", "\n", []string{"left/check", "right/check"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertTimeoutFile(t, "Makefile", tc.fixture, tc.audit)
+			assertMakeGOFLAGSReference(t, tc.fixture, tc.flags, tc.goals)
+		})
+	}
+}
+
+func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []string) {
+	t.Helper()
+
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("GNU Make is not available")
+	}
+	makePath, err = filepath.Abs(makePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	ctx, err = util.WithCommandEnvironment(ctx, []string{"PATH=" + dir, "LC_ALL=C", "HOME=" + dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := util.RunCommand(ctx, dir, makePath, "--version"); err != nil || !strings.HasPrefix(out, "GNU Make ") {
+		t.Skip("GNU Make is not available")
+	}
+	writeMakeGOFLAGSFixture(t, dir, fixture)
+	args := append([]string{"-f", "fixture.mk", "-B", "SHELL=/bin/sh", "CC=:"}, goals...)
+	if out, err := util.RunCommand(ctx, dir, makePath, args...); err != nil {
+		t.Fatalf("GNU Make fixture: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "goflags.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("stub received GOFLAGS %q; want %q", got, want)
+	}
+}
+
+// writeMakeGOFLAGSFixture installs the Makefile, prerequisite files, and logging go stub.
+func writeMakeGOFLAGSFixture(t *testing.T, dir, fixture string) {
+	t.Helper()
+	for _, f := range []struct {
+		name, text string
+		mode       os.FileMode
+	}{
+		{"fixture.mk", fixture, 0600},
+		{"release.c", "", 0600},
+		{"left/release.c", "", 0600},
+		{"go", "#!/bin/sh\nprintf '%s\\n' \"${GOFLAGS-}\" > goflags.log\n", 0700},
+	} {
+		path := filepath.Join(dir, f.name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(f.text), f.mode); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

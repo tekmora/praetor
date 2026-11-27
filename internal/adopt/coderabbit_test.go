@@ -388,7 +388,7 @@ func TestCodeRabbitDryRun(t *testing.T) {
 	}
 }
 
-// TestAdoptCodeRabbitInstructionValidation checks apply and dry-run through the public entry point.
+// TestAdoptCodeRabbitInstructionValidation checks instruction validation through public Adopt and the isolated CodeRabbit step, including a completed outcome in the public dry-run report.
 func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
@@ -396,17 +396,19 @@ func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 	}{{"apply", false}, {"dry-run", true}} {
 		t.Run(mode.name, func(t *testing.T) {
 			for _, tc := range []struct {
-				name, field, wantError, wholeMode string
+				name, field, wantError    string
+				publicApply, publicDryRun bool
 			}{
-				{"custom", "instructions: 'Keep our CI policy.'", "", "apply"},
-				{"empty", "instructions: ''", "", ""},
-				{"at limit", "instructions: '" + strings.Repeat("\u00e4", 20000) + "'", "", ""},
-				{"over limit", "instructions: '" + strings.Repeat("\u00e4", 20001) + "'", "instructions have 20001 characters; the CodeRabbit schema allows at most 20000", "dry-run"},
-				{"missing", "# no instructions key", "instructions must be a string", ""},
-				{"null", "instructions: null", "instructions must be a string", "apply"},
+				{"custom", "instructions: 'Keep our CI policy.'", "", true, true},
+				{"empty", "instructions: ''", "", false, false},
+				{"at limit", "instructions: '" + strings.Repeat("\u00e4", 20000) + "'", "", false, false},
+				{"over limit", "instructions: '" + strings.Repeat("\u00e4", 20001) + "'", "instructions have 20001 characters; the CodeRabbit schema allows at most 20000", false, true},
+				{"missing", "# no instructions key", "instructions must be a string", false, false},
+				{"null", "instructions: null", "instructions must be a string", true, false},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					assertAdoptCodeRabbitValidation(t, mode.dryRun, tc.wholeMode == mode.name, tc.field, tc.wantError)
+					whole := tc.publicApply && !mode.dryRun || tc.publicDryRun && mode.dryRun
+					assertAdoptCodeRabbitValidation(t, mode.dryRun, whole, tc.field, tc.wantError)
 				})
 			}
 		})

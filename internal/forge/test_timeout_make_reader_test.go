@@ -6,6 +6,7 @@ package forge
 
 import "testing"
 
+// TestAuditTestTimeouts_MakeTargetSpecificGOFLAGS distinguishes exported bindings from lookalike syntax.
 func TestAuditTestTimeouts_MakeTargetSpecificGOFLAGS(t *testing.T) {
 	assertTimeoutFile(t, "Makefile", "test: export GOFLAGS := -timeout=0\ntest: ; go test ./...\n",
 		":2 unverifiable test invocation: cannot verify inherited GOFLAGS from Make exports")
@@ -14,6 +15,7 @@ func TestAuditTestTimeouts_MakeTargetSpecificGOFLAGS(t *testing.T) {
 	assertTimeoutFile(t, "Makefile", "test: export GOFLAGS\nexport: ; go test -timeout=30m ./...\n", "")
 }
 
+// TestAuditTestTimeouts_MakeShellAssignment checks which assignment text executes at read time.
 func TestAuditTestTimeouts_MakeShellAssignment(t *testing.T) {
 	assertTimeoutFile(t, "Makefile", "RESULT != go test -timeout=45m ./...\n", ":1 sets 45m, above the 30m bound")
 	assertTimeoutFile(t, "Makefile", "# heading\nRESULT != \\\n  go test -timeout=45m ./...\n", ":3 sets 45m, above the 30m bound")

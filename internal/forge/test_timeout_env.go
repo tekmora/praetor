@@ -23,12 +23,14 @@ const timeoutEnvPath = `(?:"\$(?:GITHUB_ENV|\{GITHUB_ENV\})"|\$(?:GITHUB_ENV\b|\
 var (
 	// Recognize an explicit PowerShell sink without interpreting its arguments as records.
 	timeoutEnvPowerShell = regexp.MustCompile(`(?im)^[ \t]*Add-Content[ \t]+(?:-LiteralPath[ \t]+|-Path[ \t]+)?(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:[ \t;\n]|$)`)
-	timeoutEnvRedirect   = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
-	timeoutEnvTee        = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
-	literalEnvEcho       = regexp.MustCompile(`^echo[ \t]+(.+?)[ \t]+>>[ \t]*` + timeoutEnvPath + `$`)
-	envRecordName        = regexp.MustCompile(`^` + parameterName + `=`)
-	runnerPathRecord     = regexp.MustCompile(`^"` + parameterName + `=\$(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE|\{(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE)\})(?:/[A-Za-z0-9_./-]*)?"$`)
-	timeoutEnvControl    = regexp.MustCompile(`^(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function|time|coproc|exit|return|exec|eval|source|\.|!)$`)
+	// PowerShell redirection is an unknown write; its payload is not parsed.
+	timeoutEnvPowerShellRedirect = regexp.MustCompile(`(?im)>>?[ \t]*(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:$|[ \t\n;&|)])`)
+	timeoutEnvRedirect           = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
+	timeoutEnvTee                = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
+	literalEnvEcho               = regexp.MustCompile(`^echo[ \t]+(.+?)[ \t]+>>[ \t]*` + timeoutEnvPath + `$`)
+	envRecordName                = regexp.MustCompile(`^` + parameterName + `=`)
+	runnerPathRecord             = regexp.MustCompile(`^"` + parameterName + `=\$(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE|\{(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE)\})(?:/[A-Za-z0-9_./-]*)?"$`)
+	timeoutEnvControl            = regexp.MustCompile(`^(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function|time|coproc|exit|return|exec|eval|source|\.|!)$`)
 )
 
 // workflowTimeoutEnvWrite records explicit writes, not effects of opaque actions.
@@ -44,12 +46,15 @@ func workflowTimeoutEnvWrite(spec *ghworkflow.Spec, run ghworkflow.RunStep) time
 	return posixTimeoutEnvWrite(script, run)
 }
 
+// nonPOSIXTimeoutEnvWrite reports explicit environment-file sinks without assuming their records are known.
 func nonPOSIXTimeoutEnvWrite(script, shell string) timeoutEnvWrite {
 	// POSIX quote and comment rules cannot establish what PowerShell executes.
 	powerShell := strings.EqualFold(shell, "pwsh") || strings.EqualFold(shell, "powershell")
-	return timeoutEnvWrite{set: mentionsTimeoutEnvSink([]byte(script)) || powerShell && timeoutEnvPowerShell.MatchString(script)}
+	return timeoutEnvWrite{set: mentionsTimeoutEnvSink([]byte(script)) || powerShell &&
+		(timeoutEnvPowerShell.MatchString(script) || timeoutEnvPowerShellRedirect.MatchString(script))}
 }
 
+// posixTimeoutEnvWrite inspects shell commands in source order after masking parsed comments.
 func posixTimeoutEnvWrite(script string, run ghworkflow.RunStep) timeoutEnvWrite {
 	if !strings.Contains(script, "GITHUB_ENV") {
 		return timeoutEnvWrite{}
@@ -66,10 +71,12 @@ func posixTimeoutEnvWrite(script string, run ghworkflow.RunStep) timeoutEnvWrite
 	return orderedTimeoutEnvWrites(clean, source.Commands, true, always)
 }
 
+// mentionsTimeoutEnvSink reports textual matches for POSIX environment-file redirects and tee operands.
 func mentionsTimeoutEnvSink(text []byte) bool {
 	return timeoutEnvRedirect.Match(text) || timeoutEnvTee.Match(text)
 }
 
+// timeoutEnvCommandSpan returns the byte range from the first prefix or word through the last word.
 func timeoutEnvCommandSpan(command hiss.ShellCodeCommand) [2]int {
 	words := command.Words
 	start := words[0].Span[0]
@@ -103,6 +110,7 @@ func flatTimeoutEnvCommands(clean []byte, commands []hiss.ShellCodeCommand) bool
 	return strings.Trim(string(clean[end:]), " \t\n;") == ""
 }
 
+// orderedTimeoutEnvWrites sorts commands by source position and keeps a write unknown once an unsupported write is seen.
 func orderedTimeoutEnvWrites(clean []byte, commands []hiss.ShellCodeCommand, ordinaryShell, always bool) timeoutEnvWrite {
 	sort.SliceStable(commands, func(i, j int) bool {
 		return timeoutEnvCommandSpan(commands[i])[0] < timeoutEnvCommandSpan(commands[j])[0]
@@ -127,6 +135,7 @@ func orderedTimeoutEnvWrites(clean []byte, commands []hiss.ShellCodeCommand, ord
 	return result
 }
 
+// timeoutEnvCommandWrite classifies a recognized echo record or checks for remaining sinks after masking inert words.
 func timeoutEnvCommandWrite(text []byte, command hiss.ShellCodeCommand, ordinaryShell, always bool) timeoutEnvWrite {
 	if !mentionsTimeoutEnvSink(text) {
 		return timeoutEnvWrite{}
@@ -181,6 +190,7 @@ func timeoutEnvMaskableLiteral(word hiss.ShellCodeWord) bool {
 	return word.Text != "tee" && word.Text != "-a"
 }
 
+// timeoutEnvEchoRecord ignores supported unrelated records and trusts GOFLAGS only for definite literal assignments.
 func timeoutEnvEchoRecord(payload hiss.ShellCodeWord, always bool) timeoutEnvWrite {
 	unknown := timeoutEnvWrite{set: true}
 	if !envRecordName.MatchString(payload.Value) || strings.ContainsAny(payload.Value, "\\\r\n") || strings.Contains(payload.Text, "${{") {

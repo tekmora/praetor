@@ -9,6 +9,7 @@ import (
 	"testing"
 )
 
+// TestTimeoutWorkflowEnvWrites checks how environment-file writes affect later test invocations.
 func TestTimeoutWorkflowEnvWrites(t *testing.T) {
 	const header = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
 	const write = "      - run: echo 'GOFLAGS=-timeout=0' >> \"$GITHUB_ENV\"\n"
@@ -33,6 +34,9 @@ func TestTimeoutWorkflowEnvWrites(t *testing.T) {
 		{"different job", write + "  unrelated:\n    runs-on: ubuntu-latest\n    steps:\n" + test, ""},
 		{"later write", test + write, ""},
 		{"PowerShell later step", "      - shell: pwsh\n        run: Add-Content $env:GITHUB_ENV 'GOFLAGS=-timeout=0'\n" + test, "prior GITHUB_ENV write"},
+		{"PowerShell append before Bash test", "      - shell: pwsh\n        run: |\n          \"GOFLAGS=-timeout=0\" >> $env:GITHUB_ENV\n      - shell: bash\n        run: go test ./...\n", "prior GITHUB_ENV write"},
+		{"Windows PowerShell redirect before Bash test", "      - shell: powershell\n        run: |\n          \"GOFLAGS=-timeout=0\" > \"$ENV:github_env\"\n      - shell: bash\n        run: go test ./...\n", "prior GITHUB_ENV write"},
+		{"PowerShell redirect to different file", "      - shell: pwsh\n        run: |\n          \"GOFLAGS=-timeout=0\" >> $env:GITHUB_OUTPUT\n" + test, ""},
 		{"PowerShell different file", "      - shell: pwsh\n        run: Add-Content $env:GITHUB_OUTPUT 'GOFLAGS=-timeout=0'\n" + test, ""},
 		{"PowerShell line comment", "      - shell: pwsh\n        run: \"# Add-Content $env:GITHUB_ENV 'GOFLAGS=-timeout=0'\"\n" + test, ""},
 		{"multiline body is not an assignment", "      - run: |\n          echo 'OTHER<<END' >> \"$GITHUB_ENV\"\n          echo 'GOFLAGS=-timeout=30m' >> \"$GITHUB_ENV\"\n          echo 'END' >> \"$GITHUB_ENV\"\n          echo 'GOFLAGS=-timeout=30m' >> \"$GITHUB_ENV\"\n" + test, "prior GITHUB_ENV write"},
@@ -54,6 +58,7 @@ func TestTimeoutWorkflowEnvWrites(t *testing.T) {
 	}
 }
 
+// TestTimeoutWorkflowGOFLAGSPrintf distinguishes read-only formatting from shell mutations of GOFLAGS.
 func TestTimeoutWorkflowGOFLAGSPrintf(t *testing.T) {
 	const header = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n"
 	for _, tc := range []struct {

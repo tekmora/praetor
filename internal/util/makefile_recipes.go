@@ -6,7 +6,6 @@ package util
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -73,8 +72,6 @@ func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 	return file, nil
 }
 
-var makefileGOFLAGSName = regexp.MustCompile(`(?:^|[ \t])GOFLAGS(?:$|[ \t]|:::=|::=|:=|[+?!]?=)`)
-
 // makefileMayExportGOFLAGS recognizes direct export directives without assuming
 // that the deciding assignment is on the export line or before a recipe.
 func makefileMayExportGOFLAGS(line string) bool {
@@ -93,7 +90,16 @@ func makefileDirectExportsGOFLAGS(text string) bool {
 	if len(text) <= len("export") || !strings.HasPrefix(text, "export") || !strings.ContainsRune(" \t", rune(text[len("export")])) {
 		return false
 	}
-	return makefileGOFLAGSName.MatchString(text[len("export"):])
+	rest := strings.TrimSpace(text[len("export"):])
+	if assign, _, _ := makefileSplit(rest); assign >= 0 {
+		return strings.TrimSpace(makefileSkipAssignmentModifiers(rest[:assign])) == "GOFLAGS"
+	}
+	for _, name := range strings.Fields(rest) {
+		if name == "GOFLAGS" {
+			return true
+		}
+	}
+	return false
 }
 
 // maxMakefileGraphEntries bounds the Cartesian product of rule heads and
@@ -103,19 +109,25 @@ const maxMakefileGraphEntries = 65536
 const makefileExportGOFLAGSProblem = "cannot verify inherited GOFLAGS from Make exports"
 
 type makefileGOFLAGSGraph struct {
-	seeds   map[string]bool // true if at least one export can be inherited
-	edges   map[string][]string
-	entries int
-	seen    bool
-	problem string
+	seeds       map[string]bool // true if at least one export can be inherited
+	edges       map[string][]string
+	phony       map[string]bool
+	explicit    map[string]bool
+	doubleColon map[string]bool
+	conditional int
+	entries     int
+	seen        bool
+	problem     string
 }
 
+// refuse records the first reason the literal graph cannot be trusted.
 func (g *makefileGOFLAGSGraph) refuse(line int, reason string) {
 	if g.problem == "" {
 		g.problem = fmt.Sprintf("cannot resolve target graph for inherited GOFLAGS: %s:%d: %s", makefileLabel, line+1, reason)
 	}
 }
 
+// makefileGraphName reports whether a name is a supported literal graph node.
 func makefileGraphName(name string) bool {
 	for i := 0; i < len(name); i++ {
 		if !makefileWordByte(name[i]) {
@@ -140,12 +152,18 @@ func (g *makefileGOFLAGSGraph) read(text string, names []string, prerequisites s
 		return
 	}
 	if names == nil {
-		g.readGraphAssignment(text, line)
+		g.readGraphNonRule(text, line)
 		return
 	}
 	g.readDependencies(names, prerequisites, line)
+	// A recipe on one double-colon clause does not suppress implicit
+	// search on another clause. Remember even conditional declarations.
+	if _, colon, _ := makefileSplit(text); g.problem == "" && colon >= 0 && strings.HasPrefix(text[colon:], "::") {
+		makefileMarkGraphNames(&g.doubleColon, names)
+	}
 }
 
+// readTargetBinding separates target-specific assignments from ordinary rules and exports.
 func (g *makefileGOFLAGSGraph) readTargetBinding(text string, line int) bool {
 	if makefileExportDirective(text) {
 		return false
@@ -155,26 +173,37 @@ func (g *makefileGOFLAGSGraph) readTargetBinding(text string, line int) bool {
 	return offset != 0 && g.readBinding(text, offset, colon, line)
 }
 
+// readGraphNonRule checks directives and assignments that can affect dependency discovery.
+func (g *makefileGOFLAGSGraph) readGraphNonRule(text string, line int) {
+	if fields := strings.Fields(text); len(fields) != 0 {
+		switch fields[0] {
+		case "vpath", "include", "-include", "sinclude":
+			g.refuse(line, "directive can change implicit prerequisite discovery")
+		}
+	}
+	g.readGraphAssignment(text, line)
+}
+
+// readGraphAssignment rejects assignments that can alter dependency discovery.
 func (g *makefileGOFLAGSGraph) readGraphAssignment(text string, line int) {
 	name, bound := makefileBoundName(text)
-	if bound && (makefileNameMayBe(name, ".EXTRA_PREREQS") || makefileNameMayBe(name, "MAKEFLAGS") && !makefileGraphHarmlessFlags(text)) {
+	if bound && (makefileNameMayBe(name, ".EXTRA_PREREQS") || makefileNameMayBe(name, "VPATH") || makefileNameMayBe(name, "MAKEFLAGS") && !makefileGraphHarmlessFlags(text)) {
 		g.refuse(line, "assignment can change the target graph")
 	}
 }
 
+// makefileGraphUnsupportedTarget identifies nonliteral names and unsupported special targets.
 func makefileGraphUnsupportedTarget(name string) bool {
 	return !makefileGraphName(name) || strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "./") && name != ".PHONY"
 }
 
+// readDependencies validates and records ordinary and order-only prerequisites.
 func (g *makefileGOFLAGSGraph) readDependencies(names []string, prerequisites string, line int) {
 	for _, name := range names {
 		if makefileGraphUnsupportedTarget(name) {
 			g.refuse(line, "unsupported target "+name)
 			return
 		}
-	}
-	if len(names) == 1 && names[0] == ".PHONY" {
-		return // its operands mark names, not build dependencies
 	}
 	if _, _, _, end := makefileSplitSyntax(prerequisites); end >= 0 {
 		prerequisites = prerequisites[:end]
@@ -186,17 +215,44 @@ func (g *makefileGOFLAGSGraph) readDependencies(names []string, prerequisites st
 			return
 		}
 	}
-	if g.reserve(len(names), 1+len(deps), line) {
-		g.addDependencies(names, deps)
+	if !g.reserve(len(names), 1+len(deps), line) {
+		return
+	}
+	if len(names) == 1 && names[0] == ".PHONY" {
+		if g.conditional == 0 {
+			makefileMarkGraphNames(&g.phony, deps)
+		}
+		return // its operands mark names, not build dependencies
+	}
+	g.addDependencies(names, deps)
+}
+
+func makefileMarkGraphNames(set *map[string]bool, names []string) {
+	if *set == nil {
+		*set = make(map[string]bool)
+	}
+	for _, name := range names {
+		(*set)[makefileGraphKey(name)] = true
 	}
 }
 
+func (g *makefileGOFLAGSGraph) recordRecipe(owners []string) {
+	if g.problem == "" && g.conditional == 0 && len(owners) != 0 {
+		// The owners have already been charged to the graph bound.
+		makefileMarkGraphNames(&g.explicit, owners)
+	}
+}
+
+// addDependencies adds normalized literal edges after the caller reserves their space.
 func (g *makefileGOFLAGSGraph) addDependencies(names, deps []string) {
 	if g.edges == nil {
 		g.edges = make(map[string][]string)
 	}
 	for _, name := range names {
 		name = makefileGraphKey(name)
+		if _, exists := g.edges[name]; !exists {
+			g.edges[name] = nil
+		}
 		for _, dep := range deps {
 			if dep != "|" {
 				g.edges[name] = append(g.edges[name], makefileGraphKey(dep))
@@ -205,12 +261,14 @@ func (g *makefileGOFLAGSGraph) addDependencies(names, deps []string) {
 	}
 }
 
+// makefileGraphHarmlessFlags reports whether a MAKEFLAGS assignment uses supported harmless flags.
 func makefileGraphHarmlessFlags(text string) bool {
 	assign, _, _ := makefileSplit(text)
 	_, width := makefileOperatorAt(text, assign)
 	return makefileHarmlessFlagsValue(text[assign:assign+width], text[assign+width:])
 }
 
+// reserve bounds graph storage before expanding a multi-target declaration.
 func (g *makefileGOFLAGSGraph) reserve(names, perName, line int) bool {
 	if names > (maxMakefileGraphEntries-g.entries)/perName {
 		g.refuse(line, fmt.Sprintf("target graph exceeds the %d-entry bound", maxMakefileGraphEntries))
@@ -220,6 +278,7 @@ func (g *makefileGOFLAGSGraph) reserve(names, perName, line int) bool {
 	return true
 }
 
+// makefileGraphKey normalizes leading current-directory prefixes for graph lookup.
 func makefileGraphKey(name string) string {
 	for strings.HasPrefix(name, "./") && len(name) > 2 {
 		name = name[2:]
@@ -227,6 +286,7 @@ func makefileGraphKey(name string) string {
 	return name
 }
 
+// readBinding checks graph-changing assignments and records target-specific exports.
 func (g *makefileGOFLAGSGraph) readBinding(text string, offset, colon, line int) bool {
 	binding := text[offset:]
 	name, bound := makefileBoundName(binding)
@@ -246,6 +306,7 @@ func (g *makefileGOFLAGSGraph) readBinding(text string, offset, colon, line int)
 	return true
 }
 
+// makefileBindingExport reads export and private modifiers before the bound name.
 func makefileBindingExport(binding string) (exported, private bool) {
 	assign, _, _ := makefileSplit(binding)
 	fields := strings.Fields(binding[:assign])
@@ -256,6 +317,7 @@ func makefileBindingExport(binding string) (exported, private bool) {
 	return exported, private
 }
 
+// addExportSeeds records where GOFLAGS is exported and whether it can propagate.
 func (g *makefileGOFLAGSGraph) addExportSeeds(names []string, private bool, line int) {
 	if g.problem != "" || !g.reserve(len(names), 1, line) {
 		return
@@ -273,6 +335,7 @@ func (g *makefileGOFLAGSGraph) addExportSeeds(names []string, private bool, line
 	}
 }
 
+// annotate marks recipes whose runtime GOFLAGS cannot be verified from the file.
 func (g *makefileGOFLAGSGraph) annotate(recipes []MakefileRecipe) {
 	if !g.seen {
 		return
@@ -286,7 +349,49 @@ func (g *makefileGOFLAGSGraph) annotate(recipes []MakefileRecipe) {
 	}
 }
 
+// makefileImplicitFamily is a fallback for targets that can use implicit
+// rules. Preserve the directory GNU Make puts back on prerequisites when
+// matching slashless target patterns.
+func makefileImplicitFamily(name string) string {
+	i := strings.LastIndexByte(name, '/') + 1
+	dir, base := name[:i], name[i:]
+	for strings.HasPrefix(base, "s.") {
+		base = base[2:]
+	}
+	stem, _, _ := strings.Cut(base, ".")
+	stem, _, _ = strings.Cut(stem, ",")
+	return dir + stem
+}
+
+// indexImplicitFamilies groups graph targets by possible implicit prerequisite family.
+func (g *makefileGOFLAGSGraph) indexImplicitFamilies() map[string][]string {
+	families := make(map[string][]string)
+	for name := range g.edges {
+		family := makefileImplicitFamily(name)
+		families[family] = append(families[family], name)
+		// Built-in terminal retrieval rules can use RCS/ and SCCS/
+		// under the target's directory. Index these source names there too.
+		if dir, base, ok := strings.Cut(family, "\x00"); ok {
+			_ = dir
+			_ = base
+		}
+		i := strings.LastIndexByte(name, '/') + 1
+		dir, base := name[:i], name[i:]
+		if parent, ok := strings.CutSuffix(dir, "RCS/"); ok && (parent == "" || strings.HasSuffix(parent, "/")) {
+			key := makefileImplicitFamily(parent + base)
+			families[key] = append(families[key], name)
+		} else if parent, ok := strings.CutSuffix(dir, "SCCS/"); ok && (parent == "" || strings.HasSuffix(parent, "/")) {
+			key := makefileImplicitFamily(parent + base)
+			families[key] = append(families[key], name)
+		}
+	}
+	return families
+}
+
+// inheritedTargets follows explicit edges and conservatively joins possible
+// implicit prerequisite families. Each family is expanded at most once.
 func (g *makefileGOFLAGSGraph) inheritedTargets() map[string]bool {
+	families := g.indexImplicitFamilies()
 	// Keep private seeds separate from the worklist: they are affected locally,
 	// but only a non-private export or an incoming path starts propagation.
 	inherited := make(map[string]bool)
@@ -303,13 +408,23 @@ func (g *makefileGOFLAGSGraph) inheritedTargets() map[string]bool {
 		}
 	}
 	for i := 0; i < len(queue); i++ {
-		for _, dep := range g.edges[queue[i]] {
+		name := queue[i]
+		for _, dep := range g.edges[name] {
 			push(dep)
 		}
+		if g.phony[name] || g.explicit[name] && !g.doubleColon[name] {
+			continue
+		}
+		family := makefileImplicitFamily(name)
+		for _, candidate := range families[family] {
+			push(candidate)
+		}
+		delete(families, family)
 	}
 	return inherited
 }
 
+// recipeProblem reports graph uncertainty or a possible export for the recipe owners.
 func (g *makefileGOFLAGSGraph) recipeProblem(owners []string, inherited map[string]bool) string {
 	if g.problem != "" {
 		return g.problem
@@ -462,6 +577,7 @@ func (s *makefileRecipeReader) recipeText(parts []string, start int) (MakefileRe
 	return s.ruleRecipeText(parts, syntax, trimmed, start)
 }
 
+// tabbedRecipeText extracts a tabbed recipe and attaches its current rule owners.
 func (s *makefileRecipeReader) tabbedRecipeText(parts []string, start int) (MakefileRecipe, bool) {
 	if !s.inRecipe(parts[0]) {
 		return MakefileRecipe{}, false
@@ -474,10 +590,13 @@ func (s *makefileRecipeReader) tabbedRecipeText(parts []string, start int) (Make
 	recipe.owners = s.owners
 	if kind == makefileUnsureLine {
 		s.graph.refuse(start, "conditional recipe boundary")
+	} else {
+		s.graph.recordRecipe(s.owners)
 	}
 	return recipe, true
 }
 
+// readRecipeConditional handles branch boundaries that can obscure recipe ownership.
 func (s *makefileRecipeReader) readRecipeConditional(trimmed string, start int) bool {
 	fields := strings.Fields(trimmed)
 	if !makefileConditionalLine(trimmed, fields) {
@@ -488,12 +607,19 @@ func (s *makefileRecipeReader) readRecipeConditional(trimmed string, start int) 
 	if fields[0] == "else" || fields[0] == "endif" {
 		s.owners = nil
 	}
+	switch fields[0] {
+	case "ifeq", "ifneq", "ifdef", "ifndef":
+		s.graph.conditional++
+	case "endif":
+		s.graph.conditional--
+	}
 	if makefileEvaluatesText(trimmed) {
 		s.graph.refuse(start, "conditional may evaluate Make syntax")
 	}
 	return true
 }
 
+// ruleRecipeText records a rule and extracts its inline recipe, if present.
 func (s *makefileRecipeReader) ruleRecipeText(parts []string, syntax, trimmed string, start int) (MakefileRecipe, bool) {
 	names, prerequisites := makefileRule(syntax)
 	s.graph.read(trimmed, names, prerequisites, start)
@@ -509,6 +635,9 @@ func (s *makefileRecipeReader) ruleRecipeText(parts []string, syntax, trimmed st
 	}
 	recipe, found := makefileInlineRecipe(parts, start)
 	recipe.owners = names
+	if found {
+		s.graph.recordRecipe(names)
+	}
 	return recipe, found
 }
 
@@ -593,6 +722,7 @@ func makefileTargetAssignmentOffset(syntax string) int {
 	return makefileTargetAssignmentStart(syntax, assign, colon)
 }
 
+// makefileTargetAssignmentStart returns the offset after a rule separator preceding an assignment.
 func makefileTargetAssignmentStart(syntax string, assign, colon int) int {
 	if colon >= 0 && (assign < 0 || colon < assign) {
 		_, width := makefileOperatorAt(syntax, colon)
