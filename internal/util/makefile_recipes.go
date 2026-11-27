@@ -29,6 +29,8 @@ type MakefileRecipeFile struct {
 	Recipes []MakefileRecipe
 	// Immediate holds non-recipe source that can be expanded while Make reads the file.
 	Immediate []MakefileRecipe
+	// ShellAssignments holds the commands executed by != assignments while Make reads the file.
+	ShellAssignments []MakefileRecipe
 	// MayExportGOFLAGS reports an explicit GOFLAGS export or a blanket export mode.
 	MayExportGOFLAGS bool
 }
@@ -55,6 +57,9 @@ func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 			file.Recipes = append(file.Recipes, recipe)
 		} else if !inDefinition && reader.depth == 0 {
 			file.MayExportGOFLAGS = file.MayExportGOFLAGS || makefileMayExportGOFLAGS(makefileJoinSyntax(parts))
+			if command, ok := makefileShellAssignment(parts, start); ok {
+				file.ShellAssignments = append(file.ShellAssignments, command)
+			}
 			if immediate, ok := makefileImmediateSource(parts, start); ok {
 				file.Immediate = append(file.Immediate, immediate)
 			}
@@ -69,8 +74,37 @@ var makefileGOFLAGSName = regexp.MustCompile(`(?:^|[ \t])GOFLAGS(?:$|[ \t]|:::=|
 // makefileMayExportGOFLAGS recognizes direct export directives without assuming
 // that the deciding assignment is on the export line or before a recipe.
 func makefileMayExportGOFLAGS(line string) bool {
-	text := makefileImmediateSyntax(line)
-	text = strings.TrimSpace(text)
+	text := strings.TrimSpace(makefileImmediateSyntax(line))
+	if !makefileExportDirective(text) {
+		if offset := makefileTargetAssignmentOffset(text); offset != 0 {
+			return makefileTargetExportsGOFLAGS(text[offset:])
+		}
+	}
+	return makefileDirectExportsGOFLAGS(text)
+}
+
+// makefileTargetExportsGOFLAGS checks the assignment suffix after a rule separator.
+func makefileTargetExportsGOFLAGS(binding string) bool {
+	assign, _, _ := makefileSplit(binding)
+	if !makefileBindsVariable(binding) {
+		return false
+	}
+	left := binding[:assign]
+	names := makefileNameWords(left)
+	if len(names) != 1 || names[0] != "GOFLAGS" {
+		return false
+	}
+	fields := strings.Fields(left)
+	for _, modifier := range fields[:makefileDirectiveIndex(fields)] {
+		if modifier == "export" {
+			return true
+		}
+	}
+	return false
+}
+
+// makefileDirectExportsGOFLAGS checks a trimmed line for a blanket or named export.
+func makefileDirectExportsGOFLAGS(text string) bool {
 	for strings.HasPrefix(text, "override ") || strings.HasPrefix(text, "override\t") {
 		text = strings.TrimSpace(text[len("override"):])
 	}
@@ -219,10 +253,8 @@ func (s *makefileRecipeReader) recipeText(parts []string, start int) (MakefileRe
 	return makefileInlineRecipe(parts, start)
 }
 
-// makefileImmediateSource collects candidate-bearing expansion sites without evaluating Make.
-// An ordinary literal assignment is not a shell command, even with an immediate operator.
-func makefileImmediateSource(parts []string, start int) (MakefileRecipe, bool) {
-	// Keep physical line offsets, but treat non-recipe continuations as whitespace.
+// makefileImmediateText keeps physical line offsets while exposing non-recipe continuations as whitespace.
+func makefileImmediateText(parts []string) string {
 	var logical strings.Builder
 	for i, part := range parts {
 		if i+1 < len(parts) {
@@ -232,7 +264,40 @@ func makefileImmediateSource(parts []string, start int) (MakefileRecipe, bool) {
 			logical.WriteString(part)
 		}
 	}
-	text := makefileImmediateSyntax(logical.String())
+	return makefileImmediateSyntax(logical.String())
+}
+
+// makefileShellAssignment extracts only the command, not the variable name or operator.
+func makefileShellAssignment(parts []string, start int) (MakefileRecipe, bool) {
+	text := makefileImmediateText(parts)
+	syntax := strings.ReplaceAll(text, "\n", " ")
+	if makefileConditionalLine(syntax, strings.Fields(syntax)) {
+		return MakefileRecipe{}, false
+	}
+	offset := makefileTargetAssignmentOffset(syntax)
+	if offset != 0 && makefileExportDirective(syntax) {
+		return MakefileRecipe{}, false
+	}
+	binding := syntax[offset:]
+	assign, _, _ := makefileSplit(binding)
+	if !makefileBindsVariable(binding) || len(makefileNameWords(binding[:assign])) != 1 || !strings.HasPrefix(binding[assign:], "!=") {
+		return MakefileRecipe{}, false
+	}
+	// Leave expansions on the name side to the existing immediate-site check.
+	// The command itself starts after the operator, possibly on a later physical line.
+	end := offset + assign + len("!=")
+	command := strings.TrimLeft(text[end:], " \t\n")
+	start += strings.Count(text[:len(text)-len(command)], "\n")
+	// A Make continuation becomes a space, not a shell command separator.
+	// A space followed by a shell splice preserves that space and the physical line count.
+	command = strings.ReplaceAll(command, "\n", " \\\n")
+	return makefileRecipeReferences(command, start), true
+}
+
+// makefileImmediateSource collects candidate-bearing expansion sites without evaluating Make.
+// An ordinary literal assignment is not a shell command, even with an immediate operator.
+func makefileImmediateSource(parts []string, start int) (MakefileRecipe, bool) {
+	text := makefileImmediateText(parts)
 	if !strings.Contains(text, "$") {
 		return MakefileRecipe{}, false
 	}
@@ -248,14 +313,9 @@ func makefileImmediateSource(parts []string, start int) (MakefileRecipe, bool) {
 func makefileDeferredAssignment(text string) int {
 	// Use spaces for syntax checks but keep the same offsets as the physical source.
 	syntax := strings.ReplaceAll(text, "\n", " ")
-	assign, colon, _ := makefileSplit(syntax)
-	offset := 0
-	if colon >= 0 && (assign < 0 || colon < assign) {
-		_, width := makefileOperatorAt(syntax, colon)
-		offset = colon + width
-		syntax = syntax[offset:]
-		assign, _, _ = makefileSplit(syntax)
-	}
+	offset := makefileTargetAssignmentOffset(syntax)
+	syntax = syntax[offset:]
+	assign, _, _ := makefileSplit(syntax)
 	if assign < 0 || !makefileBindsVariable(syntax) || len(makefileNameWords(syntax[:assign])) != 1 {
 		return -1
 	}
@@ -265,6 +325,17 @@ func makefileDeferredAssignment(text string) int {
 		return offset + assign
 	}
 	return -1
+}
+
+// makefileTargetAssignmentOffset locates the text after a leading rule separator.
+// Callers still have to establish that the suffix binds a variable.
+func makefileTargetAssignmentOffset(syntax string) int {
+	assign, colon, _ := makefileSplit(syntax)
+	if colon >= 0 && (assign < 0 || colon < assign) {
+		_, width := makefileOperatorAt(syntax, colon)
+		return colon + width
+	}
+	return 0
 }
 
 // makefileImmediateSyntax stops at the first unescaped top-level comment,

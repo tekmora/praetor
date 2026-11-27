@@ -47,7 +47,8 @@ type TestTimeoutOptions struct {
 // AuditTestTimeouts checks workflow and root Makefile lines against the per-package timeout
 // bound. It proves commands in bash or sh workflow steps (step, job, workflow, then runner
 // default) and literal Makefile recipes without .ONESHELL, including named test-command assignments.
-// Workflow GOFLAGS comes from the command, step, job, or workflow, in that order.
+// Workflow GOFLAGS comes from the command, step, earlier run-step environment-file
+// writes, job, or workflow, in that order.
 // Explicit command-line timeout flags follow GOFLAGS; the last valid setting decides the bound.
 // Before test, go or go.exe may take only the two-word -C dir. Each raw candidate must map to
 // a resolved command or shell comment. Unknown shells, enclosing Make functions, attached
@@ -224,18 +225,26 @@ func workflowTimeouts(rel string, data []byte) ([]string, error) {
 	defaults := workflowCallDefaults(&spec)
 	var out []string
 	var failures []error
+	var jobID string
+	var inherited timeoutEnvWrite
 	for _, run := range steps {
-		findings, err := workflowRunTimeouts(rel, &spec, run, defaults)
+		if run.JobID != jobID {
+			jobID, inherited = run.JobID, timeoutEnvWrite{}
+		}
+		findings, err := workflowRunTimeouts(rel, &spec, run, defaults, inherited)
 		if err != nil {
 			failures = append(failures, err)
 		}
 		out = append(out, findings...)
+		if write := workflowTimeoutEnvWrite(&spec, run); write.set {
+			inherited = write
+		}
 	}
 	return out, errors.Join(failures...)
 }
 
 // workflowRunTimeouts checks candidate-bearing steps under their resolved interpreter.
-func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunStep, defaults map[string]exprValue) ([]string, error) {
+func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunStep, defaults map[string]exprValue, writes ...timeoutEnvWrite) ([]string, error) {
 	script := strings.ReplaceAll(run.Step.Run, "\r\n", "\n")
 	location := timeoutSource{file: rel, line: func(n int) int { return hiss.WorkflowRunLine(run.Step, n+1) }}
 	candidate := rawTestCandidate(script)
@@ -252,5 +261,16 @@ func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunSt
 	}
 	flags, known := ghworkflow.LiteralEnvValue("GOFLAGS", &run.Step.Env, &run.Job.Env, &spec.Env)
 	location.envGOFLAGS, location.unknownEnvGOFLAGS = flags, !known
+	if len(writes) != 0 && writes[0].set {
+		_, stepSet, _ := ghworkflow.EnvValue("GOFLAGS", &run.Step.Env)
+		_, stepKnown := ghworkflow.LiteralEnvValue("GOFLAGS", &run.Step.Env)
+		if !stepSet && stepKnown {
+			location.envGOFLAGS = writes[0].value
+			location.unknownEnvGOFLAGS = false
+			if !writes[0].known {
+				location.goFlagsProblem = "cannot verify inherited GOFLAGS from prior GITHUB_ENV write"
+			}
+		}
+	}
 	return location.check(script, source, defaults)
 }

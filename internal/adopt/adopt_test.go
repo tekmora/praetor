@@ -567,12 +567,11 @@ const renamedHarness = `{
 func TestAdoptForcePatchesOnlyHarnessPlatform(t *testing.T) {
 	for name, eol := range map[string]string{"LF": "\n", "CRLF": "\r\n"} {
 		t.Run(name, func(t *testing.T) {
-			whole := true
 			repoPath := newTestRepo(t, "legacy")
 			original := strings.ReplaceAll(renamedHarness, "\n", eol)
 			mustWrite(t, filepath.Join(repoPath, manifestFile), legacyManifest)
 			mustWrite(t, filepath.Join(repoPath, paperclipFile), original)
-			plain, err := legacyPaperclipAdoptOrStep(t, sourceAdoptOptions(t, repoPath, false), whole)
+			plain, err := Adopt(t.Context(), sourceAdoptOptions(t, repoPath, false))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -580,7 +579,7 @@ func TestAdoptForcePatchesOnlyHarnessPlatform(t *testing.T) {
 				!strings.Contains(strings.Join(plain.Warnings, "\n"), `audit expects "acme/legacy". Re-run praetorctl adopt --force --lock-source-root=`) {
 				t.Fatalf("plain run: harness changed or mismatch not warned: %v", plain.Warnings)
 			}
-			forced, err := legacyPaperclipAdoptOrStep(t, sourceAdoptOptions(t, repoPath, true), false)
+			forced, err := Adopt(t.Context(), sourceAdoptOptions(t, repoPath, true))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -593,7 +592,7 @@ func TestAdoptForcePatchesOnlyHarnessPlatform(t *testing.T) {
 				t.Fatalf("platform patch not reported as a one-line replace: %+v", forced.ActionDetails)
 			}
 			requirePassingSourceGate(t, repoPath, paperclipFile)
-			again, err := legacyPaperclipAdoptOrStep(t, sourceAdoptOptions(t, repoPath, true), false)
+			again, err := Adopt(t.Context(), sourceAdoptOptions(t, repoPath, true))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -105,23 +105,15 @@ func makefileTimeouts(text string) ([]string, error) {
 	if err != nil {
 		return nil, makefileTimeoutParseError(text, err)
 	}
-	var findings []string
-	var failures []error
 	oneShell := file.Targets[".ONESHELL"] || util.MakefileHasTarget(text, ".ONESHELL")
 	source := makefileTimeoutSource(text)
 	if file.MayExportGOFLAGS || file.Targets[".EXPORT_ALL_VARIABLES"] {
 		source.goFlagsProblem = "cannot verify inherited GOFLAGS from Make exports"
 	}
-	for _, recipe := range file.Recipes {
-		if oneShell && recipe.Unresolved == "" {
-			recipe.Unresolved = ".ONESHELL recipes share a shell"
-		}
-		result, err := source.recipeTimeouts(recipe)
-		if err != nil {
-			failures = append(failures, err)
-		}
-		findings = append(findings, result...)
-	}
+	var findings []string
+	var failures []error
+	source.collectMakefileCommandTimeouts(file.Recipes, oneShell, &findings, &failures)
+	source.collectMakefileCommandTimeouts(file.ShellAssignments, false, &findings, &failures)
 	for _, immediate := range file.Immediate {
 		if err := source.immediateMakeTimeout(immediate); err != nil {
 			failures = append(failures, err)
@@ -130,8 +122,23 @@ func makefileTimeouts(text string) ([]string, error) {
 	return findings, errors.Join(failures...)
 }
 
+// collectMakefileCommandTimeouts appends findings and individual errors in source order.
+// sharedShell applies only to recipes and does not replace an existing unresolved reason.
+func (s timeoutSource) collectMakefileCommandTimeouts(commands []util.MakefileRecipe, sharedShell bool, findings *[]string, failures *[]error) {
+	for _, command := range commands {
+		if sharedShell && command.Unresolved == "" {
+			command.Unresolved = ".ONESHELL recipes share a shell"
+		}
+		result, err := s.recipeTimeouts(command)
+		if err != nil {
+			*failures = append(*failures, err)
+		}
+		*findings = append(*findings, result...)
+	}
+}
+
 // immediateMakeTimeout refuses candidate-bearing Make functions rather than treating
-// their arguments as shell code. Literal command assignments are not execution sites.
+// their arguments as shell code. Commands executed by != are checked separately.
 func (s timeoutSource) immediateMakeTimeout(source util.MakefileRecipe) error {
 	first := len(source.Text)
 	for start, end := range source.LiteralSpans {
@@ -254,20 +261,31 @@ func (s timeoutSource) shellGOFLAGSOffset(script string, source hiss.ShellComman
 	}
 	text := append([]byte(nil), uncommented...)
 	for _, command := range source.Commands {
-		args, reason := s.commandArgs(script, command)
-		if args == nil || reason != "" {
-			continue
-		}
-		for _, word := range command.Prefix {
-			if strings.HasPrefix(word.Code, "GOFLAGS=") && literalGoFlags.MatchString(strings.TrimPrefix(word.Text, "GOFLAGS=")) {
-				blankTimeoutSpan(text, word.Span)
-			}
-		}
+		s.blankAccountedGOFLAGS(script, command, text)
 	}
 	if at := shellGOFLAGSName.FindIndex(text); at != nil {
 		return at[0]
 	}
 	return len(script)
+}
+
+// blankAccountedGOFLAGS masks read-only printf operands and literal test-local
+// GOFLAGS prefixes in text without changing source offsets.
+func (s timeoutSource) blankAccountedGOFLAGS(script string, command hiss.ShellCodeCommand, text []byte) {
+	if s.readOnlyGOFLAGSPrintf(script, command) {
+		for _, word := range command.Words[1:] {
+			blankTimeoutSpan(text, word.Span)
+		}
+	}
+	args, reason := s.commandArgs(script, command)
+	if args == nil || reason != "" {
+		return
+	}
+	for _, word := range command.Prefix {
+		if strings.HasPrefix(word.Code, "GOFLAGS=") && literalGoFlags.MatchString(strings.TrimPrefix(word.Text, "GOFLAGS=")) {
+			blankTimeoutSpan(text, word.Span)
+		}
+	}
 }
 
 // check erases only proven program words and comments from a copy of the source. Any
