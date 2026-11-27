@@ -1308,6 +1308,9 @@ func TestAuditTestTimeouts_PositiveDeadline(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_CommandLocalGOFLAGS checks timeout flag precedence in Make recipes
+// and workflow steps, including explicit overrides and rejection of malformed timeout flags
+// or dynamic command-local GOFLAGS assignments.
 func TestAuditTestTimeouts_CommandLocalGOFLAGS(t *testing.T) {
 	const noDeadline = "unverifiable test invocation: 0 disables the test deadline"
 	const aboveBound = "sets 45m, above the 30m bound"

@@ -163,9 +163,9 @@ func readTestTimeoutFiles(ctx context.Context, root string) ([]workflowFile, err
 	return append(files, workflowFile{Name: "Makefile", Data: data}), nil
 }
 
-// judgeTimeout returns the finding for one -timeout value at where, "" within the bound. A value
-// ${{ inputs.<id> }} is judged by that input's workflow_call default; an input without a
-// literal default the gate can read is unreadable, as any other value it cannot parse.
+// parseTimeoutDuration parses a -timeout value, resolving ${{ inputs.<id> }} to the input's
+// literal workflow_call default and including that default in the display value. It returns
+// a reason if the input has no literal default or the duration cannot be parsed.
 func parseTimeoutDuration(raw string, defaults map[string]exprValue) (d time.Duration, shown, reason string) {
 	value, shown := raw, raw
 	if input := inputExpression.FindStringSubmatch(raw); input != nil {
@@ -182,6 +182,9 @@ func parseTimeoutDuration(raw string, defaults map[string]exprValue) (d time.Dur
 	return d, shown, ""
 }
 
+// judgeTimeout checks one -timeout value at where. It returns a finding for a duration
+// above the bound, a reason for an unreadable or nonpositive duration, or two empty
+// strings for a positive duration within the bound.
 func judgeTimeout(where, raw string, defaults map[string]exprValue) (finding, reason string) {
 	d, shown, reason := parseTimeoutDuration(raw, defaults)
 	if reason != "" {
