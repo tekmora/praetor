@@ -89,7 +89,7 @@ func TestAdopt_Negative_ReAdoptionDoesNotAbsorbNewDebt(t *testing.T) {
 
 			opts := readoptOptions(t, repoPath)
 			opts.Force = force
-			rep, err := baselineReadoptOrStep(t, opts, false)
+			rep, err := Adopt(t.Context(), opts)
 			if err != nil {
 				t.Fatalf("re-adoption: %v", err)
 			}

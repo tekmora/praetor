@@ -6,6 +6,7 @@ package util
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -28,6 +29,8 @@ type MakefileRecipeFile struct {
 	Recipes []MakefileRecipe
 	// Immediate holds non-recipe source that can be expanded while Make reads the file.
 	Immediate []MakefileRecipe
+	// MayExportGOFLAGS reports an explicit GOFLAGS export or a blanket export mode.
+	MayExportGOFLAGS bool
 }
 
 // MakefileRecipes reads default-tab recipes and visits every conditional branch.
@@ -51,6 +54,7 @@ func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 		if found {
 			file.Recipes = append(file.Recipes, recipe)
 		} else if !inDefinition && reader.depth == 0 {
+			file.MayExportGOFLAGS = file.MayExportGOFLAGS || makefileMayExportGOFLAGS(makefileJoinSyntax(parts))
 			if immediate, ok := makefileImmediateSource(parts, start); ok {
 				file.Immediate = append(file.Immediate, immediate)
 			}
@@ -58,6 +62,25 @@ func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 		start = end
 	}
 	return file, nil
+}
+
+var makefileGOFLAGSName = regexp.MustCompile(`(?:^|[ \t])GOFLAGS(?:$|[ \t]|:::=|::=|:=|[+?!]?=)`)
+
+// makefileMayExportGOFLAGS recognizes direct export directives without assuming
+// that the deciding assignment is on the export line or before a recipe.
+func makefileMayExportGOFLAGS(line string) bool {
+	text := makefileImmediateSyntax(line)
+	text = strings.TrimSpace(text)
+	for strings.HasPrefix(text, "override ") || strings.HasPrefix(text, "override\t") {
+		text = strings.TrimSpace(text[len("override"):])
+	}
+	if text == "export" {
+		return true
+	}
+	if len(text) <= len("export") || !strings.HasPrefix(text, "export") || !strings.ContainsRune(" \t", rune(text[len("export")])) {
+		return false
+	}
+	return makefileGOFLAGSName.MatchString(text[len("export"):])
 }
 
 // makefileRecipeEnd delimits the logical line before checking the bounds used by the Make syntax reader.
@@ -209,44 +232,57 @@ func makefileImmediateSource(parts []string, start int) (MakefileRecipe, bool) {
 			logical.WriteString(part)
 		}
 	}
-	text := logical.String()
-	text, syntax := makefileImmediateSyntax(text)
+	text := makefileImmediateSyntax(logical.String())
 	if !strings.Contains(text, "$") {
 		return MakefileRecipe{}, false
 	}
-	if eq := strings.IndexByte(string(syntax), '='); eq >= 0 {
-		lhs := strings.TrimRight(string(syntax[:eq]), " \t\n")
-		// += depends on the variable flavor. Treat it conservatively; plain =
-		// and ?= do not expand their right-hand sides on assignment.
-		if !strings.HasSuffix(lhs, ":") && !strings.HasSuffix(lhs, "!") && !strings.HasSuffix(lhs, "+") {
-			text = text[:eq]
-		}
+	if end := makefileDeferredAssignment(text); end >= 0 {
+		text = text[:end]
 	}
 	return makefileRecipeReferences(text, start), true
 }
 
-// makefileImmediateSyntax masks references and stops at the first unescaped
-// top-level comment without shifting source offsets.
-func makefileImmediateSyntax(text string) (string, []byte) {
-	syntax := []byte(text)
-	limit := len(text)
-	for i := 0; i < limit; {
+// makefileDeferredAssignment returns the offset of a deferred assignment operator,
+// or -1 when the line does not bind a variable with = or ?=. The name side may
+// still expand immediately. += depends on the variable's flavor, so keep its value.
+func makefileDeferredAssignment(text string) int {
+	// Use spaces for syntax checks but keep the same offsets as the physical source.
+	syntax := strings.ReplaceAll(text, "\n", " ")
+	assign, colon, _ := makefileSplit(syntax)
+	offset := 0
+	if colon >= 0 && (assign < 0 || colon < assign) {
+		_, width := makefileOperatorAt(syntax, colon)
+		offset = colon + width
+		syntax = syntax[offset:]
+		assign, _, _ = makefileSplit(syntax)
+	}
+	if assign < 0 || !makefileBindsVariable(syntax) || len(makefileNameWords(syntax[:assign])) != 1 {
+		return -1
+	}
+	_, width := makefileOperatorAt(syntax, assign)
+	switch syntax[assign : assign+width] {
+	case "=", "?=":
+		return offset + assign
+	}
+	return -1
+}
+
+// makefileImmediateSyntax stops at the first unescaped top-level comment,
+// leaving references and physical line offsets intact.
+func makefileImmediateSyntax(text string) string {
+	for i := 0; i < len(text); {
 		switch text[i] {
 		case '\\':
-			i += 2
+			i += makefileEscapeWidth(text, i)
 		case '$':
-			end := i + makefileReferenceWidth(text[i:])
-			for j := i; j < end; j++ {
-				syntax[j] = 'x'
-			}
-			i = end
+			i += makefileReferenceWidth(text[i:])
 		case '#':
-			return text[:i], syntax[:i]
+			return text[:i]
 		default:
 			i++
 		}
 	}
-	return text, syntax
+	return text
 }
 
 // makefileInlineRecipe parses an inline target rule recipe starting after a semicolon separator.

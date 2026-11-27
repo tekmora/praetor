@@ -64,6 +64,7 @@ type timeoutSource struct {
 	packageName       string
 	envGOFLAGS        string   // literal workflow environment before command-local overrides
 	unknownEnvGOFLAGS bool     // the deciding workflow environment is not provably literal
+	goFlagsProblem    string   // inherited GOFLAGS may have been changed outside the invocation
 	goFlags           []string // timeout values from this command's effective GOFLAGS, in order
 }
 
@@ -89,19 +90,28 @@ func (s timeoutSource) refuse(script string, offset int, reason string) error {
 	return unverifiableTestInvocation(s.file, s.line(strings.Count(script[:offset], "\n")), reason)
 }
 
+// makefileTimeoutParseError reports a recipe reader error only if the Makefile
+// contains a test candidate after recipe line splices are removed.
+func makefileTimeoutParseError(text string, err error) error {
+	if !testInvocation.MatchString(strings.NewReplacer("\\\r\n\t", "", "\\\n\t", "").Replace(text)) {
+		return nil
+	}
+	return fmt.Errorf("[FAIL] %s: %w", testTimeoutGate, err)
+}
+
 // makefileTimeouts checks recipes and immediate Make expansions, keeping independent findings.
 func makefileTimeouts(text string) ([]string, error) {
 	file, err := util.MakefileRecipes(text, maxTimeoutWorkflowLines)
 	if err != nil {
-		if !testInvocation.MatchString(strings.NewReplacer("\\\r\n\t", "", "\\\n\t", "").Replace(text)) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("[FAIL] %s: %w", testTimeoutGate, err)
+		return nil, makefileTimeoutParseError(text, err)
 	}
 	var findings []string
 	var failures []error
 	oneShell := file.Targets[".ONESHELL"] || util.MakefileHasTarget(text, ".ONESHELL")
 	source := makefileTimeoutSource(text)
+	if file.MayExportGOFLAGS || file.Targets[".EXPORT_ALL_VARIABLES"] {
+		source.goFlagsProblem = "cannot verify inherited GOFLAGS from Make exports"
+	}
 	for _, recipe := range file.Recipes {
 		if oneShell && recipe.Unresolved == "" {
 			recipe.Unresolved = ".ONESHELL recipes share a shell"
@@ -233,6 +243,33 @@ func (s timeoutSource) recipeTimeouts(recipe util.MakefileRecipe) ([]string, err
 	return s.check(script, source, nil)
 }
 
+var shellGOFLAGSName = regexp.MustCompile(`\b` + candidateWord("GOFLAGS") + `\b`)
+
+// shellGOFLAGSOffset finds the first possible shell-side GOFLAGS change. The
+// command reader can omit assignment-only statements, so retain unmatched text.
+// Ignore comments and assignments already accounted for as test-local prefixes.
+func (s timeoutSource) shellGOFLAGSOffset(script string, source hiss.ShellCommandSource, uncommented []byte) int {
+	if !strings.Contains(string(uncommented), "GOFLAGS") && !shellGOFLAGSName.Match(uncommented) {
+		return len(script)
+	}
+	text := append([]byte(nil), uncommented...)
+	for _, command := range source.Commands {
+		args, reason := s.commandArgs(script, command)
+		if args == nil || reason != "" {
+			continue
+		}
+		for _, word := range command.Prefix {
+			if strings.HasPrefix(word.Code, "GOFLAGS=") && literalGoFlags.MatchString(strings.TrimPrefix(word.Text, "GOFLAGS=")) {
+				blankTimeoutSpan(text, word.Span)
+			}
+		}
+	}
+	if at := shellGOFLAGSName.FindIndex(text); at != nil {
+		return at[0]
+	}
+	return len(script)
+}
+
 // check erases only proven program words and comments from a copy of the source. Any
 // remaining candidate is unresolved, including a second occurrence on the same line.
 func (s timeoutSource) check(script string, source hiss.ShellCommandSource, defaults map[string]exprValue) ([]string, error) {
@@ -243,8 +280,17 @@ func (s timeoutSource) check(script string, source hiss.ShellCommandSource, defa
 	}
 	var findings []string
 	var failures []error
+	goFlagsOffset := s.shellGOFLAGSOffset(script, source, remaining)
 	for _, command := range source.Commands {
-		long, matched, reason := s.checkCommand(script, command, binding, defaults)
+		location := s
+		start := command.Words[0].Span[0]
+		if len(command.Prefix) != 0 {
+			start = command.Prefix[0].Span[0]
+		}
+		if goFlagsOffset < start {
+			location.goFlagsProblem = "cannot verify inherited GOFLAGS after prior shell text"
+		}
+		long, matched, reason := location.checkCommand(script, command, binding, defaults)
 		if !matched && reason == "" {
 			continue
 		}

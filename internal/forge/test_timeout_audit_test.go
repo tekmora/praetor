@@ -1305,7 +1305,12 @@ func TestAuditTestTimeouts_ImmediateMakeExpansion(t *testing.T) {
 		{"another function", "RESULT := $(call RUN,go test -timeout 45m ./...)\n", ":1" + refused},
 		{"named command", "CHECK := go test -timeout 45m\nRESULT := $(shell $(CHECK) ./...)\n", ":2" + refused},
 		{"unused literal", "RESULT := go test -timeout 45m ./...\n", ""},
+		{"conditional operand with equals", "ifeq (mode=ci,$(shell go test -timeout=45m ./...))\nendif\n", ":1" + refused},
+		{"continued conditional operand", "ifneq (mode=ci,\\\n  $(shell go test -timeout=45m ./...))\nendif\n", ":2" + refused},
 		{"unused deferred shell", "RESULT = $(shell go test -timeout 45m ./...)\n", ""},
+		{"unused conditional assignment", "override RESULT ?= $(shell go test -timeout=45m ./...)\n", ""},
+		{"unused target-specific deferred shell", "test: RESULT = $(shell go test -timeout=45m ./...)\n", ""},
+		{"conditional keyword as variable name", "ifeq = $(shell go test -timeout=45m ./...)\n", ""},
 		{"escaped function", "RESULT := $$(shell go test -timeout 45m ./...)\n", ""},
 		{"Make comment", "RESULT := ok # $(shell go test -timeout 45m ./...)\n", ""},
 		{"recipe measures timeout", "test:\n\tgo test -timeout 45m ./...\n", ":2 sets 45m, above the 30m bound"},
@@ -1427,6 +1432,41 @@ func TestAuditTestTimeouts_WorkflowGOFLAGSCommandIsolation(t *testing.T) {
 		"          GOFLAGS= go test ./...\n          go test ./...\n"
 	assertTimeoutFile(t, ".github/workflows/ci.yml", timeoutFixtureWorkflow("ubuntu-latest", step),
 		":9 sets 45m, above the 30m bound")
+}
+
+// TestAuditTestTimeouts_PriorShellGOFLAGS checks order and command-local isolation.
+func TestAuditTestTimeouts_PriorShellGOFLAGS(t *testing.T) {
+	const refused = ":8 unverifiable test invocation: cannot verify inherited GOFLAGS after prior shell text"
+	for _, tc := range []struct{ name, first, second, want string }{
+		{"export", "export GOFLAGS=-timeout=45m", "go test ./...", refused},
+		{"assignment", "GOFLAGS=-timeout=45m", "go test ./... -timeout=30m", refused},
+		{"unset", "unset GOFLAGS", "go test ./...", refused},
+		{"unrelated export", "export OTHER_GOFLAGS=-timeout=45m", "go test ./...", ""},
+		{"comment", "# export GOFLAGS=-timeout=45m", "go test ./...", ""},
+		{"later export", "go test ./...", "export GOFLAGS=-timeout=45m", ""},
+		{"local override", "export GOFLAGS=-timeout=45m", "GOFLAGS=-timeout=30m go test ./...", ""},
+		{"isolated override", "GOFLAGS=-timeout=30m go test ./...", "go test ./...", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := "      - run: |\n          " + tc.first + "\n          " + tc.second + "\n"
+			assertTimeoutFile(t, ".github/workflows/ci.yml", timeoutFixtureWorkflow("ubuntu-latest", step), tc.want)
+		})
+	}
+}
+
+// TestAuditTestTimeouts_MakeExportedGOFLAGS checks global export directives and local overrides.
+func TestAuditTestTimeouts_MakeExportedGOFLAGS(t *testing.T) {
+	const refused = " unverifiable test invocation: cannot verify inherited GOFLAGS from Make exports"
+	for _, tc := range []struct{ name, body, want string }{
+		{"inline assignment", "export GOFLAGS := -timeout=45m\ntest: ; go test ./...\n", ":2" + refused},
+		{"separate export", "GOFLAGS := -timeout=45m\ntest: ; go test ./...\nexport OTHER GOFLAGS\n", ":2" + refused},
+		{"blanket export", ".EXPORT_ALL_VARIABLES:\nGOFLAGS := -timeout=45m\ntest: ; go test ./...\n", ":3" + refused},
+		{"unrelated export", "export OTHER_GOFLAGS := -timeout=45m\ntest: ; go test ./...\n", ""},
+		{"unexported assignment", "GOFLAGS := -timeout=45m\ntest: ; go test ./...\n", ""},
+		{"local override", "export GOFLAGS := -timeout=45m\ntest: ; GOFLAGS= go test ./... -timeout=30m\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertTimeoutFile(t, "Makefile", tc.body, tc.want) })
+	}
 }
 
 // TestAuditTestTimeouts_IndependentCommands requires every command's source line in either order.

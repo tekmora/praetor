@@ -275,6 +275,12 @@ func allowsCommandGOFLAGS(word hiss.ShellCodeWord) bool {
 	return localAssignment.MatchString(word.Code) || word.Text == "env" || word.Text == "exec" || word.Text == "command"
 }
 
+// literalCommandGOFLAGS reports whether a command-local GOFLAGS assignment has a literal value.
+func (s timeoutSource) literalCommandGOFLAGS(assignment hiss.ShellCodeWord) bool {
+	raw := strings.TrimPrefix(assignment.Text, "GOFLAGS=")
+	return !strings.Contains(raw, "${{") && !s.hasMakeReference(assignment) && literalGoFlags.MatchString(raw)
+}
+
 // commandGOFLAGS reads the last command-local assignment, falling back to the
 // workflow environment only if there is no local assignment. A wrapper that may
 // change the environment cannot be assumed to pass GOFLAGS through.
@@ -288,11 +294,12 @@ func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, st
 	flags, origin := s.envGOFLAGS, "inherited"
 	if assignment != nil {
 		origin = "command-local"
-		raw := strings.TrimPrefix(assignment.Text, "GOFLAGS=")
-		if strings.Contains(raw, "${{") || s.hasMakeReference(*assignment) || !literalGoFlags.MatchString(raw) {
+		if !s.literalCommandGOFLAGS(*assignment) {
 			return nil, "cannot verify dynamic command-local GOFLAGS assignment"
 		}
 		flags = strings.TrimPrefix(assignment.Value, "GOFLAGS=")
+	} else if s.goFlagsProblem != "" {
+		return nil, s.goFlagsProblem
 	} else if s.unknownEnvGOFLAGS {
 		return nil, "cannot verify inherited GOFLAGS from workflow environment"
 	} else if flags == "" {

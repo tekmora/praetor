@@ -81,12 +81,3 @@ func makefileAdoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptRep
 	t.Helper()
 	return adoptOrStep(t, opts, whole, reconcileMakefile)
 }
-
-// baselineReadoptStep is the baseline ratchet step re-adoptions exercise (#1381).
-var baselineReadoptStep = chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcileBaseline)
-
-// baselineReadoptOrStep executes either a full adoption or the baseline ratchet re-adoption step.
-func baselineReadoptOrStep(t *testing.T, opts AdoptOptions, whole bool) (*AdoptReport, error) {
-	t.Helper()
-	return adoptOrStep(t, opts, whole, baselineReadoptStep)
-}
