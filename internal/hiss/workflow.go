@@ -58,7 +58,7 @@ const (
 // closed is false if an opener has no closing braces outside a string.
 func workflowExpressionSpans(script string) (spans [][2]int, closed bool) {
 	const opener = "${{"
-	for from := 0; ; {
+	for from := 0; from < len(script); {
 		offset := strings.Index(script[from:], opener)
 		if offset < 0 {
 			return spans, true
@@ -71,6 +71,7 @@ func workflowExpressionSpans(script string) (spans [][2]int, closed bool) {
 		spans = append(spans, [2]int{start, end})
 		from = end
 	}
+	return spans, true
 }
 
 // workflowExpressionEnd returns the exclusive end of an expression, or -1.
