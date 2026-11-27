@@ -465,7 +465,7 @@ func TestTestPrepare_Negative_CommandNotOnPathFailsByName(t *testing.T) {
 	}
 }
 
-// TestHostToolchainHave checks explicit worktree paths and unchanged bare-name lookups.
+// TestHostToolchainHave checks explicit worktree paths with the real executable lookup.
 func TestHostToolchainHave(t *testing.T) {
 	dir := t.TempDir()
 	present := filepath.Base(testsupport.BuildExecutable(t, dir, "prep-tool", "package main\nfunc main() {}\n"))
@@ -479,13 +479,19 @@ func TestHostToolchainHave(t *testing.T) {
 	if err := have(t.Context(), dir, explicit+missing); !errors.Is(err, errNotOnPath) {
 		t.Fatalf("missing worktree command: got %v, want errNotOnPath", err)
 	}
+}
 
+// TestHostToolchainHaveInjectedLookup checks lookup names and error preservation.
+func TestHostToolchainHaveInjectedLookup(t *testing.T) {
+	dir := t.TempDir()
+	present := testsupport.ExecutableName("prep-tool")
+	explicit := "." + string(filepath.Separator)
 	var calls []string
 	lookupErr := errors.New("injected lookup failure")
-	cfg.lookPath = func(name string) (string, error) {
+	cfg := stageConfig{lookPath: func(name string) (string, error) {
 		calls = append(calls, name)
 		return "", lookupErr
-	}
+	}}
 	checked := cfg.hostToolchain().have
 	bareNames := []string{"prep-tool"}
 	if !os.IsPathSeparator('\\') {
