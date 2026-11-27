@@ -270,6 +270,11 @@ var (
 	literalGoFlags = regexp.MustCompile(`^(?:[a-zA-Z0-9_.,/:@+=^-]|'[^']*'|"(?:[^"$` + "`" + `\\]|\\["\\$` + "`" + `])*"|\\[^\n])*$`)
 )
 
+// allowsCommandGOFLAGS reports whether a prefix word is an assignment or an accepted wrapper.
+func allowsCommandGOFLAGS(word hiss.ShellCodeWord) bool {
+	return localAssignment.MatchString(word.Code) || word.Text == "env" || word.Text == "exec" || word.Text == "command"
+}
+
 // commandGOFLAGS reads the last command-local assignment. A wrapper that may
 // change the environment cannot be assumed to pass an assignment through.
 func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, string) {
@@ -283,10 +288,9 @@ func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, st
 		return nil, ""
 	}
 	for _, word := range prefix {
-		if localAssignment.MatchString(word.Code) || word.Text == "env" || word.Text == "exec" || word.Text == "command" {
-			continue
+		if !allowsCommandGOFLAGS(word) {
+			return nil, "cannot verify command-local GOFLAGS through shell wrapper"
 		}
-		return nil, "cannot verify command-local GOFLAGS through shell wrapper"
 	}
 	raw := strings.TrimPrefix(assignment.Text, "GOFLAGS=")
 	if strings.Contains(raw, "${{") || s.hasMakeReference(*assignment) || !literalGoFlags.MatchString(raw) {
@@ -295,25 +299,35 @@ func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, st
 	return goFlagsTimeouts(strings.TrimPrefix(assignment.Value, "GOFLAGS="))
 }
 
-// goFlagsTimeouts follows cmd/go's GOFLAGS framing: each field is a complete
-// flag, with a value attached by '='. Only a quote at the start of a field
-// quotes the field; quotes and backslashes inside an unquoted field are data.
-func goFlagsTimeouts(text string) ([]string, string) {
-	const blanks = " \t\r\n"
-	var durations []string
-	for text = strings.TrimLeft(text, blanks); text != ""; text = strings.TrimLeft(text, blanks) {
-		var field string
-		if text[0] == '\'' || text[0] == '"' {
-			end := strings.IndexByte(text[1:], text[0])
-			if end < 0 {
-				return nil, "unterminated quote in GOFLAGS"
-			}
-			field, text = text[1:end+1], text[end+2:]
-		} else if end := strings.IndexAny(text, blanks); end >= 0 {
-			field, text = text[:end], text[end:]
-		} else {
-			field, text = text, ""
+const goFlagsBlanks = " \t\r\n"
+
+// readGOFLAGSField reads one field from nonempty text with no leading blanks.
+// Only a quote at the start of a field quotes it; quotes and backslashes
+// inside an unquoted field are data.
+func readGOFLAGSField(text string) (field, rest, problem string) {
+	if text[0] == '\'' || text[0] == '"' {
+		end := strings.IndexByte(text[1:], text[0])
+		if end < 0 {
+			return "", "", "unterminated quote in GOFLAGS"
 		}
+		return text[1 : end+1], text[end+2:], ""
+	}
+	if end := strings.IndexAny(text, goFlagsBlanks); end >= 0 {
+		return text[:end], text[end:], ""
+	}
+	return text, "", ""
+}
+
+// goFlagsTimeouts follows cmd/go's GOFLAGS framing: each field is a complete
+// flag, with a value attached by '='.
+func goFlagsTimeouts(text string) ([]string, string) {
+	var durations []string
+	for text = strings.TrimLeft(text, goFlagsBlanks); text != ""; text = strings.TrimLeft(text, goFlagsBlanks) {
+		field, rest, problem := readGOFLAGSField(text)
+		if problem != "" {
+			return nil, problem
+		}
+		text = rest
 		name, value, attached := strings.Cut(field, "=")
 		if !strings.HasPrefix(name, "-") || name == "-" || name == "--" {
 			return nil, "GOFLAGS entries must be standalone flags"
