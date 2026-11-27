@@ -200,6 +200,7 @@ func WorkflowShellCommandSourceForShell(script string, maxLines int, shell strin
 	return workflowShellCommandSource(script, maxLines, shell != "bash")
 }
 
+// workflowShellCommandSource normalizes CRLF to LF, returns false if workflow expression spans are unclosed, and otherwise parses the script with those spans masked as literals.
 func workflowShellCommandSource(script string, maxLines int, portableHeredoc bool) (ShellCommandSource, bool) {
 	script = strings.ReplaceAll(script, "\r\n", "\n")
 	spans, closed := workflowExpressionSpans(script)

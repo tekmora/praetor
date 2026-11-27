@@ -375,6 +375,7 @@ func (g *makefileGOFLAGSGraph) readSourceExpansion(parts []string, inDefinition 
 	}
 }
 
+// makefileRecipeCallsEval reports whether any literal span of the recipe calls Make's eval function, ignoring shell dollars produced by $$.
 func makefileRecipeCallsEval(recipe MakefileRecipe) bool {
 	// These spans retain Make references, not the shell dollars produced from $$.
 	for start, end := range recipe.LiteralSpans {

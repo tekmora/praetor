@@ -180,6 +180,7 @@ func (l *shellLexer) push(ctx shellContext) {
 	l.stack = append(l.stack, shellFrame{ctx: ctx})
 }
 
+// pop removes the top lexer frame and sets misread when a pending heredoc was queued at the same command depth as the frame being popped.
 func (l *shellLexer) pop() {
 	// A substitution cannot leave pending bodies for another command context.
 	if n := len(l.pending); n > 0 && l.pending[n-1].commandDepth == len(l.stack) {

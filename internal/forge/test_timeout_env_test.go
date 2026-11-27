@@ -73,6 +73,7 @@ func assertTimeoutEnvWriteResult(t *testing.T, findings []string, err error, wan
 	}
 }
 
+// TestAuditTestTimeouts_WorkflowProofRegressions runs AuditTestTimeouts on temporary ci.yml workflows to check timeout proof, GITHUB_ENV GOFLAGS inheritance, and success() condition handling.
 func TestAuditTestTimeouts_WorkflowProofRegressions(t *testing.T) {
 	const header = "name: Timeout regression\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
 	const template = "      - shell: bash --noprofile --norc -e {0}\n"
@@ -104,6 +105,7 @@ func TestAuditTestTimeouts_WorkflowProofRegressions(t *testing.T) {
 	}
 }
 
+// assertWorkflowProofResult requires a PASS result when want is empty, otherwise an error that names .github/workflows/ci.yml and contains want.
 func assertWorkflowProofResult(t *testing.T, out string, err error, want string) {
 	t.Helper()
 	if want == "" {
@@ -117,6 +119,7 @@ func assertWorkflowProofResult(t *testing.T, out string, err error, want string)
 	}
 }
 
+// TestTimeoutWorkflowShellTemplates checks timeout findings and unsupported-template refusals across runner-default, job, workflow, and step shell settings.
 func TestTimeoutWorkflowShellTemplates(t *testing.T) {
 	const job = "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
 	const steps = "    steps:\n"
@@ -156,6 +159,7 @@ func assertTimeoutFinding(t *testing.T, findings []string, want string) {
 	}
 }
 
+// TestTimeoutWorkflowRunnerEnvKeys checks GOFLAGS timeout resolution across runner OS, workflow, job, and step env keys, including case variants, empty bindings, and nonliteral keys.
 func TestTimeoutWorkflowRunnerEnvKeys(t *testing.T) {
 	const job = "jobs:\n  test:\n    runs-on: "
 	const jobEnv = "    env:\n      GOFLAGS: -timeout=30m\n"

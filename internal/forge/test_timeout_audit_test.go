@@ -920,6 +920,7 @@ func checkRepositoryTestPackages(t *testing.T, repoRoot string) {
 	}
 }
 
+// TestSharedTestSelectsAdopt_PackageOperandsOnly checks that only bare package operands, not -run values, make sharedTestSelectsAdopt report the adopt package as selected.
 func TestSharedTestSelectsAdopt_PackageOperandsOnly(t *testing.T) {
 	const head = "go test -timeout 30m "
 	adopt := gomanifest.EngineModulePath + "/internal/adopt"

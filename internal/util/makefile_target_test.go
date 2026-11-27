@@ -1025,6 +1025,7 @@ var makefileRecipeRegressionRows = map[string]makefileRecipeRegressionRow{
 	},
 }
 
+// TestMakefileRecipeRegressions parses each makefileRecipeRegressionRows source and checks global GOFLAGS export, literal all target presence, and the probe recipe's unresolved and graph-refused status.
 func TestMakefileRecipeRegressions(t *testing.T) {
 	for name, tc := range makefileRecipeRegressionRows {
 		t.Run(name, func(t *testing.T) {
@@ -1150,6 +1151,7 @@ func replayMakefileRecipeWithGNU(t *testing.T, makePath string, probe []byte, en
 
 const makefileRecipeProbeRun = "-test.run=TestMakefileRecipeProbe"
 
+// TestMakefileRecipeProbe is a subprocess helper that writes GOFLAGS presence and argv to probe.log only when invoked with the probe run flag and the -- separator, and otherwise returns immediately.
 func TestMakefileRecipeProbe(t *testing.T) {
 	if len(os.Args) < 3 || os.Args[1] != makefileRecipeProbeRun || os.Args[2] != "--" {
 		return

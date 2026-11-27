@@ -94,6 +94,7 @@ func TestShellCode_ContinuationBoundaries(t *testing.T) {
 	}
 }
 
+// TestShellCode_HeredocNewlineAndDelimiterBoundaries checks heredoc newline, quoting, backslash, and delimiter edge cases, requiring valid cases to hide the body and invalid cases to be rejected.
 func TestShellCode_HeredocNewlineAndDelimiterBoundaries(t *testing.T) {
 	const after = "go test -timeout 45m"
 	for _, tc := range []struct {

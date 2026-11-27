@@ -14,6 +14,7 @@ import (
 
 const timeoutSplitHeredoc = "cat <<EOF\nE\\\nOF\ngo test -timeout=45m ./...\nEOF\n"
 
+// TestTimeoutAudit_HeredocDialect audits workflows with split or agreeing heredoc delimiters under sh and bash and checks each expected finding or pass.
 func TestTimeoutAudit_HeredocDialect(t *testing.T) {
 	for _, tc := range []struct {
 		name, shell, script, want string
@@ -42,6 +43,7 @@ func TestTimeoutAudit_HeredocDialect(t *testing.T) {
 	}
 }
 
+// assertHeredocAuditResult requires PASS when want is empty; otherwise the error must contain want and must not mix bound and unverifiable finding classes.
 func assertHeredocAuditResult(t *testing.T, out string, err error, want string) {
 	t.Helper()
 	if want == "" {
@@ -59,6 +61,7 @@ func assertHeredocAuditResult(t *testing.T, out string, err error, want string) 
 	}
 }
 
+// TestTimeoutAudit_HeredocShellOracle runs the split-delimiter fixture through local dash and bash to observe whether the go command executes, and skips when a shell is unavailable.
 func TestTimeoutAudit_HeredocShellOracle(t *testing.T) {
 	for _, tc := range []struct {
 		name, shell string

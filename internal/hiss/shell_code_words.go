@@ -48,6 +48,7 @@ func ReadShellCommandSource(script string, maxLines int, literals map[int]int) (
 	return readShellCommandSource(script, maxLines, literals, false)
 }
 
+// readShellCommandSource parses script into commands and comments, and returns false if the reader cannot be created, literal masking fails, the reader is unreadable, or the word count exceeds the bound.
 func readShellCommandSource(script string, maxLines int, literals map[int]int, portableHeredoc bool) (ShellCommandSource, bool) {
 	reader, ok := newShellCodeReader(script, maxLines, portableHeredoc)
 	if !ok || !reader.maskLiterals(literals) {

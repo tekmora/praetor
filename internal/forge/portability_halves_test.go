@@ -54,6 +54,7 @@ func findJobStep(job ghworkflow.Job, name string) (ghworkflow.Step, bool) {
 	return ghworkflow.Step{}, false
 }
 
+// stepHalvesProblem reports why a step's half regex is missing, invalid, or not paired with exactly one matching go test command per form, or returns an empty string when all checks pass.
 func stepHalvesProblem(step, pkg, half string) string {
 	m := regexp.MustCompile(regexp.QuoteMeta(half) + `='([^']+)'`).FindStringSubmatch(step)
 	if m == nil {
@@ -109,6 +110,7 @@ func halvesCommandHasPrefix(expected []string, wordCount int, wordAt func(int) s
 	return true
 }
 
+// TestPortability_CommentCannotSupplyPackageSelection verifies that commented-out or echoed go test invocations are not counted as package-selecting commands by stepHalvesProblem.
 func TestPortability_CommentCannotSupplyPackageSelection(t *testing.T) {
 	const head = `go test -json -timeout 30m`
 	const main = head + ` "${packages[@]##-*}"`
