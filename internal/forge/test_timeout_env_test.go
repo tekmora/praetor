@@ -97,6 +97,32 @@ func TestAuditTestTimeouts_WorkflowProofRegressions(t *testing.T) {
 	}
 }
 
+// TestAuditTestTimeouts_WorkflowEnvSinks checks that only the Actions environment file affects a later test step.
+func TestAuditTestTimeouts_WorkflowEnvSinks(t *testing.T) {
+	const testStep = "      - run: go test ./...\n"
+	const unknown = "cannot verify inherited GOFLAGS from prior GITHUB_ENV write"
+	for _, tc := range []struct{ name, writer string }{
+		{"tee short append", `echo 'GOFLAGS=-timeout=0' | tee -a`},
+		{"tee long append", `echo 'GOFLAGS=-timeout=0' | tee --append`},
+		{"combined overwrite", `echo 'GOFLAGS=-timeout=0' &>`},
+		{"combined append", `echo 'GOFLAGS=-timeout=0' &>>`},
+		{"combined overwrite alternate", `echo 'GOFLAGS=-timeout=0' >&`},
+	} {
+		for _, dest := range []struct{ name, want string }{
+			{"GITHUB_ENV", unknown},
+			{"GITHUB_OUTPUT", ""},
+		} {
+			t.Run(tc.name+"/"+dest.name, func(t *testing.T) {
+				steps := "      - shell: bash\n        run: |\n          " + tc.writer + ` "$` + dest.name + `"` + "\n" + testStep
+				root := t.TempDir()
+				writeWorkflowFixture(t, root, "ci.yml", timeoutFixtureWorkflow("ubuntu-latest", steps))
+				out, err := AuditTestTimeouts(t.Context(), TestTimeoutOptions{Root: root})
+				assertWorkflowProofResult(t, out, err, dest.want)
+			})
+		}
+	}
+}
+
 // assertWorkflowProofResult requires a PASS result when want is empty, otherwise an error that names .github/workflows/ci.yml and contains want.
 func assertWorkflowProofResult(t *testing.T, out string, err error, want string) {
 	t.Helper()

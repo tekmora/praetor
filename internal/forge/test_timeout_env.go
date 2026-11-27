@@ -28,8 +28,8 @@ var (
 	timeoutEnvPowerShell = regexp.MustCompile(`(?im)^[ \t]*Add-Content[ \t]+(?:-LiteralPath[ \t]+|-Path[ \t]+)?(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:[ \t;\n]|$)`)
 	// PowerShell redirection is an unknown write; its payload is not parsed.
 	timeoutEnvPowerShellRedirect = regexp.MustCompile(`(?im)>>?[ \t]*(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:$|[ \t\n;&|)])`)
-	timeoutEnvRedirect           = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvSinkPath + `(?:$|[ \t\n;&|)])`)
-	timeoutEnvTee                = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvSinkPath + `(?:$|[ \t\n;&|)])`)
+	timeoutEnvRedirect           = regexp.MustCompile(`(?:&?>>?|>&)[ \t]*` + timeoutEnvSinkPath + `(?:$|[ \t\n;&|)])`)
+	timeoutEnvTee                = regexp.MustCompile(`\btee[ \t]+(?:(?:-a|--append)[ \t]+)?` + timeoutEnvSinkPath + `(?:$|[ \t\n;&|)])`)
 	literalEnvEcho               = regexp.MustCompile(`^echo[ \t]+(.+?)[ \t]+>>[ \t]*` + timeoutEnvPath + `$`)
 	envRecordName                = regexp.MustCompile(`^` + parameterName + `=`)
 	runnerPathRecord             = regexp.MustCompile(`^"` + parameterName + `=\$(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE|\{(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE)\})(?:/[A-Za-z0-9_./-]*)?"$`)
@@ -190,7 +190,7 @@ func timeoutEnvMaskableLiteral(word hiss.ShellCodeWord) bool {
 	if strings.Contains(word.Code, ">") || !literalTestWord.MatchString(word.Text) {
 		return false
 	}
-	return word.Text != "tee" && word.Text != "-a"
+	return word.Text != "tee" && word.Text != "-a" && word.Text != "--append"
 }
 
 // timeoutEnvEchoRecord ignores supported unrelated records and trusts GOFLAGS only for definite literal assignments.

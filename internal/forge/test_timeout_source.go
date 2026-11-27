@@ -43,8 +43,9 @@ var (
 )
 
 // A numeric descriptor must be separated from the preceding word: go2>out
-// is not the same command head as go 2>out. This is discovery, not proof.
-const candidateRedirect = `(?:[ \t]*|` + wordSpace + `[0-9]+)(?:[<>]&[ \t]*(?:[0-9]+|-)|[<>][ \t]*` + wordPart + `*)`
+// is not the same command head as go 2>out. Bash combined output redirects
+// have no numeric descriptor prefix. This is discovery, not proof.
+const candidateRedirect = `(?:[ \t]*&>>?[ \t]*` + wordPart + `+|(?:[ \t]*|` + wordSpace + `[0-9]+)(?:[<>]&[ \t]*(?:[0-9]+|-)|[<>][ \t]*` + wordPart + `*))`
 
 // testInvocation captures a Go command head or a Make wrapper independently of shell parsing.
 var testInvocation = regexp.MustCompile(`(?:^|[[:space:]/\\'"$,=;&|<>()\x60])[ @+\t-]*(` +

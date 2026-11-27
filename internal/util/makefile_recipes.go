@@ -33,7 +33,8 @@ type MakefileRecipeFile struct {
 	Immediate []MakefileRecipe
 	// ShellAssignments holds the commands executed by != assignments while Make reads the file.
 	ShellAssignments []MakefileRecipe
-	// MayExportGOFLAGS reports a global GOFLAGS export or a blanket export mode.
+	// MayExportGOFLAGS reports a possible global or blanket export, or an
+	// immediate eval-generated GOFLAGS export whose scope was not resolved.
 	MayExportGOFLAGS bool
 }
 
@@ -80,7 +81,79 @@ func makefileRecordTopLevelSource(file *MakefileRecipeFile, parts []string, star
 	}
 	if immediate, ok := makefileImmediateSource(parts, start); ok {
 		file.Immediate = append(file.Immediate, immediate)
+		file.MayExportGOFLAGS = file.MayExportGOFLAGS || makefileImmediateEvalExportsGOFLAGS(immediate)
 	}
+}
+
+// makefileImmediateEvalExportsGOFLAGS inspects Make references, not escaped dollars
+// or deferred assignment values. It never expands a reference or parses its output.
+func makefileImmediateEvalExportsGOFLAGS(source MakefileRecipe) bool {
+	for start, end := range source.LiteralSpans {
+		// Physical continuation offsets are useful for diagnostics, but the
+		// continuation is whitespace when recognizing Make directives.
+		if makefileEvalExportsGOFLAGS(strings.ReplaceAll(source.Text[start:end], "\n", " ")) {
+			return true
+		}
+	}
+	return false
+}
+
+// makefileEvalExportsGOFLAGS looks for literal export directives in eval arguments.
+func makefileEvalExportsGOFLAGS(text string) bool {
+	const head = len("$(eval")
+	// Nested eval arguments can overlap. Charge each inspected reference to
+	// a linear byte budget, and report uncertainty if the budget runs out.
+	budget := 8 * len(text)
+	for i := 0; i+1 < len(text); i++ {
+		if text[i] != '$' {
+			continue
+		}
+		var close byte
+		switch text[i+1] {
+		case '(':
+			close = ')'
+		case '{':
+			close = '}'
+		default:
+			i++ // $$ or a single-character Make reference
+			continue
+		}
+		if !makefileHasEvalHead(text, i, head) {
+			continue
+		}
+		width := makefileReferenceWidth(text[i:])
+		budget -= width
+		if budget < 0 {
+			return true
+		}
+		if width > head+1 && text[i+width-1] == close && makefileEvalPayloadExportsGOFLAGS(text[i+head:i+width-1]) {
+			return true
+		}
+		// Keep scanning inside the argument for nested eval calls.
+	}
+	return false
+}
+
+// makefileHasEvalHead checks the function name and its required whitespace after a reference opener.
+func makefileHasEvalHead(text string, i, head int) bool {
+	return i+head < len(text) && text[i+2:i+head] == "eval" && strings.ContainsRune(" \t", rune(text[i+head]))
+}
+
+// makefileEvalPayloadExportsGOFLAGS recognizes direct and target-specific exports
+// without adding generated rules or bindings to the literal target graph.
+func makefileEvalPayloadExportsGOFLAGS(payload string) bool {
+	text := strings.TrimSpace(makefileImmediateSyntax(payload))
+	if makefileDirectExportsGOFLAGS(text) {
+		return true
+	}
+	if offset := makefileTargetAssignmentOffset(text); offset != 0 {
+		binding := text[offset:]
+		if name, bound := makefileBoundName(binding); bound && makefileNameMayBe(name, "GOFLAGS") {
+			exported, _ := makefileBindingExport(binding)
+			return exported
+		}
+	}
+	return false
 }
 
 // makefileMayExportGOFLAGS recognizes direct export directives without assuming
