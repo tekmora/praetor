@@ -1308,6 +1308,38 @@ func TestAuditTestTimeouts_PositiveDeadline(t *testing.T) {
 	}
 }
 
+func TestAuditTestTimeouts_CommandLocalGOFLAGS(t *testing.T) {
+	const noDeadline = "unverifiable test invocation: 0 disables the test deadline"
+	const aboveBound = "sets 45m, above the 30m bound"
+	for _, tc := range []struct{ name, flags, args, want string }{
+		{"no override", "-timeout=0", "", noDeadline},
+		{"trailing override", "-timeout=0", " -timeout=30m", ""},
+		{"trailing zero", "-timeout=30m", " -timeout=0", noDeadline},
+		{"malformed GOFLAGS timeout before override", "-timeout=bogus", " -timeout=30m", "unverifiable test invocation: bogus is an unreadable timeout"},
+		{"malformed explicit timeout before override", "-timeout=0", " -timeout=bogus -timeout=30m", "unverifiable test invocation: bogus is an unreadable timeout"},
+		{"last explicit timeout at bound", "-timeout=0", " -timeout=45m -timeout=30m", ""},
+		{"last explicit timeout above bound", "-timeout=0", " -timeout=30m -timeout=45m", aboveBound},
+		{"test.timeout override", "-timeout=0", " -test.timeout=30m", ""},
+		{"dynamic GOFLAGS", `"$TEST_GOFLAGS"`, "", "unverifiable test invocation: cannot verify dynamic command-local GOFLAGS assignment"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := "GOFLAGS=" + tc.flags + " go test ./..." + tc.args
+			for _, route := range []struct{ name, file, contents, line string }{
+				{"Make", "Makefile", "check:\n\t" + strings.ReplaceAll(command, "$", "$$") + "\n", ":2"},
+				{"workflow", ".github/workflows/ci.yml", timeoutFixtureWorkflow("ubuntu-latest", "      - run: "+command+"\n"), ":6"},
+			} {
+				t.Run(route.name, func(t *testing.T) {
+					want := tc.want
+					if want != "" {
+						want = route.line + " " + want
+					}
+					assertTimeoutFile(t, route.file, route.contents, want)
+				})
+			}
+		})
+	}
+}
+
 // TestAuditTestTimeouts_IndependentCommands requires every command's source line in either order.
 func TestAuditTestTimeouts_IndependentCommands(t *testing.T) {
 	const measured = "go test -timeout 45m ./..."

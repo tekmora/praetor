@@ -62,6 +62,7 @@ type timeoutSource struct {
 	assignments map[string]string
 	wrappers    map[string]timeoutWrapper
 	packageName string
+	goFlags     []string // timeout values from this command's GOFLAGS, in order
 }
 
 // rawTestCandidate returns the candidate's byte interval, excluding its word delimiters.
@@ -232,6 +233,10 @@ func (s timeoutSource) checkCommand(script string, command hiss.ShellCodeCommand
 	}
 	if binding != nil && binding[1] == command.Words[0].Span[0] {
 		s.packageName = script[binding[2]:binding[3]]
+	}
+	s.goFlags, reason = s.commandGOFLAGS(command.Prefix)
+	if reason != "" {
+		return nil, true, reason
 	}
 	where := fmt.Sprintf("%s:%d", s.file, s.line(command.Line))
 	findings, reason := s.explicitTimeouts(where, args, defaults)

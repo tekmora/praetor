@@ -20,10 +20,12 @@ type ShellCodeWord struct {
 }
 
 // ShellCodeCommand is a program and its arguments, starting on the zero-based logical
-// line in the source. Words start at the program after assignments and wrappers.
+// line in the source. Prefix retains the words skipped by invocation resolution,
+// including command-local assignments and wrappers. Words start at the program.
 type ShellCodeCommand struct {
-	Line  int
-	Words []ShellCodeWord
+	Line   int
+	Prefix []ShellCodeWord
+	Words  []ShellCodeWord
 }
 
 // ShellCodeCommands reads the same shell code as ShellCode and retains source text for
@@ -179,8 +181,10 @@ func (w *shellCodeWords) flush(view *shellCodeView) {
 			continue
 		}
 		start := len(cmd.words) - len(invocation.args) - 1
-		words := view.sourceWords(cmd, start)
-		w.commands = append(w.commands, ShellCodeCommand{Line: view.line, Words: words})
+		words := view.sourceWords(cmd, 0)
+		w.commands = append(w.commands, ShellCodeCommand{
+			Line: view.line, Prefix: words[:start:start], Words: words[start:],
+		})
 	}
 }
 

@@ -166,18 +166,26 @@ func readTestTimeoutFiles(ctx context.Context, root string) ([]workflowFile, err
 // judgeTimeout returns the finding for one -timeout value at where, "" within the bound. A value
 // ${{ inputs.<id> }} is judged by that input's workflow_call default; an input without a
 // literal default the gate can read is unreadable, as any other value it cannot parse.
-func judgeTimeout(where, raw string, defaults map[string]exprValue) (finding, reason string) {
+func parseTimeoutDuration(raw string, defaults map[string]exprValue) (d time.Duration, shown, reason string) {
 	value, shown := raw, raw
 	if input := inputExpression.FindStringSubmatch(raw); input != nil {
 		def, ok := defaults[input[1]]
 		if !ok {
-			return "", fmt.Sprintf("%s is an unreadable timeout: the input has no literal default", raw)
+			return 0, "", fmt.Sprintf("%s is an unreadable timeout: the input has no literal default", raw)
 		}
 		value, shown = def.text, fmt.Sprintf("%s (default %s)", raw, def.text)
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil {
-		return "", fmt.Sprintf("%s is an unreadable timeout", shown)
+		return 0, "", fmt.Sprintf("%s is an unreadable timeout", shown)
+	}
+	return d, shown, ""
+}
+
+func judgeTimeout(where, raw string, defaults map[string]exprValue) (finding, reason string) {
+	d, shown, reason := parseTimeoutDuration(raw, defaults)
+	if reason != "" {
+		return "", reason
 	}
 	if d <= 0 {
 		return "", fmt.Sprintf("%s disables the test deadline", shown)

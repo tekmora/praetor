@@ -571,12 +571,11 @@ The audit checks explicit Go test timeouts in these sources.
 | `-json`, `-race`, `-short`, `-v` | Switch alone or with an attached Go boolean such as `=false`. Verbose mode also accepts `=test2json`. | `-test.short`, `-test.v` |
 | `-count`, `-coverprofile`, `-fuzz`, `-fuzztime`, `-run`, `-skip` | One value, separate or attached with `=`. | `-test.count`, `-test.coverprofile`, `-test.fuzz`, `-test.fuzztime`, `-test.run`, `-test.skip` |
 | `-covermode`, `-exec`, `-mod`, `-p`, `-tags`, `-vet` | One value, separate or attached with `=`. | |
-| `-timeout` | One positive duration, separate or attached with `=`. The upper bound is 30 minutes. Zero and negative values disable the test deadline and fail the gate. | `-test.timeout` |
+| `-timeout` | One duration, separate or attached with `=`. The effective deadline must be positive and no greater than 30 minutes. | `-test.timeout` |
 | `-update-harness-golden` | A switch in the final argument position when the first test argument is `./internal/adopt`. | |
 
 Each listed spelling also accepts two leading dashes. For example, `--timeout` and
-`--test.timeout` both take a duration. The input default of a reusable workflow follows
-the same duration rules.
+`--test.timeout` both take a duration. The audit reads explicit timeout settings in command-local `GOFLAGS` first, then those on the command line. The last explicit setting wins, but malformed earlier values are still rejected. A final zero or negative duration disables the deadline and fails the gate; a final positive duration is bounded at 30 minutes. For example, `GOFLAGS='-timeout=45m' go test -timeout=10m ./...` has an effective deadline of 10 minutes. Dynamic command-local `GOFLAGS` that cannot be verified is reported as unverifiable. The input default of a reusable workflow follows the same duration rules.
 
 A quoted shell scalar can fill a flag's value slot, as in `-run "$pattern"`. Go accepts flags
 before and after one contiguous package list, so a free-standing `"$word"` could be a flag in either position.

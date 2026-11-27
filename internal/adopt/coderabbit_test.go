@@ -242,7 +242,7 @@ func adoptCodeRabbitCase(t *testing.T, name, initial string, whole bool) {
 		t.Fatal("managed keys absent from adoption report")
 	}
 	before := snapshotTree(t, repo)
-	if _, err := adoptOrStep(t, opts, false, reconcileCodeRabbit); err != nil {
+	if _, err := adoptOrStep(t, opts, whole && initial == "", reconcileCodeRabbit); err != nil {
 		t.Fatalf("readopt: %v", err)
 	}
 	assertTreeUnchanged(t, before, snapshotTree(t, repo))

@@ -263,7 +263,76 @@ func (kind testFlagKind) acceptsSwitch(value string, attached bool, args []hiss.
 	return err == nil
 }
 
-// timeoutArguments records a single contiguous package list and all explicit durations.
+var (
+	localAssignment = regexp.MustCompile(`^` + parameterName + `=`)
+	// An assignment RHS is not subject to field splitting or globbing. Admit
+	// literal fragments, but not shell expansions or unquoted tilde expansion.
+	literalGoFlags = regexp.MustCompile(`^(?:[a-zA-Z0-9_.,/:@+=^-]|'[^']*'|"(?:[^"$` + "`" + `\\]|\\["\\$` + "`" + `])*"|\\[^\n])*$`)
+)
+
+// commandGOFLAGS reads the last command-local assignment. A wrapper that may
+// change the environment cannot be assumed to pass an assignment through.
+func (s timeoutSource) commandGOFLAGS(prefix []hiss.ShellCodeWord) ([]string, string) {
+	var assignment *hiss.ShellCodeWord
+	for i := range prefix {
+		if strings.HasPrefix(prefix[i].Code, "GOFLAGS=") {
+			assignment = &prefix[i]
+		}
+	}
+	if assignment == nil {
+		return nil, ""
+	}
+	for _, word := range prefix {
+		if localAssignment.MatchString(word.Code) || word.Text == "env" || word.Text == "exec" || word.Text == "command" {
+			continue
+		}
+		return nil, "cannot verify command-local GOFLAGS through shell wrapper"
+	}
+	raw := strings.TrimPrefix(assignment.Text, "GOFLAGS=")
+	if strings.Contains(raw, "${{") || s.hasMakeReference(*assignment) || !literalGoFlags.MatchString(raw) {
+		return nil, "cannot verify dynamic command-local GOFLAGS assignment"
+	}
+	return goFlagsTimeouts(strings.TrimPrefix(assignment.Value, "GOFLAGS="))
+}
+
+// goFlagsTimeouts follows cmd/go's GOFLAGS framing: each field is a complete
+// flag, with a value attached by '='. Only a quote at the start of a field
+// quotes the field; quotes and backslashes inside an unquoted field are data.
+func goFlagsTimeouts(text string) ([]string, string) {
+	const blanks = " \t\r\n"
+	var durations []string
+	for text = strings.TrimLeft(text, blanks); text != ""; text = strings.TrimLeft(text, blanks) {
+		var field string
+		if text[0] == '\'' || text[0] == '"' {
+			end := strings.IndexByte(text[1:], text[0])
+			if end < 0 {
+				return nil, "unterminated quote in GOFLAGS"
+			}
+			field, text = text[1:end+1], text[end+2:]
+		} else if end := strings.IndexAny(text, blanks); end >= 0 {
+			field, text = text[:end], text[end:]
+		} else {
+			field, text = text, ""
+		}
+		name, value, attached := strings.Cut(field, "=")
+		if !strings.HasPrefix(name, "-") || name == "-" || name == "--" {
+			return nil, "GOFLAGS entries must be standalone flags"
+		}
+		if testFlagRole(name) != durationFlag {
+			continue
+		}
+		if !attached || value == "" {
+			return nil, "GOFLAGS timeout requires an attached duration"
+		}
+		if len(durations) == maxTimeoutFlagsPerCommand {
+			return nil, "timeout flag count exceeds the reader bound"
+		}
+		durations = append(durations, value)
+	}
+	return durations, ""
+}
+
+// timeoutArguments records a single contiguous package list and the durations in Go flag order.
 type timeoutArguments struct {
 	packages, afterPackages bool
 	durations               []string
@@ -291,9 +360,10 @@ func (a *timeoutArguments) accept(arg testArg) string {
 	return ""
 }
 
-// explicitTimeouts checks every word and judges every duration across the definition and use.
+// explicitTimeouts checks all timeout values, but applies the duration policy
+// only to the last setting. Go reads GOFLAGS before the command-line flags.
 func (s timeoutSource) explicitTimeouts(where string, args []hiss.ShellCodeWord, defaults map[string]exprValue) ([]string, string) {
-	var parsed timeoutArguments
+	parsed := timeoutArguments{durations: s.goFlags[:len(s.goFlags):len(s.goFlags)]}
 	for i := 0; i < len(args); i++ {
 		arg, reason := s.testArgument(args, i)
 		if reason != "" {
@@ -304,15 +374,22 @@ func (s timeoutSource) explicitTimeouts(where string, args []hiss.ShellCodeWord,
 		}
 		i = arg.end
 	}
-	var findings []string
-	for _, value := range parsed.durations {
+	var effectiveFinding string
+	for i, value := range parsed.durations {
+		if i < len(parsed.durations)-1 {
+			if _, _, reason := parseTimeoutDuration(value, defaults); reason != "" {
+				return nil, reason
+			}
+			continue
+		}
 		finding, reason := judgeTimeout(where, value, defaults)
 		if reason != "" {
 			return nil, reason
 		}
-		if finding != "" {
-			findings = append(findings, finding)
-		}
+		effectiveFinding = finding
 	}
-	return findings, ""
+	if effectiveFinding != "" {
+		return []string{effectiveFinding}, ""
+	}
+	return nil, ""
 }
