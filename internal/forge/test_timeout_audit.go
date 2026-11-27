@@ -246,7 +246,7 @@ func workflowTimeouts(rel string, data []byte) ([]string, error) {
 // workflowRunTimeouts checks candidate-bearing steps under their resolved interpreter.
 func workflowRunTimeouts(rel string, spec *ghworkflow.Spec, run ghworkflow.RunStep, defaults map[string]exprValue, writes ...timeoutEnvWrite) ([]string, error) {
 	script := strings.ReplaceAll(run.Step.Run, "\r\n", "\n")
-	location := timeoutSource{file: rel, line: func(n int) int { return hiss.WorkflowRunLine(run.Step, n+1) }}
+	location := timeoutSource{file: rel, workflowShell: true, line: func(n int) int { return hiss.WorkflowRunLine(run.Step, n+1) }}
 	candidate := rawTestCandidate(script)
 	if candidate == nil {
 		return nil, nil

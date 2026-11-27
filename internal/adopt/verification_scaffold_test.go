@@ -12,7 +12,7 @@ import (
 
 // TestVerificationLegacyMigrationAndCustomPreservation tests migration of legacy verification rules and preservation of custom targets.
 func TestVerificationLegacyMigrationAndCustomPreservation(t *testing.T) {
-	for index, tc := range []struct{ name, existing string }{
+	for _, tc := range []struct{ name, existing string }{
 		{"old-stub", legacyVerificationStub},
 		{"old-stub-rendered", mustRead(t, filepath.Join("testdata", "legacy-echo.Makefile"))},
 		{"old-go", legacyVerificationMakefile("go test -v -race ./...", "go build -v ./...")},
@@ -23,7 +23,10 @@ func TestVerificationLegacyMigrationAndCustomPreservation(t *testing.T) {
 		{"multi-target", "verify-all other:\n\t@echo custom\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertLegacyOrCustomMakefileRow(t, tc.name, tc.existing, index == 0)
+			// Exercise public Adopt for each preservation case and one representative migration.
+			// Keep the equivalent migration cases on the faster Makefile step (#1381).
+			preservesCustomRule := !strings.HasPrefix(tc.name, "old-")
+			assertLegacyOrCustomMakefileRow(t, tc.name, tc.existing, preservesCustomRule || tc.name == "old-stub")
 		})
 	}
 }
@@ -31,7 +34,6 @@ func TestVerificationLegacyMigrationAndCustomPreservation(t *testing.T) {
 // assertLegacyOrCustomMakefileRow tests dry-run preview and application consistency for legacy and custom Makefile fixtures.
 func assertLegacyOrCustomMakefileRow(t *testing.T, name, existing string, whole bool) {
 	t.Helper()
-	// The first fixture runs whole adoptions; the others run the makefile step alone (#1381).
 	root := newTestRepo(t, name)
 	mustWrite(t, filepath.Join(root, "Cargo.toml"), "[package]\nname = 'fixture'\nversion = '0.1.0'\n")
 	mustWrite(t, filepath.Join(root, "Makefile"), existing)

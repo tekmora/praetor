@@ -62,6 +62,7 @@ type timeoutSource struct {
 	assignments       map[string]string
 	wrappers          map[string]timeoutWrapper
 	packageName       string
+	workflowShell     bool     // enables Actions-only accounting of environment-file data
 	envGOFLAGS        string   // literal workflow environment before command-local overrides
 	unknownEnvGOFLAGS bool     // the deciding workflow environment is not provably literal
 	goFlagsProblem    string   // inherited GOFLAGS may have been changed outside the invocation
@@ -129,7 +130,11 @@ func (s timeoutSource) collectMakefileCommandTimeouts(commands []util.MakefileRe
 		if sharedShell && command.Unresolved == "" {
 			command.Unresolved = ".ONESHELL recipes share a shell"
 		}
-		result, err := s.recipeTimeouts(command)
+		location := s
+		if location.goFlagsProblem == "" {
+			location.goFlagsProblem = command.GOFLAGSProblem
+		}
+		result, err := location.recipeTimeouts(command)
 		if err != nil {
 			*failures = append(*failures, err)
 		}
@@ -269,9 +274,12 @@ func (s timeoutSource) shellGOFLAGSOffset(script string, source hiss.ShellComman
 	return len(script)
 }
 
-// blankAccountedGOFLAGS masks read-only printf operands and literal test-local
-// GOFLAGS prefixes in text without changing source offsets.
+// blankAccountedGOFLAGS masks read-only operands, proven Actions env-file echo
+// data, and literal test-local GOFLAGS prefixes without changing source offsets.
 func (s timeoutSource) blankAccountedGOFLAGS(script string, command hiss.ShellCodeCommand, text []byte) {
+	if s.workflowShell {
+		blankTimeoutEnvEchoData(command, text)
+	}
 	if s.readOnlyGOFLAGSPrintf(script, command) {
 		for _, word := range command.Words[1:] {
 			blankTimeoutSpan(text, word.Span)

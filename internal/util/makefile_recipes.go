@@ -21,6 +21,9 @@ type MakefileRecipe struct {
 	LiteralSpans map[int]int
 	// Unresolved names the reader limit or Make mode that prevents interpreting this source.
 	Unresolved string
+	// GOFLAGSProblem describes a possible target-specific export at this recipe.
+	GOFLAGSProblem string
+	owners         []string
 }
 
 // MakefileRecipeFile holds the literal rule names and sources from one bounded read.
@@ -31,7 +34,7 @@ type MakefileRecipeFile struct {
 	Immediate []MakefileRecipe
 	// ShellAssignments holds the commands executed by != assignments while Make reads the file.
 	ShellAssignments []MakefileRecipe
-	// MayExportGOFLAGS reports an explicit GOFLAGS export or a blanket export mode.
+	// MayExportGOFLAGS reports a global GOFLAGS export or a blanket export mode.
 	MayExportGOFLAGS bool
 }
 
@@ -66,6 +69,7 @@ func MakefileRecipes(text string, maxLines int) (MakefileRecipeFile, error) {
 		}
 		start = end
 	}
+	reader.graph.annotate(file.Recipes)
 	return file, nil
 }
 
@@ -75,32 +79,7 @@ var makefileGOFLAGSName = regexp.MustCompile(`(?:^|[ \t])GOFLAGS(?:$|[ \t]|:::=|
 // that the deciding assignment is on the export line or before a recipe.
 func makefileMayExportGOFLAGS(line string) bool {
 	text := strings.TrimSpace(makefileImmediateSyntax(line))
-	if !makefileExportDirective(text) {
-		if offset := makefileTargetAssignmentOffset(text); offset != 0 {
-			return makefileTargetExportsGOFLAGS(text[offset:])
-		}
-	}
 	return makefileDirectExportsGOFLAGS(text)
-}
-
-// makefileTargetExportsGOFLAGS checks the assignment suffix after a rule separator.
-func makefileTargetExportsGOFLAGS(binding string) bool {
-	assign, _, _ := makefileSplit(binding)
-	if !makefileBindsVariable(binding) {
-		return false
-	}
-	left := binding[:assign]
-	names := makefileNameWords(left)
-	if len(names) != 1 || names[0] != "GOFLAGS" {
-		return false
-	}
-	fields := strings.Fields(left)
-	for _, modifier := range fields[:makefileDirectiveIndex(fields)] {
-		if modifier == "export" {
-			return true
-		}
-	}
-	return false
 }
 
 // makefileDirectExportsGOFLAGS checks a trimmed line for a blanket or named export.
@@ -115,6 +94,236 @@ func makefileDirectExportsGOFLAGS(text string) bool {
 		return false
 	}
 	return makefileGOFLAGSName.MatchString(text[len("export"):])
+}
+
+// maxMakefileGraphEntries bounds the Cartesian product of rule heads and
+// prerequisites, independently of the physical and logical line limits.
+const maxMakefileGraphEntries = 65536
+
+const makefileExportGOFLAGSProblem = "cannot verify inherited GOFLAGS from Make exports"
+
+type makefileGOFLAGSGraph struct {
+	seeds   map[string]bool // true if at least one export can be inherited
+	edges   map[string][]string
+	entries int
+	seen    bool
+	problem string
+}
+
+func (g *makefileGOFLAGSGraph) refuse(line int, reason string) {
+	if g.problem == "" {
+		g.problem = fmt.Sprintf("cannot resolve target graph for inherited GOFLAGS: %s:%d: %s", makefileLabel, line+1, reason)
+	}
+}
+
+func makefileGraphName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if !makefileWordByte(name[i]) {
+			return false
+		}
+	}
+	return name != ""
+}
+
+// read uses the scanner's rule classification and the shared operator lexer.
+// Unsupported syntax is remembered even before the first export is seen.
+func (g *makefileGOFLAGSGraph) read(text string, names []string, prerequisites string, line int) {
+	if text == "" || strings.HasPrefix(text, "#") {
+		return
+	}
+	// Read bindings even after a refusal so a later export still sets seen.
+	if g.readTargetBinding(text, line) || g.problem != "" {
+		return
+	}
+	if makefileEvaluatesText(text) || makefileNamesRecipePrefix(text) {
+		g.refuse(line, "Make syntax can change rule boundaries or dependencies")
+		return
+	}
+	if names == nil {
+		g.readGraphAssignment(text, line)
+		return
+	}
+	g.readDependencies(names, prerequisites, line)
+}
+
+func (g *makefileGOFLAGSGraph) readTargetBinding(text string, line int) bool {
+	if makefileExportDirective(text) {
+		return false
+	}
+	assign, colon, _ := makefileSplit(text)
+	offset := makefileTargetAssignmentStart(text, assign, colon)
+	return offset != 0 && g.readBinding(text, offset, colon, line)
+}
+
+func (g *makefileGOFLAGSGraph) readGraphAssignment(text string, line int) {
+	name, bound := makefileBoundName(text)
+	if bound && (makefileNameMayBe(name, ".EXTRA_PREREQS") || makefileNameMayBe(name, "MAKEFLAGS") && !makefileGraphHarmlessFlags(text)) {
+		g.refuse(line, "assignment can change the target graph")
+	}
+}
+
+func makefileGraphUnsupportedTarget(name string) bool {
+	return !makefileGraphName(name) || strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "./") && name != ".PHONY"
+}
+
+func (g *makefileGOFLAGSGraph) readDependencies(names []string, prerequisites string, line int) {
+	for _, name := range names {
+		if makefileGraphUnsupportedTarget(name) {
+			g.refuse(line, "unsupported target "+name)
+			return
+		}
+	}
+	if len(names) == 1 && names[0] == ".PHONY" {
+		return // its operands mark names, not build dependencies
+	}
+	if _, _, _, end := makefileSplitSyntax(prerequisites); end >= 0 {
+		prerequisites = prerequisites[:end]
+	}
+	deps := strings.Fields(strings.ReplaceAll(prerequisites, "|", " | "))
+	for _, dep := range deps {
+		if dep != "|" && !makefileGraphName(dep) {
+			g.refuse(line, "unsupported prerequisite "+dep)
+			return
+		}
+	}
+	if g.reserve(len(names), 1+len(deps), line) {
+		g.addDependencies(names, deps)
+	}
+}
+
+func (g *makefileGOFLAGSGraph) addDependencies(names, deps []string) {
+	if g.edges == nil {
+		g.edges = make(map[string][]string)
+	}
+	for _, name := range names {
+		name = makefileGraphKey(name)
+		for _, dep := range deps {
+			if dep != "|" {
+				g.edges[name] = append(g.edges[name], makefileGraphKey(dep))
+			}
+		}
+	}
+}
+
+func makefileGraphHarmlessFlags(text string) bool {
+	assign, _, _ := makefileSplit(text)
+	_, width := makefileOperatorAt(text, assign)
+	return makefileHarmlessFlagsValue(text[assign:assign+width], text[assign+width:])
+}
+
+func (g *makefileGOFLAGSGraph) reserve(names, perName, line int) bool {
+	if names > (maxMakefileGraphEntries-g.entries)/perName {
+		g.refuse(line, fmt.Sprintf("target graph exceeds the %d-entry bound", maxMakefileGraphEntries))
+		return false
+	}
+	g.entries += names * perName
+	return true
+}
+
+func makefileGraphKey(name string) string {
+	for strings.HasPrefix(name, "./") && len(name) > 2 {
+		name = name[2:]
+	}
+	return name
+}
+
+func (g *makefileGOFLAGSGraph) readBinding(text string, offset, colon, line int) bool {
+	binding := text[offset:]
+	name, bound := makefileBoundName(binding)
+	if !bound {
+		return false
+	}
+	if makefileEvaluatesText(text) || makefileNameMayBe(name, ".EXTRA_PREREQS") {
+		g.refuse(line, "target-specific assignment can change the target graph")
+	}
+	if makefileNameMayBe(name, "GOFLAGS") {
+		exported, private := makefileBindingExport(binding)
+		if exported {
+			g.seen = true
+			g.addExportSeeds(strings.Fields(text[:colon]), private, line)
+		}
+	}
+	return true
+}
+
+func makefileBindingExport(binding string) (exported, private bool) {
+	assign, _, _ := makefileSplit(binding)
+	fields := strings.Fields(binding[:assign])
+	for _, modifier := range fields[:makefileDirectiveIndex(fields)] {
+		exported = exported || modifier == "export"
+		private = private || modifier == "private"
+	}
+	return exported, private
+}
+
+func (g *makefileGOFLAGSGraph) addExportSeeds(names []string, private bool, line int) {
+	if g.problem != "" || !g.reserve(len(names), 1, line) {
+		return
+	}
+	if g.seeds == nil {
+		g.seeds = make(map[string]bool)
+	}
+	for _, target := range names {
+		if !makefileGraphName(target) {
+			g.refuse(line, "unsupported GOFLAGS export target "+target)
+			return
+		}
+		key := makefileGraphKey(target)
+		g.seeds[key] = g.seeds[key] || !private
+	}
+}
+
+func (g *makefileGOFLAGSGraph) annotate(recipes []MakefileRecipe) {
+	if !g.seen {
+		return
+	}
+	var inherited map[string]bool
+	if g.problem == "" {
+		inherited = g.inheritedTargets()
+	}
+	for i := range recipes {
+		recipes[i].GOFLAGSProblem = g.recipeProblem(recipes[i].owners, inherited)
+	}
+}
+
+func (g *makefileGOFLAGSGraph) inheritedTargets() map[string]bool {
+	// Keep private seeds separate from the worklist: they are affected locally,
+	// but only a non-private export or an incoming path starts propagation.
+	inherited := make(map[string]bool)
+	var queue []string
+	push := func(name string) {
+		if !inherited[name] {
+			inherited[name] = true
+			queue = append(queue, name)
+		}
+	}
+	for name, propagates := range g.seeds {
+		if propagates {
+			push(name)
+		}
+	}
+	for i := 0; i < len(queue); i++ {
+		for _, dep := range g.edges[queue[i]] {
+			push(dep)
+		}
+	}
+	return inherited
+}
+
+func (g *makefileGOFLAGSGraph) recipeProblem(owners []string, inherited map[string]bool) string {
+	if g.problem != "" {
+		return g.problem
+	}
+	if len(owners) == 0 {
+		return "cannot resolve recipe target for inherited GOFLAGS after a conditional"
+	}
+	for _, owner := range owners {
+		key := makefileGraphKey(owner)
+		if _, direct := g.seeds[key]; direct || inherited[key] {
+			return makefileExportGOFLAGSProblem
+		}
+	}
+	return ""
 }
 
 // makefileRecipeEnd delimits the logical line before checking the bounds used by the Make syntax reader.
@@ -141,6 +350,8 @@ type makefileRecipeReader struct {
 	makefileScanner
 	targets      map[string]bool
 	customPrefix bool
+	owners       []string
+	graph        makefileGOFLAGSGraph
 }
 
 // readGroup preserves unread recipe text for the caller. A lost rule boundary can also
@@ -155,13 +366,14 @@ func (s *makefileRecipeReader) readGroup(parts []string, start int, reason strin
 		if !s.inRecipe(parts[0]) {
 			return MakefileRecipe{}, false, fmt.Errorf("%s:%d unverifiable test invocation: %s", makefileLabel, start+1, reason)
 		}
-		return MakefileRecipe{Line: start, Text: strings.Join(parts, "\n"), Unresolved: reason}, true, nil
+		return MakefileRecipe{Line: start, Text: strings.Join(parts, "\n"), Unresolved: reason, owners: s.owners}, true, nil
 	}
 	if s.customPrefix {
 		return makefileUnresolvedPrefixRecipe(parts, start), true, nil
 	}
 	if !s.inRecipe(parts[0]) && s.depth == 0 && makefileChangesRecipePrefix(makefileJoinSyntax(parts)) {
 		s.customPrefix = true
+		s.graph.refuse(start, "non-tab .RECIPEPREFIX prevents reading the target graph")
 		return MakefileRecipe{}, false, nil
 	}
 	recipe, found := s.recipeText(parts, start)
@@ -233,24 +445,71 @@ func (s *makefileRecipeReader) inRecipe(line string) bool {
 
 // recipeText extracts a tabbed or inline recipe and records the target names already read.
 func (s *makefileRecipeReader) recipeText(parts []string, start int) (MakefileRecipe, bool) {
-	if s.inRecipe(parts[0]) {
-		kind := s.next(parts[0])
-		if kind == makefileRecipeLine || kind == makefileUnsureLine {
-			return makefileRecipeBody(parts, start), true
-		}
+	if recipe, found := s.tabbedRecipeText(parts, start); found {
+		return recipe, true
 	}
 	syntax := makefileJoinSyntax(parts)
 	if s.next(syntax) != makefileSyntaxLine {
+		if makefileDefineParsesText(syntax) {
+			s.graph.refuse(start, "define may evaluate Make syntax")
+		}
 		return MakefileRecipe{}, false
 	}
-	names := makefileTargetNames(syntax)
+	trimmed := strings.TrimSpace(syntax)
+	if s.readRecipeConditional(trimmed, start) {
+		return MakefileRecipe{}, false
+	}
+	return s.ruleRecipeText(parts, syntax, trimmed, start)
+}
+
+func (s *makefileRecipeReader) tabbedRecipeText(parts []string, start int) (MakefileRecipe, bool) {
+	if !s.inRecipe(parts[0]) {
+		return MakefileRecipe{}, false
+	}
+	kind := s.next(parts[0])
+	if kind != makefileRecipeLine && kind != makefileUnsureLine {
+		return MakefileRecipe{}, false
+	}
+	recipe := makefileRecipeBody(parts, start)
+	recipe.owners = s.owners
+	if kind == makefileUnsureLine {
+		s.graph.refuse(start, "conditional recipe boundary")
+	}
+	return recipe, true
+}
+
+func (s *makefileRecipeReader) readRecipeConditional(trimmed string, start int) bool {
+	fields := strings.Fields(trimmed)
+	if !makefileConditionalLine(trimmed, fields) {
+		return false
+	}
+	// A recipe after a branch transition can belong to a different rule
+	// even when the scanner says that a recipe is open in every branch.
+	if fields[0] == "else" || fields[0] == "endif" {
+		s.owners = nil
+	}
+	if makefileEvaluatesText(trimmed) {
+		s.graph.refuse(start, "conditional may evaluate Make syntax")
+	}
+	return true
+}
+
+func (s *makefileRecipeReader) ruleRecipeText(parts []string, syntax, trimmed string, start int) (MakefileRecipe, bool) {
+	names, prerequisites := makefileRule(syntax)
+	s.graph.read(trimmed, names, prerequisites, start)
 	if names == nil {
+		if s.recipe == makefileRecipeClosed {
+			s.owners = nil
+		}
 		return MakefileRecipe{}, false
 	}
+	s.owners = names
 	for _, name := range names {
 		s.targets[name] = true
 	}
-	return makefileInlineRecipe(parts, start)
+	recipe, found := makefileInlineRecipe(parts, start)
+	recipe.owners = names
+	return recipe, found
 }
 
 // makefileImmediateText keeps physical line offsets while exposing non-recipe continuations as whitespace.
@@ -331,6 +590,10 @@ func makefileDeferredAssignment(text string) int {
 // Callers still have to establish that the suffix binds a variable.
 func makefileTargetAssignmentOffset(syntax string) int {
 	assign, colon, _ := makefileSplit(syntax)
+	return makefileTargetAssignmentStart(syntax, assign, colon)
+}
+
+func makefileTargetAssignmentStart(syntax string, assign, colon int) int {
 	if colon >= 0 && (assign < 0 || colon < assign) {
 		_, width := makefileOperatorAt(syntax, colon)
 		return colon + width

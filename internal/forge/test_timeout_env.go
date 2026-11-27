@@ -21,20 +21,39 @@ type timeoutEnvWrite struct {
 const timeoutEnvPath = `(?:"\$(?:GITHUB_ENV|\{GITHUB_ENV\})"|\$(?:GITHUB_ENV\b|\{GITHUB_ENV\}))`
 
 var (
-	timeoutEnvRedirect = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
-	timeoutEnvTee      = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
-	literalEnvEcho     = regexp.MustCompile(`^echo[ \t]+(.+?)[ \t]+>>[ \t]*` + timeoutEnvPath + `$`)
-	envRecordName      = regexp.MustCompile(`^` + parameterName + `=`)
-	runnerPathRecord   = regexp.MustCompile(`^"` + parameterName + `=\$(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE|\{(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE)\})(?:/[A-Za-z0-9_./-]*)?"$`)
-	timeoutEnvControl  = regexp.MustCompile(`^(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function|time|coproc|exit|return|exec|eval|source|\.|!)$`)
+	// Recognize an explicit PowerShell sink without interpreting its arguments as records.
+	timeoutEnvPowerShell = regexp.MustCompile(`(?im)^[ \t]*Add-Content[ \t]+(?:-LiteralPath[ \t]+|-Path[ \t]+)?(?:\$env:GITHUB_ENV|"\$env:GITHUB_ENV")(?:[ \t;\n]|$)`)
+	timeoutEnvRedirect   = regexp.MustCompile(`>>?[ \t]*` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
+	timeoutEnvTee        = regexp.MustCompile(`\btee[ \t]+(?:-a[ \t]+)?` + timeoutEnvPath + `(?:$|[ \t\n;&|)])`)
+	literalEnvEcho       = regexp.MustCompile(`^echo[ \t]+(.+?)[ \t]+>>[ \t]*` + timeoutEnvPath + `$`)
+	envRecordName        = regexp.MustCompile(`^` + parameterName + `=`)
+	runnerPathRecord     = regexp.MustCompile(`^"` + parameterName + `=\$(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE|\{(?:RUNNER_TEMP|RUNNER_TOOL_CACHE|GITHUB_WORKSPACE)\})(?:/[A-Za-z0-9_./-]*)?"$`)
+	timeoutEnvControl    = regexp.MustCompile(`^(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function|time|coproc|exit|return|exec|eval|source|\.|!)$`)
 )
 
 // workflowTimeoutEnvWrite records explicit writes, not effects of opaque actions.
 func workflowTimeoutEnvWrite(spec *ghworkflow.Spec, run ghworkflow.RunStep) timeoutEnvWrite {
-	if ghworkflow.NeverRuns(run.Step.If) || !strings.Contains(run.Step.Run, "GITHUB_ENV") {
+	if ghworkflow.NeverRuns(run.Step.If) {
 		return timeoutEnvWrite{}
 	}
 	script := strings.ReplaceAll(run.Step.Run, "\r\n", "\n")
+	shell := ghworkflow.StepShell(spec, run.Job, run.Step)
+	if shell != "bash" && shell != "sh" {
+		return nonPOSIXTimeoutEnvWrite(script, shell)
+	}
+	return posixTimeoutEnvWrite(script, run)
+}
+
+func nonPOSIXTimeoutEnvWrite(script, shell string) timeoutEnvWrite {
+	// POSIX quote and comment rules cannot establish what PowerShell executes.
+	powerShell := strings.EqualFold(shell, "pwsh") || strings.EqualFold(shell, "powershell")
+	return timeoutEnvWrite{set: mentionsTimeoutEnvSink([]byte(script)) || powerShell && timeoutEnvPowerShell.MatchString(script)}
+}
+
+func posixTimeoutEnvWrite(script string, run ghworkflow.RunStep) timeoutEnvWrite {
+	if !strings.Contains(script, "GITHUB_ENV") {
+		return timeoutEnvWrite{}
+	}
 	source, ok := hiss.WorkflowShellCommandSource(script, maxTimeoutWorkflowLines)
 	if !ok {
 		return timeoutEnvWrite{set: mentionsTimeoutEnvSink([]byte(script))}
@@ -43,10 +62,8 @@ func workflowTimeoutEnvWrite(spec *ghworkflow.Spec, run ghworkflow.RunStep) time
 	for _, comment := range source.Comments {
 		blankTimeoutSpan(clean, comment)
 	}
-	shell := ghworkflow.StepShell(spec, run.Job, run.Step)
-	ordinaryShell := shell == "bash" || shell == "sh"
-	always := ordinaryShell && (run.Step.If == "" || run.Step.If == "success()") && run.Step.ContinueOnError == ""
-	return orderedTimeoutEnvWrites(clean, source.Commands, ordinaryShell, always)
+	always := (run.Step.If == "" || run.Step.If == "success()") && run.Step.ContinueOnError == ""
+	return orderedTimeoutEnvWrites(clean, source.Commands, true, always)
 }
 
 func mentionsTimeoutEnvSink(text []byte) bool {
@@ -97,7 +114,9 @@ func orderedTimeoutEnvWrites(clean []byte, commands []hiss.ShellCodeCommand, ord
 		span := timeoutEnvCommandSpan(command)
 		text := clean[span[0]:span[1]]
 		write := timeoutEnvCommandWrite(text, command, ordinaryShell, always)
-		if write.set {
+		if write.set && (!result.set || result.known) {
+			// An unsupported write may have opened a multiline record. Later
+			// assignment-shaped output in this step may still be record data.
 			result = write
 		}
 		blankTimeoutSpan(remaining, span)
@@ -141,6 +160,17 @@ func timeoutEnvLiteralEchoPayload(text []byte, command hiss.ShellCodeCommand, st
 		return hiss.ShellCodeWord{}, false
 	}
 	return payload, true
+}
+
+// blankTimeoutEnvEchoData accounts only for inert data in a proven echo append.
+// The command reader has no redirection records: require its exact operand span
+// and the existing anchored append spelling, not a second shell parser.
+func blankTimeoutEnvEchoData(command hiss.ShellCodeCommand, text []byte) {
+	span := timeoutEnvCommandSpan(command)
+	payload, ok := timeoutEnvLiteralEchoPayload(text[span[0]:span[1]], command, span[0])
+	if ok && literalTestWord.MatchString(payload.Text) && !strings.Contains(payload.Text, "${{") {
+		blankTimeoutSpan(text, payload.Span)
+	}
 }
 
 // timeoutEnvMaskableLiteral excludes words that may be part of a sink.
