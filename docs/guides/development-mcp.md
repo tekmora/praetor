@@ -551,21 +551,32 @@ The audit checks explicit Go test timeouts in these sources.
   followed by the job default, the workflow default and the runner default. Set `shell: bash`
   on a Bash test step in a Windows or mixed-runner job.
 - The root `Makefile` may use literal tabbed or inline recipes, including continuations.
-  A declaration of `.ONESHELL` makes candidate recipes unverifiable. A use of `$(GO_TEST)`
-  or `${GO_TEST}` needs one unconditional root assignment with `:=`, `::=` or `=`. The
-  audit reads its literal command and the recipe arguments together, including the
-  repository's `go run "$(CURDIR)/cmd/standardsctl" go test` wrapper. Conditional,
-  target-specific, computed or ambiguous definitions make the use unverifiable.
+  A declaration of `.ONESHELL` makes candidate recipes unverifiable. A recipe can invoke a
+  named test command as `$(TEST_CMD)` or `${TEST_CMD}`. The gate reads its definition and
+  recipe arguments together if one unconditional root assignment with `:=`, `::=` or `=`
+  supplies the literal command. It also recognizes the repository's
+  `go run "$(CURDIR)/cmd/standardsctl" go test` wrapper. If an assignment contains test
+  tokens but its value is conditional, target-specific or ambiguous, its use is unverifiable.
+  This also applies to `define` bodies and assignments that refer to another test command.
+  `GO_TEST` always requires a provable definition.
 - The program word must be spelled `go` or `go.exe` in the source. Before `test` it may
   take `-C dir` with a separate literal directory. The standardsctl wrapper also accepts
   that pair first among its test arguments. Separate control operators from invocation
-  words. A trailing `> file` and a standalone trailing `2>&1` are supported.
+  words. The generated adoption Make recipe may start with `exec 'go' 'test'` and pass
+  individually quoted literal arguments. A trailing `> file` and a standalone trailing
+  `2>&1` are supported.
 
-| Test flag spellings | Accepted arguments |
-| --- | --- |
-| `-json`, `-race`, `-v` | Switch without a value |
-| `-count`, `-covermode`, `-coverprofile`, `-fuzz`, `-fuzztime`, `-run`, `-skip` | One value, separate or attached with `=` |
-| `-timeout`, `--timeout`, `-test.timeout`, `--test.timeout` | One duration, separate or attached with `=`, judged against 30 minutes |
+| Test flag spellings | Accepted arguments | Additional accepted spellings |
+| --- | --- | --- |
+| `-json`, `-race`, `-short`, `-v` | Switch alone or with an attached Go boolean such as `=false`. Verbose mode also accepts `=test2json`. | `-test.short`, `-test.v` |
+| `-count`, `-coverprofile`, `-fuzz`, `-fuzztime`, `-run`, `-skip` | One value, separate or attached with `=`. | `-test.count`, `-test.coverprofile`, `-test.fuzz`, `-test.fuzztime`, `-test.run`, `-test.skip` |
+| `-covermode`, `-exec`, `-mod`, `-p`, `-tags`, `-vet` | One value, separate or attached with `=`. | |
+| `-timeout` | One positive duration, separate or attached with `=`. The upper bound is 30 minutes. Zero and negative values disable the test deadline and fail the gate. | `-test.timeout` |
+| `-update-harness-golden` | A switch in the final argument position when the first test argument is `./internal/adopt`. | |
+
+Each listed spelling also accepts two leading dashes. For example, `--timeout` and
+`--test.timeout` both take a duration. The input default of a reusable workflow follows
+the same duration rules.
 
 A quoted shell scalar can fill a flag's value slot, as in `-run "$pattern"`. Go accepts flags
 before and after one contiguous package list, so a free-standing `"$word"` could be a flag in either position.
@@ -578,11 +589,13 @@ A whole Make variable can provide a literal package path or a package list produ
 `$(shell go list ./...)`, including the root Makefile's check of `.SHELLSTATUS`. Unknown
 flags, unproven argument expansions and extra words outside this grammar are unverifiable.
 
-The gate checks raw test tokens against the commands and comments the reader located. A step
-or recipe without such tokens skips shell parsing. If a candidate remains unexplained, the
+The gate checks raw test tokens against the commands and comments the reader located. It also
+checks Make references to known test-command assignments. Other steps and recipes skip shell
+parsing. An unreadable command and a measured violation elsewhere in the same step receive
+separate diagnostics. If a candidate remains unexplained, the
 shell is unreadable, or a read exceeds its bound, the finding says `unverifiable test invocation`
-and names the file, line and reason. A duration exception covers a measured timeout above
-the bound. Only `test-timeout` entries may name the root `Makefile`.
+and names the file, line and reason. A duration exception covers a measured, positive timeout
+above the bound. Only `test-timeout` entries may name the root `Makefile`.
 See `TestAuditTestTimeouts_UnverifiableInvocations`, `TestAuditTestTimeouts_UnrelatedMultilineExpression`
 and `TestAuditTestTimeouts_RepositoryMakefile` in `internal/forge/test_timeout_audit_test.go`
 and `TestValidateExceptionsTestTimeoutMakefile` in `internal/config/exceptions_test.go`.

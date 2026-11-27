@@ -1268,3 +1268,82 @@ func TestAuditTestTimeouts_AdoptionRecipe(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditTestTimeouts_NamedMakeCommands checks the effective arguments at the recipe use.
+func TestAuditTestTimeouts_NamedMakeCommands(t *testing.T) {
+	for _, tc := range []struct{ name, makefile, want string }{
+		{"above bound", "TEST_CMD := go test -timeout 45m\ncheck: ; $(TEST_CMD) ./...\n", ":2 sets 45m, above the 30m bound"},
+		{"at bound", "VERIFY ::= go test -timeout\ncheck:\n\t${VERIFY} 30m ./...\n", ""},
+		{"timeout at use", "CHECK = go test\ncheck:\n\t${CHECK} ./... -test.timeout=45m\n", ":3 sets 45m, above the 30m bound"},
+		{"conditional command", "ifdef SLOW\nCHECK := go test\nendif\ncheck: ; $(CHECK) ./...\n", ":4 unverifiable test invocation: CHECK needs one literal test command in a root Makefile assignment"},
+		{"ambiguous definition", "CHECK := go test\nCHECK += -timeout 45m\ncheck: ; $(CHECK) ./...\n", ":3 unverifiable test invocation: CHECK needs one literal test command in a root Makefile assignment"},
+		{"target-specific definition", "check: FAST := go test -timeout 45m\ncheck: ; $(FAST) ./...\n", ":2 unverifiable test invocation: FAST needs one literal test command in a root Makefile assignment"},
+		{"indirect command", "RUN.TEST := go test -timeout 45m\nFIRST = ${RUN.TEST}\nNEXT = $(FIRST)\ncheck: ; ${NEXT} ./...\n", ":4 unverifiable test invocation: NEXT needs one literal test command in a root Makefile assignment"},
+		{"define command", "define CHECK\ngo test -timeout 45m\nendef\ncheck: ; $(CHECK) ./...\n", ":4 unverifiable test invocation: CHECK needs one literal test command in a root Makefile assignment"},
+		{"unused definition", "TEST_CMD := go test -timeout 45m\nBUILD := go build\ncheck: ; $(BUILD) ./...\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertTimeoutFile(t, "Makefile", tc.makefile, tc.want) })
+	}
+}
+
+// TestAuditTestTimeouts_PositiveDeadline includes disallowed durations and the smallest positive duration.
+func TestAuditTestTimeouts_PositiveDeadline(t *testing.T) {
+	const file = ".github/workflows/ci.yml"
+	const noDeadline = ":6 unverifiable test invocation: 0 disables the test deadline"
+	for _, tc := range []struct{ flag, want string }{
+		{"-timeout=0", noDeadline}, {"--timeout 0", noDeadline},
+		{"-test.timeout=0", noDeadline}, {"--test.timeout 0", noDeadline},
+		{"-timeout=-1s", ":6 unverifiable test invocation: -1s disables the test deadline"},
+		{"-timeout=1ns", ""},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			step := "      - run: go test " + tc.flag + " ./...\n"
+			assertTimeoutFile(t, file, timeoutFixtureWorkflow("ubuntu-latest", step), tc.want)
+		})
+	}
+	defaultZero := reusableTimeoutWorkflow("      test-timeout:\n        type: string\n        default: 0s\n")
+	_, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": defaultZero}), timeoutEntry("ci.yml", "2026-10-18"))
+	if err == nil || !strings.Contains(err.Error(), "(default 0s) disables the test deadline") {
+		t.Fatalf("zero default with duration exception: got %v", err)
+	}
+}
+
+// TestAuditTestTimeouts_IndependentCommands requires every command's source line in either order.
+func TestAuditTestTimeouts_IndependentCommands(t *testing.T) {
+	const measured = "go test -timeout 45m ./..."
+	const unreadable = "go test -unknown ./..."
+	for _, commands := range [][2]string{{measured, unreadable}, {unreadable, measured}} {
+		step := "      - run: |\n          " + strings.Join(commands[:], "\n          ") + "\n"
+		_, err := auditTimeouts(t, triggerRepository(t, map[string]string{"ci.yml": timeoutFixtureWorkflow("ubuntu-latest", step)}))
+		if err == nil || len(strings.Split(err.Error(), "\n")) != len(commands) {
+			t.Fatalf("commands %v: got %v, want one finding per command", commands, err)
+		}
+		for i, command := range commands {
+			want := "sets 45m, above the 30m bound"
+			if command == unreadable {
+				want = "unverifiable test invocation: unexpanded argument in test invocation"
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf(".github/workflows/ci.yml:%d %s", 7+i, want)) {
+				t.Fatalf("commands %v: got %v, want line %d to report %q", commands, err, 7+i, want)
+			}
+		}
+	}
+}
+
+// TestAuditTestTimeouts_DocumentedFlags keeps the guide's flag table in step with the audited grammar.
+func TestAuditTestTimeouts_DocumentedFlags(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "guides", "development-mcp.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(guide), "| Test flag spellings |")
+	if !found {
+		t.Fatal("test flag table missing")
+	}
+	table, _, _ := strings.Cut(section, "\n\n")
+	for name, spec := range timeoutTestFlags {
+		if !strings.Contains(table, "`-"+name+"`") || spec.forwarded != strings.Contains(table, "`-test."+name+"`") {
+			t.Errorf("flag %s: guide must list its accepted spelling and test alias (forwarded=%v)", name, spec.forwarded)
+		}
+	}
+}

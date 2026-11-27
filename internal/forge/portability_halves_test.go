@@ -61,8 +61,13 @@ func stepHalvesProblem(step, pkg, half string) string {
 	if _, err := regexp.Compile(m[1]); err != nil {
 		return "the " + half + " pattern does not compile: " + err.Error()
 	}
-	for _, flag := range []string{"-run", "-skip"} {
-		want := `go test -json -timeout 30m ` + flag + ` "$` + half + `" "${` + pkg + `##-*}"`
+	for _, args := range []string{
+		`"${packages[@]##-*}"`,
+		`"${adopt##-*}"`,
+		`-run "$` + half + `" "${` + pkg + `##-*}"`,
+		`-skip "$` + half + `" "${` + pkg + `##-*}"`,
+	} {
+		want := `go test -json -timeout 30m ` + args
 		if strings.Count(step, want) != 1 {
 			return "not exactly one " + want
 		}
@@ -151,5 +156,24 @@ func TestPortability_Boundary_HalvesAreBothNonEmpty(t *testing.T) {
 	}
 	if matched == 0 || other == 0 {
 		t.Fatalf("pattern %q splits cmd/standardsctl's tests %d / %d; both halves must hold tests", m[1], matched, other)
+	}
+}
+
+// TestPortability_PlantedPackageSelection requires the main and adopt command in each matrix job to select its package.
+func TestPortability_PlantedPackageSelection(t *testing.T) {
+	workflow := readPortability(t)
+	for _, operand := range []string{`"${packages[@]##-*}"`, `"${adopt##-*}"`} {
+		const prefix = `go test -json -timeout 30m `
+		command := prefix + operand
+		first, last := strings.Index(workflow, command), strings.LastIndex(workflow, command)
+		if first < 0 || last <= first {
+			t.Fatalf("expected %s in both test jobs", command)
+		}
+		for _, at := range []int{first, last} {
+			mutant := workflow[:at] + prefix + workflow[at+len(command):]
+			if problem := halvesProblem(mutant, "cli", "cli_half"); problem == "" {
+				t.Errorf("dropping %s at %d left package selection green", operand, at)
+			}
+		}
 	}
 }

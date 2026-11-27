@@ -70,7 +70,6 @@ const (
 	parameterName   = `[a-zA-Z_][a-zA-Z_0-9]*`
 	scalarParameter = `\$(?:` + parameterName + `|\{` + parameterName + `\})`
 	unknownTestWord = "unexpanded argument in test invocation"
-	badTestWrapper  = "GO_TEST needs one literal test command in a root Makefile assignment"
 )
 
 var (
@@ -134,9 +133,9 @@ func literalWrapperCommand(head string) []hiss.ShellCodeWord {
 }
 
 // arguments joins definition and use before assigning flag values, without modifying the prefix.
-func (w timeoutWrapper) arguments(use []hiss.ShellCodeWord) ([]hiss.ShellCodeWord, string) {
+func (w timeoutWrapper) arguments(name string, use []hiss.ShellCodeWord) ([]hiss.ShellCodeWord, string) {
 	if w.args == nil {
-		return nil, badTestWrapper
+		return nil, name + " needs one literal test command in a root Makefile assignment"
 	}
 	args := append(w.args[:len(w.args):len(w.args)], use...)
 	if w.sandboxed {

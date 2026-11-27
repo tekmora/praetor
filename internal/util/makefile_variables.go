@@ -87,12 +87,14 @@ type makefileBinding struct {
 // reads, which may bind any variable (evaluates). steps counts the work: the bytes of every bound
 // name split into literal runs and the runs compared with a variable's name.
 type makefileBindings struct {
-	count     map[string]int
-	computed  []makefileName
-	runs      int
-	plain     []makefileBinding
-	flags     bool
-	evaluates bool
+	observe    func(name, value string)
+	defineName string
+	count      map[string]int
+	computed   []makefileName
+	runs       int
+	plain      []makefileBinding
+	flags      bool
+	evaluates  bool
 	// Recipes run after rule names are fixed. An eval there or an incomplete read
 	// invalidates claims about values when a recipe runs.
 	recipeUnknown bool
@@ -102,7 +104,7 @@ type makefileBindings struct {
 // makefileReadVariables returns the values the reader fixes for lines, the logical lines of a
 // Makefile, by the allow-list this file opens with.
 func makefileReadVariables(lines []string) makefileVariables {
-	bindings := makefileCollectBindings(lines)
+	bindings := makefileCollectBindings(lines, nil)
 	variables := makefileVariables{values: make(map[string]makefileValue)}
 	if !bindings.readable() {
 		variables.steps = bindings.steps
@@ -127,13 +129,14 @@ func (b *makefileBindings) readable() bool {
 
 // MakefileSimpleAssignments returns the raw right-hand sides of unique, unconditional root
 // assignments and whether builtin keeps its Make-provided value. Callers must validate
-// each right-hand side before treating it as expanded text.
-func MakefileSimpleAssignments(data, builtin string) (map[string]string, bool) {
+// each right-hand side before treating it as expanded text. observe receives assignment
+// names and raw values even when conditional or ambiguous bindings prevent proving a value.
+func MakefileSimpleAssignments(data, builtin string, observe func(name, value string)) (map[string]string, bool) {
 	lines, whole := makefileLogicalLines(data)
 	if !whole {
 		return nil, false
 	}
-	bindings := makefileCollectBindings(lines)
+	bindings := makefileCollectBindings(lines, observe)
 	if !bindings.readable() || bindings.recipeUnknown {
 		return nil, false
 	}
@@ -153,8 +156,8 @@ func MakefileSimpleAssignments(data, builtin string) (map[string]string, bool) {
 // unsure line included: the opening line of a define and every line makefileBindings.line reads.
 // Define bodies and recipe lines bind nothing, unless a body calls eval. The reading stops where
 // the scanner stops; a caller leaves such a file to Make before it resolves any name.
-func makefileCollectBindings(lines []string) makefileBindings {
-	bindings := makefileBindings{count: make(map[string]int)}
+func makefileCollectBindings(lines []string, observe func(name, value string)) makefileBindings {
+	bindings := makefileBindings{count: make(map[string]int), observe: observe}
 	var scanner makefileScanner
 	for index := 0; index < len(lines) && index < MaxMakefileLines; index++ {
 		opening := scanner.depth == 0
@@ -197,6 +200,9 @@ func (b *makefileBindings) define(opening bool, line string) {
 	if opening {
 		name, _ := makefileBoundName(line)
 		b.add(name, false)
+		b.defineName = name
+	} else if b.observe != nil && b.defineName != "" {
+		b.observe(b.defineName, line)
 	}
 }
 
@@ -217,14 +223,20 @@ func (b *makefileBindings) line(index int, text string, top bool) {
 	_, width := makefileOperatorAt(text, assign)
 	binding := makefileBinding{operator: text[assign : assign+width], value: text[assign+width:], line: index}
 	harmless := makefileHarmlessFlagsValue(binding.operator, binding.value)
-	if colon >= 0 && colon < assign {
+	left := text[:assign]
+	targetSpecific := colon >= 0 && colon < assign
+	if targetSpecific {
 		_, after := makefileOperatorAt(text, colon)
-		b.addAll(makefileNameWords(text[colon+after:assign]), harmless)
-		return
+		left = text[colon+after : assign]
 	}
-	names := makefileNameWords(text[:assign])
-	b.addAll(names, harmless)
-	if top && len(names) == 1 && makefileDirectiveIndex(strings.Fields(text[:assign])) == 0 {
+	names := makefileNameWords(left)
+	for _, name := range names {
+		b.add(name, harmless)
+		if b.observe != nil {
+			b.observe(name, binding.value)
+		}
+	}
+	if !targetSpecific && top && len(names) == 1 && makefileDirectiveIndex(strings.Fields(left)) == 0 {
 		binding.name = names[0]
 		b.plain = append(b.plain, binding)
 	}

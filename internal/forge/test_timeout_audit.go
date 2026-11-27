@@ -46,7 +46,7 @@ type TestTimeoutOptions struct {
 
 // AuditTestTimeouts checks workflow and root Makefile lines against the per-package timeout
 // bound. It proves commands in bash or sh workflow steps (step, job, workflow, then runner
-// default) and literal Makefile recipes without .ONESHELL, including $(GO_TEST) and ${GO_TEST}.
+// default) and literal Makefile recipes without .ONESHELL, including named test-command assignments.
 // Before test, go or go.exe may take only the two-word -C dir. Each raw candidate must map to
 // a resolved command or shell comment. Unknown shells, enclosing Make functions, attached
 // operators and incomplete reads report an unverifiable test invocation at its source line.
@@ -178,6 +178,9 @@ func judgeTimeout(where, raw string, defaults map[string]exprValue) (finding, re
 	d, err := time.ParseDuration(value)
 	if err != nil {
 		return "", fmt.Sprintf("%s is an unreadable timeout", shown)
+	}
+	if d <= 0 {
+		return "", fmt.Sprintf("%s disables the test deadline", shown)
 	}
 	if d > time.Duration(testTimeoutBoundMinutes)*time.Minute {
 		return fmt.Sprintf("[FAIL] %s: %s sets %s, above the %dm bound", testTimeoutGate, where, shown, testTimeoutBoundMinutes), ""

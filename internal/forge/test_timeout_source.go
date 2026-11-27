@@ -23,8 +23,9 @@ const (
 
 	// A flag can carry an attached value or consume one more word. Keep quoted
 	// operands together and ordinary shell command separators outside the sequence.
-	wordPart = `(?:\$\([^\r\n]*\)|\$\{[^}\r\n]*\}|[^ \t\r\n'"\\;&|]+|'[^']*'|"[^"]*"|\\(?:\r?\n|.))`
-	flagWord = wordSpace + wordJoint + `(?:-|\$)` + wordPart + `*` + wordJoint
+	wordPart      = `(?:\$\([^\r\n]*\)|\$\{[^}\r\n]*\}|[^ \t\r\n'"\\;&|]+|'[^']*'|"[^"]*"|\\(?:\r?\n|.))`
+	flagWord      = wordSpace + wordJoint + `(?:-|\$)` + wordPart + `*` + wordJoint
+	makeReference = `\$(?:\([[:alnum:]_.-]+\)|\{[[:alnum:]_.-]+\})`
 )
 
 // candidateWord admits shell quotes, escapes and line splices between every literal character.
@@ -49,7 +50,8 @@ var testInvocation = regexp.MustCompile(`(?:^|[[:space:]/\\'"$,=;&|<>()\x60])[ @
 
 var (
 	literalGoDirectory = regexp.MustCompile(`^[[:alnum:]_./:\\ +~-]+$`)
-	makeVariable       = regexp.MustCompile(`^\$(?:\([[:alnum:]_]+\)|\{[[:alnum:]_]+\})$`)
+	makeVariable       = regexp.MustCompile(`^` + makeReference + `$`)
+	makeReferences     = regexp.MustCompile(makeReference)
 )
 
 // timeoutSource maps a shell reader's zero-based lines to a workflow or Makefile.
@@ -58,7 +60,7 @@ type timeoutSource struct {
 	line        func(int) int
 	literals    map[int]int
 	assignments map[string]string
-	wrapper     timeoutWrapper
+	wrappers    map[string]timeoutWrapper
 	packageName string
 }
 
@@ -96,12 +98,7 @@ func makefileTimeouts(text string) ([]string, error) {
 	var findings []string
 	var failures []error
 	oneShell := file.Targets[".ONESHELL"] || util.MakefileHasTarget(text, ".ONESHELL")
-	assignments, defaultDirectory := util.MakefileSimpleAssignments(text, "CURDIR")
-	source := timeoutSource{
-		file:        "Makefile",
-		assignments: assignments,
-		wrapper:     readTimeoutWrapper(assignments["GO_TEST"], defaultDirectory),
-	}
+	source := makefileTimeoutSource(text)
 	for _, recipe := range file.Recipes {
 		if oneShell {
 			recipe.Unresolved = ".ONESHELL recipes share a shell"
@@ -115,14 +112,70 @@ func makefileTimeouts(text string) ([]string, error) {
 	return findings, errors.Join(failures...)
 }
 
-// recipeTimeouts checks only logical recipe lines holding a raw test candidate.
+// makefileTimeoutSource separates evidence that a variable can invoke tests from proof of
+// its effective arguments. Visit each candidate once, including aliases of candidate variables.
+func makefileTimeoutSource(text string) timeoutSource {
+	wrappers := make(map[string]timeoutWrapper)
+	var names []string
+	mark := func(name string) {
+		if _, found := wrappers[name]; !found {
+			wrappers[name] = timeoutWrapper{}
+			names = append(names, name)
+		}
+	}
+	mark("GO_TEST")
+	uses := make(map[string][]string)
+	maxNames := 1
+	assignments, defaultDirectory := util.MakefileSimpleAssignments(text, "CURDIR", func(name, value string) {
+		maxNames++
+		if rawTestCandidate(value) != nil {
+			mark(name)
+		}
+		for _, reference := range makeReferences.FindAllString(value, -1) {
+			key := reference[2 : len(reference)-1]
+			uses[key] = append(uses[key], name)
+		}
+	})
+	for i := 0; i < len(names) && i < maxNames; i++ {
+		name := names[i]
+		wrappers[name] = readTimeoutWrapper(assignments[name], defaultDirectory)
+		for _, use := range uses[name] {
+			mark(use)
+		}
+	}
+	return timeoutSource{file: "Makefile", assignments: assignments, wrappers: wrappers}
+}
+
+// candidate also recognizes references to Make assignments whose values contain test commands.
+// Literal spans keep shell dollars distinct from Make references. Choose the first byte in source order.
+func (s timeoutSource) candidate(script string) []int {
+	at := rawTestCandidate(script)
+	for start, end := range s.literals {
+		if _, known := s.wrapperName(script[start:end]); known && (at == nil || start < at[0]) {
+			at = []int{start, end}
+		}
+	}
+	return at
+}
+
+// wrapperName looks up one whole Make reference from the recipe reader's literal spans.
+func (s timeoutSource) wrapperName(reference string) (string, bool) {
+	if len(reference) < 4 || reference[0] != '$' {
+		return "", false
+	}
+	name := reference[2 : len(reference)-1]
+	_, found := s.wrappers[name]
+	return name, found
+}
+
+// recipeTimeouts checks logical recipe lines holding a raw test command or a reference to one.
 func (s timeoutSource) recipeTimeouts(recipe util.MakefileRecipe) ([]string, error) {
 	script := recipe.Text
-	candidate := rawTestCandidate(script)
+	s.literals = recipe.LiteralSpans
+	candidate := s.candidate(script)
 	if candidate == nil {
 		return nil, nil
 	}
-	s.literals = recipe.LiteralSpans
 	s.line = func(n int) int { return recipe.Line + n + 1 }
 	if recipe.Unresolved != "" {
 		return nil, s.refuse(script, candidate[0], recipe.Unresolved)
@@ -148,22 +201,23 @@ func (s timeoutSource) check(script string, source hiss.ShellCommandSource, defa
 		blankTimeoutSpan(remaining, span)
 	}
 	var findings []string
+	var failures []error
 	for _, command := range source.Commands {
 		long, matched, reason := s.checkCommand(script, command, binding, defaults)
-		if reason != "" {
-			return nil, s.refuse(script, command.Words[0].Span[0], reason)
-		}
-		if !matched {
+		if !matched && reason == "" {
 			continue
+		}
+		if reason != "" {
+			failures = append(failures, s.refuse(script, command.Words[0].Span[0], reason))
 		}
 		findings = append(findings, long...)
 		blankTimeoutSpan(remaining, command.Words[0].Span)
 	}
 	raw := string(remaining)
-	if at := rawTestCandidate(raw); at != nil {
-		return nil, s.refuse(script, at[0], unresolvedTestReason(raw, at))
+	if at := s.candidate(raw); at != nil {
+		failures = append(failures, s.refuse(script, at[0], unresolvedTestReason(raw, at)))
 	}
-	return findings, nil
+	return findings, errors.Join(failures...)
 }
 
 // checkCommand validates a candidate's head, redirections and argument roles at its use site.
@@ -192,8 +246,8 @@ func (s timeoutSource) commandArgs(script string, command hiss.ShellCodeCommand)
 		return words[2:], ""
 	}
 	program := words[0]
-	if (program.Text == "$(GO_TEST)" || program.Text == "${GO_TEST}") && s.literals[program.Span[0]] == program.Span[1] {
-		return s.wrapper.arguments(words[1:])
+	if name, known := s.wrapperName(program.Text); known && s.literals[program.Span[0]] == program.Span[1] {
+		return s.wrappers[name].arguments(name, words[1:])
 	}
 	return goTestArgs(words), ""
 }
