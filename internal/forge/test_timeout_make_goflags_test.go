@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestAuditTestTimeouts_MakeGOFLAGSGraph(t *testing.T) {
 }
 
 // TestAuditTestTimeouts_MakeImplicitGOFLAGS compares the audit with GNU Make
-// in isolated directories using fixture Makefiles and a logging go stub.
+// in isolated directories using the current toolchain's go env GOFLAGS.
 func TestAuditTestTimeouts_MakeImplicitGOFLAGS(t *testing.T) {
 	const export = "release.o: export GOFLAGS := -timeout=0\n"
 	const check = "release.c:\n\tgo test -timeout=30m ./...\n"
@@ -85,28 +86,49 @@ func assertMakeGOFLAGSReference(t *testing.T, fixture, want string, goals []stri
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	ctx, err = util.WithCommandEnvironment(ctx, []string{"PATH=" + dir, "LC_ALL=C", "HOME=" + dir})
+	bin := filepath.Join(runtime.GOROOT(), "bin")
+	env := []string{"PATH=" + bin, "LC_ALL=C", "HOME=" + dir, "GOENV=off", "GOTOOLCHAIN=local", "GOFLAGS="}
+	if runtime.GOOS == "windows" {
+		for _, key := range []string{"ComSpec", "SystemRoot"} {
+			if value, ok := os.LookupEnv(key); ok {
+				env = append(env, key+"="+value)
+			}
+		}
+	}
+	ctx, err = util.WithCommandEnvironment(ctx, env)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out, err := util.RunCommand(ctx, dir, makePath, "--version"); err != nil || !strings.HasPrefix(out, "GNU Make ") {
 		t.Skip("GNU Make is not available")
 	}
-	writeMakeGOFLAGSFixture(t, dir, fixture)
-	args := append([]string{"-f", "fixture.mk", "-B", "SHELL=/bin/sh", "CC=:"}, goals...)
-	if out, err := util.RunCommand(ctx, dir, makePath, args...); err != nil {
-		t.Fatalf("GNU Make fixture: %v\n%s", err, out)
+
+	// Only the Make oracle copy is rewritten. Relative redirections work in
+	// both sh and cmd without interpolating the temporary directory into a recipe.
+	goCommand := "go"
+	if runtime.GOOS == "windows" {
+		goCommand = "go.exe"
+	}
+	oracle := strings.NewReplacer(
+		"go test -timeout=30m ./...", goCommand+" env GOFLAGS > goflags.log",
+		"; @:\n", "; @echo noop > noop.log\n",
+	).Replace(fixture)
+	writeMakeGOFLAGSFixture(t, dir, oracle)
+	// Keep the built-in C rule, but send its compiler command to a separate log.
+	args := append([]string{"-f", "fixture.mk", "-B", "CC=echo > compiler.log"}, goals...)
+	if _, err := util.RunCommand(ctx, dir, makePath, args...); err != nil {
+		t.Fatalf("GNU Make fixture: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "goflags.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != want {
-		t.Fatalf("stub received GOFLAGS %q; want %q", got, want)
+		t.Fatalf("Make recipe's go env GOFLAGS emitted %q; want %q", got, want)
 	}
 }
 
-// writeMakeGOFLAGSFixture installs the Makefile, prerequisite files, and logging go stub.
+// writeMakeGOFLAGSFixture installs the oracle Makefile and prerequisite files.
 func writeMakeGOFLAGSFixture(t *testing.T, dir, fixture string) {
 	t.Helper()
 	for _, f := range []struct {
@@ -116,7 +138,6 @@ func writeMakeGOFLAGSFixture(t *testing.T, dir, fixture string) {
 		{"fixture.mk", fixture, 0600},
 		{"release.c", "", 0600},
 		{"left/release.c", "", 0600},
-		{"go", "#!/bin/sh\nprintf '%s\\n' \"${GOFLAGS-}\" > goflags.log\n", 0700},
 	} {
 		path := filepath.Join(dir, f.name)
 		if err := os.MkdirAll(filepath.Dir(path), util.SecureDirPerm); err != nil {
