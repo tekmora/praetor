@@ -1099,6 +1099,38 @@ stand-in `cargo` with `testsupport.BuildExecutable`, puts it first on `PATH`, an
 through the production runner: all commands passing mints a receipt that verifies and leaves the
 build output in the shared directory after the worktree is gone, and a clippy failure mints none.
 
+### Declared test preparation and execution wrappers
+
+A Cargo workspace or Go module whose test suite depends on an untracked build artefact produced
+before tests run (such as a static library built into `zig-out/lib` for `build.rs`) or on a
+display wrapper declares `gate.test_prepare` and `gate.test_wrapper` in `.standards.yaml`
+(`internal/config/gate.go`, `internal/gating/test_prepare.go`):
+
+```yaml
+gate:
+  test_wrapper: ["xvfb-run", "-a"]
+  test_prepare:
+    - ["zig", "build"]
+```
+
+- **Argv lists only, never a shell:** `gate.test_prepare` lists 1 to 16 commands, each a list of
+  1 to 32 non-empty strings of at most 1024 bytes without control characters. `gate.test_wrapper`
+  is one list of 1 to 32 non-empty strings under the same per-argument rule. A malformed value,
+  non-string scalar, empty argv, over-bound list or unknown `gate` key fails manifest loading,
+  naming the key and offending index (`internal/config/gate_test.go`).
+- **Isolated worktree order and bound:** Inside each isolated test worktree, every `test_prepare`
+  command runs in order before the Cargo commands (`cargo test --workspace --locked`, `cargo clippy`)
+  and before each Go module's `go test -race` run, in the suite's working directory and environment
+  and within the same stage deadline (`PRAETOR_TEST_STAGE_TIMEOUT`). When `gate.test_wrapper` is
+  set, its argv prefixes every `test_prepare` command and every Cargo and Go suite command.
+- **Fail-closed execution and receipt evidence:** A `test_prepare` or `test_wrapper` binary absent
+  from `PATH` fails the stage by name and is never skipped or passed. The first failing prepare
+  command stops the stage before later commands and suites, naming the joined command, its exit
+  status and a bounded output excerpt (`4096` bytes). Passing runs record the preparation count
+  and wrapper in the stage reason (`test_prepare ran <n> command(s)` and `under test_wrapper <argv>`),
+  while omitting both keys preserves the stage behaviour and signed output byte for byte
+  (`internal/gating/test_prepare_test.go`).
+
 ### Node repositories (npm, pnpm, Yarn)
 
 Where the repository root holds `package.json` plus exactly one supported lockfile (`package-lock.json` for npm, `pnpm-lock.yaml` for pnpm, or `yarn.lock` for Yarn), the toolchain stages run Node alongside Go and Cargo, or instead of them ([`internal/gating/node.go`](https://github.com/cordanaLLM/praetor/blob/main/internal/gating/node.go)):

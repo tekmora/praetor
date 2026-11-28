@@ -131,6 +131,10 @@ func runCargoSecurity(ctx context.Context, cfg *stageConfig) (string, error) {
 // Go suite's (ResolveRepoRunBudget). Both commands build into the persistent target directory
 // cargoTargetDir names, so only the first run in a clone compiles the dependencies.
 func runCargoTests(ctx context.Context, cfg *stageConfig) (string, error) {
+	policy, err := cfg.loadTestStagePolicy(ctx)
+	if err != nil {
+		return "", err
+	}
 	if cfg.dryRun {
 		return "", skipped("dry run: cargo test and cargo clippy not run")
 	}
@@ -144,23 +148,26 @@ func runCargoTests(ctx context.Context, cfg *stageConfig) (string, error) {
 	bound := budget.StageBound
 	targetArgs, targetNote := cargoTargetDir(ctx, cfg.repoDir)
 	err = inStageWorktree(ctx, cfg, bound, "", func(tCtx context.Context, dir string) error {
-		for i := 0; i < len(cargoTestCommands); i++ {
-			if runErr := runCargoSuite(tCtx, cfg, bound, dir, cargoTestCommands[i], targetArgs); runErr != nil {
-				return runErr
-			}
-		}
-		return nil
+		return runCargoWorktree(tCtx, cfg, policy, bound, dir, targetArgs)
 	})
 	if err != nil {
 		return "", err
 	}
-	msg := "cargo test --workspace --locked and cargo clippy --workspace --all-targets -- -D warnings passed"
-	for _, note := range []string{targetNote, budget.Note} {
-		if note != "" {
-			msg += "; " + note
+	const suiteOKMsg = "cargo test --workspace --locked and cargo clippy --workspace --all-targets -- -D warnings passed"
+	return joinTestNotes(suiteOKMsg, policy.note(), targetNote, budget.Note), nil
+}
+
+// runCargoWorktree runs any declared test_prepare commands and the Cargo suite commands in dir.
+func runCargoWorktree(tCtx context.Context, cfg *stageConfig, policy testStagePolicy, bound time.Duration, dir string, targetArgs []string) error {
+	if prepErr := runWorktreeTestPrepare(tCtx, cfg.hostToolchain(), policy, bound, dir); prepErr != nil {
+		return prepErr
+	}
+	for i := 0; i < len(cargoTestCommands); i++ {
+		if runErr := runCargoSuite(tCtx, cfg, bound, dir, policy.wrapper, cargoTestCommands[i], targetArgs); runErr != nil {
+			return runErr
 		}
 	}
-	return msg, nil
+	return nil
 }
 
 // cargoTargetDir returns the arguments that point a test-stage cargo command at a target directory
@@ -198,15 +205,19 @@ func cargoTargetDir(ctx context.Context, repoDir string) (args []string, note st
 }
 
 // runCargoSuite runs one cargo command of the test stage in the worktree dir, with targetArgs
-// after its subcommand. A cut by the stage bound or the run deadline is reported as the cut, as
-// the race stage reports one (cutError).
-func runCargoSuite(tCtx context.Context, cfg *stageConfig, bound time.Duration, dir string, args, targetArgs []string) error {
-	argv := slices.Concat(args[:1], targetArgs, args[1:])
-	out, err := cfg.run(tCtx, dir, "cargo", argv...)
+// after its subcommand and wrapper prefixed when declared. A cut by the stage bound or the run
+// deadline is reported as the cut, as the race stage reports one (cutError).
+func runCargoSuite(tCtx context.Context, cfg *stageConfig, bound time.Duration, dir string, wrapper, args, targetArgs []string) error {
+	cargoArgv := slices.Concat([]string{"cargo"}, args[:1], targetArgs, args[1:])
+	execArgv := slices.Concat(wrapper, cargoArgv)
+	out, err := cfg.run(tCtx, dir, execArgv[0], execArgv[1:]...)
 	if err == nil {
 		return nil
 	}
 	what := "cargo " + strings.Join(args, " ")
+	if len(wrapper) > 0 {
+		what = strings.Join(wrapper, " ") + " " + what
+	}
 	excerpt := util.TruncateExcerpt(out, maxCargoOutputBytes)
 	if cutErr := cutError(tCtx, what, bound, "", dir, fmt.Sprintf("%s [%v]", excerpt, err)); cutErr != nil {
 		return cutErr
