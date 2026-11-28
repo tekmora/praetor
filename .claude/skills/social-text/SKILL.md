@@ -64,7 +64,7 @@ one exception, pasted where template asks for it.
 ## Standards this register does not change
 
 **Pull-request body.** Fill the pull request template exactly as shipped. Social
-register governs only prose under `## Summary of Changes`. Sections 1-4 (HISS-16
+register governs only prose under `## Description`. Sections 1-4 (HISS
 checklist, 3D-testing verification, context-integrity checklist, receipt) =
 filled, never rewritten, reordered or removed. Receipt goes inside fence
 labelled `receipt`; unlabelled fence not read by validator.

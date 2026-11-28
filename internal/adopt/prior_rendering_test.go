@@ -1,10 +1,13 @@
 package adopt
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/managedasset"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -62,6 +65,113 @@ func fixtureDigest(t *testing.T, name string, data []byte) string {
 func priorDigestSet(t *testing.T, text string) map[string]string {
 	t.Helper()
 	return map[string]string{fixtureDigest(t, "recorded text", []byte(text)): "fixture"}
+}
+
+// TestPriorScaffoldRefreshAfterConcurrentWrite replays two refreshes with the same observation.
+func TestPriorScaffoldRefreshAfterConcurrentWrite(t *testing.T) {
+	const prior = "prior\n"
+	const current = "current\n"
+	for _, tc := range [...]struct {
+		name, winner string
+		confined     bool
+	}{
+		{"current", current, false},
+		{"edited", "user edit\n", false},
+		{"confined-current", current, true},
+		{"confined-edited", "user edit\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			sc := scaffold{rel: "scaffold.md", perm: filePerm, content: []byte(current), confined: tc.confined}
+			path := filepath.Join(root, sc.rel)
+			mustWrite(t, path, prior)
+			s := &adoptSession{repoPath: root}
+			if err := s.publishPriorRefresh(t.Context(), path, []byte(prior), []byte(tc.winner), sc); err != nil {
+				t.Fatal(err)
+			}
+			err := s.publishPriorRefresh(t.Context(), path, []byte(prior), sc.content, sc)
+			assertRefreshConflict(t, err, tc.winner != current)
+			if got := mustRead(t, path); got != tc.winner {
+				t.Fatalf("winning bytes changed from %q to %q", tc.winner, got)
+			}
+		})
+	}
+}
+
+// assertRefreshConflict distinguishes an expected stale snapshot conflict from other failures.
+func assertRefreshConflict(t *testing.T, err error, wantConflict bool) {
+	t.Helper()
+	if wantConflict {
+		if err == nil || !strings.Contains(err.Error(), "snapshot changed before replacement") {
+			t.Fatalf("expected a stale snapshot conflict, got %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("identical winner within ceiling: %v", err)
+	}
+}
+
+// requireRefreshMode reads the published file's identity and checks its POSIX permissions.
+func requireRefreshMode(t *testing.T, path string, want os.FileMode) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode(); got != want {
+		t.Fatalf("%s mode = %v, want %v", path, got, want)
+	}
+	return info
+}
+
+// TestPriorScaffoldRefreshPermissionCeiling preserves an identical winner at its published mode.
+func TestPriorScaffoldRefreshPermissionCeiling(t *testing.T) {
+	if !util.ModeIsProtection() {
+		t.Skip("group and other read permissions require POSIX file modes")
+	}
+	for _, tc := range [...]struct {
+		name            string
+		winner, ceiling os.FileMode
+		conflict        bool
+	}{
+		{"exceeds", 0o644, 0o600, true},
+		{"equals", 0o644, 0o644, false},
+		{"more-restrictive", 0o600, 0o644, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &adoptSession{repoPath: t.TempDir()}
+			sc := scaffold{rel: "scaffold.md", perm: tc.winner, content: []byte("current\n")}
+			path := filepath.Join(s.repoPath, sc.rel)
+			prior := []byte("prior\n")
+			if err := contextopt.WriteSnapshot(t.Context(), path, prior, tc.winner); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.publishPriorRefresh(t.Context(), path, prior, sc.content, sc); err != nil {
+				t.Fatal(err)
+			}
+			before := requireRefreshMode(t, path, tc.winner)
+			sc.perm = tc.ceiling
+			err := s.publishPriorRefresh(t.Context(), path, prior, sc.content, sc)
+			assertRefreshConflict(t, err, tc.conflict)
+			if after := requireRefreshMode(t, path, tc.winner); !os.SameFile(before, after) {
+				t.Fatal("stale refresh replaced the winning file")
+			}
+			if got := mustRead(t, path); got != string(sc.content) {
+				t.Fatalf("winning bytes changed to %q", got)
+			}
+		})
+	}
+}
+
+// TestPriorScaffoldRefreshAfterRemoval preserves the error when the winner removed the file.
+func TestPriorScaffoldRefreshAfterRemoval(t *testing.T) {
+	s := &adoptSession{repoPath: t.TempDir()}
+	sc := scaffold{rel: "empty.md", perm: filePerm}
+	path := filepath.Join(s.repoPath, sc.rel)
+	err := s.publishPriorRefresh(t.Context(), path, []byte("prior\n"), sc.content, sc)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed scaffold with an empty target: got %v, want missing file", err)
+	}
+	assertAbsent(t, s.repoPath, sc.rel)
 }
 
 // Positive: the recorded LF text and its CRLF checkout (core.autocrlf on Windows) are both

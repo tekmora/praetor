@@ -9,6 +9,18 @@ import (
 	"strings"
 )
 
+// ErrNonDirectoryComponent identifies a non-directory observed by Lstat below a pinned parent.
+// Symlinks have a separate refusal even when their target is missing.
+var ErrNonDirectoryComponent = errors.New("path component is not a directory")
+
+// nonDirectoryError preserves the walker's refusal and classifies an observed obstruction.
+func nonDirectoryError(info os.FileInfo, refusal string) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New(refusal)
+	}
+	return fmt.Errorf("%s: %w", refusal, ErrNonDirectoryComponent)
+}
+
 // EnsureDirectory creates absent directories through pinned parents, rejecting a symlink at
 // any component this call creates. Existing directory permissions are left unchanged.
 //
@@ -61,7 +73,7 @@ func ensureDirectoryPath(ctx context.Context, abs string, mode os.FileMode) erro
 // exists instead, so a symlinked directory inside the governed tree carried its writes out of
 // it. Existing directory permissions are left unchanged. The walk is bounded by MaxDuration
 // (HISS-02). The caller closes the result.
-func ensureDirectoryIn(ctx context.Context, root, rel string, mode os.FileMode) (*os.Root, error) {
+func ensureDirectoryIn(ctx context.Context, open directorySource, rel string, mode os.FileMode) (*os.Root, error) {
 	if ctx == nil || mode == 0 || mode&^0o755 != 0 {
 		return nil, errors.New("directory creation requires a context and nonzero permissions at most 0755")
 	}
@@ -71,11 +83,7 @@ func ensureDirectoryIn(ctx context.Context, root, rel string, mode os.FileMode) 
 	if err != nil {
 		return nil, err
 	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil, err
-	}
-	base, err := openDirectory(ctx, absRoot)
+	base, err := open(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +113,7 @@ func ensureComponents(ctx context.Context, root *os.Root, parts []string, mode o
 	return root, nil
 }
 
+// ensureChildDirectory creates a missing child and rejects an existing obstruction.
 func ensureChildDirectory(ctx context.Context, root *os.Root, name string, mode os.FileMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -120,7 +129,7 @@ func ensureChildDirectory(ctx context.Context, root *os.Root, name string, mode 
 		return err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("directory component must not be a symlink or file: %s", name)
+		return nonDirectoryError(info, "directory component must not be a symlink or file: "+name)
 	}
 	return nil
 }

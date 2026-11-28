@@ -8,26 +8,81 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/compiler"
 	"github.com/cordanaLLM/praetor/internal/config"
+	"github.com/cordanaLLM/praetor/internal/forge"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 )
 
-// Positive: every governance document adoption scaffolds passes markdownlint's default
-// rules without disabling any of them.
-func TestScaffoldedGovernanceDocumentsPassDefaultMarkdownlint(t *testing.T) {
+// TestScaffoldedGovernanceDocumentsPassMarkdownlint checks default rules on governance prose.
+func TestScaffoldedGovernanceDocumentsPassMarkdownlint(t *testing.T) {
 	documents := map[string]string{
 		contributingFile: buildContributingGuide("acme-widgets"),
-		prTemplateFile:   buildPullRequestTemplate(),
 		securityFile:     buildSecurityPolicy(),
 		adrIndexFile:     buildADRIndex(),
 		adrTemplateFile:  buildADRTemplate(),
 	}
 	for name, doc := range documents {
 		if findings := testsupport.MarkdownFindings(doc); len(findings) != 0 {
-			t.Errorf("%s breaks markdownlint defaults: %v\n%s", name, findings, doc)
+			t.Errorf("%s breaks markdownlint rules: %v\n%s", name, findings, doc)
 		}
 		if strings.Contains(doc, "markdownlint-disable") {
 			t.Errorf("%s disables a lint rule it should satisfy", name)
 		}
+	}
+}
+
+// ceilingPRTemplateSession supplies the audit ceilings to an isolated template step.
+func ceilingPRTemplateSession(root string) *adoptSession {
+	return &adoptSession{repoPath: root, report: &AdoptReport{}, policy: &config.EffectivePolicy{
+		Policy: config.ResolvedPolicy{Complexity: config.HISSComplexityCeiling()},
+	}}
+}
+
+// installedPRTemplate runs fresh template adoption and reads the file it wrote.
+func installedPRTemplate(t *testing.T, root string, plan *VerificationPlan) string {
+	t.Helper()
+	s := ceilingPRTemplateSession(root)
+	s.verification = plan
+	if err := reconcilePullRequestTemplate(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	return repoText(t, root, prTemplateFile)
+}
+
+// TestInstalledPRTemplatePassesDefaultMarkdownlint checks the installed bytes and the sole exception.
+func TestInstalledPRTemplatePassesDefaultMarkdownlint(t *testing.T) {
+	doc := installedPRTemplate(t, t.TempDir(), nil)
+	if findings := testsupport.MarkdownFindings(doc); len(findings) != 0 {
+		t.Errorf("installed template breaks markdownlint defaults: %v", findings)
+	}
+	if findings := forge.BodyHardWrapFindings(doc); len(findings) != 0 {
+		t.Errorf("installed template contains hard-wrapped prose: %v", findings)
+	}
+	if strings.Count(doc, "markdownlint-") != 3 || !strings.Contains(doc, prTemplateMarkerBlock) {
+		t.Fatal("expected MD013 directives around only the description marker")
+	}
+	unscoped := strings.Replace(doc, prTemplateMarkerBlock, prTemplateOpsMarker, 1)
+	if findings := testsupport.MarkdownFindings(unscoped); len(findings) != 1 || !strings.Contains(findings[0], "MD013") {
+		t.Errorf("without the marker exception got %v, want one MD013 finding", findings)
+	}
+}
+
+// TestInstalledPRTemplateRestoresMD013 checks a long paragraph after the scoped marker under both rule settings.
+func TestInstalledPRTemplateRestoresMD013(t *testing.T) {
+	doc := installedPRTemplate(t, t.TempDir(), nil) + "\n" + strings.Repeat("long paragraph ", 7) + "ends here.\n"
+	if findings := testsupport.MarkdownFindings(doc); len(findings) != 1 || !strings.Contains(findings[0], "MD013") {
+		t.Errorf("installed template with a long paragraph: got %v, want one MD013 finding", findings)
+	}
+	if findings := testsupport.MarkdownFindingsWith(doc, "MD013"); len(findings) != 0 {
+		t.Errorf("installed template with MD013 disabled: got %v, want no findings", findings)
+	}
+}
+
+// TestPriorPresetChecklistExceedsDefaultWidth demonstrates MD013 on the previous checklist.
+func TestPriorPresetChecklistExceedsDefaultWidth(t *testing.T) {
+	prior := mustRead(t, filepath.Join(prTemplateFixtures, "preset.md.prior"))
+	_, checklist, ok := strings.Cut(prior, "\n"+prChecklistHeading+"\n")
+	if !ok || !strings.Contains(strings.Join(testsupport.MarkdownFindings(checklist), "\n"), "MD013") {
+		t.Fatal("expected the previous checklist to exceed the default width")
 	}
 }
 

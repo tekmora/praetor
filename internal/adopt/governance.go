@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/cordanaLLM/praetor/internal/config"
@@ -372,24 +373,34 @@ func reconcilePullRequestTemplate(ctx context.Context, s *adoptSession) error {
 	if s.declines("pull-request-template") {
 		return nil
 	}
-	upper, err := repoFile(s.repoPath, prTemplateUpper)
+	return s.scaffoldInstalledTemplate(ctx)
+}
+
+// installPullRequestTemplate selects the existing spelling and renders the scaffold within
+// the repository opened for this adoption. A preview uses the same lookup without locking.
+func (s *adoptSession) installPullRequestTemplate(ctx context.Context, root *os.Root) error {
+	rel, exists, err := installedTemplatePath(ctx, root)
 	if err != nil {
 		return err
 	}
-	rel := prTemplateFile
-	if fileExists(upper) {
-		rel = prTemplateUpper
+	if s.policy == nil {
+		if s.opts.DryRun {
+			s.report.recordSkipped(rel, "PR template preview requires the resolved audit policy")
+			return nil
+		}
+		return errors.New("render pull request template: the effective audit policy is unresolved")
 	}
-	_, err = s.scaffoldFile(ctx, scaffold{
+	return s.reconcileInstalledTemplate(ctx, scaffold{
+		root:      root,
+		confined:  true,
 		rel:       rel,
 		perm:      filePerm,
-		content:   []byte(buildPullRequestTemplate()),
+		content:   []byte(buildPullRequestTemplate(s.policy.Policy.Complexity)),
 		prior:     priorPRTemplateDigests,
-		refreshed: "Refreshed the unedited pull request template to keep each paragraph on one line",
+		refreshed: "Refreshed the unedited pull request template to the current verification checklist",
 		created:   "Scaffolded pull request template with HISS verification checklist",
 		verified:  "Existing pull request template verified present",
-	})
-	return err
+	}, exists)
 }
 
 func reconcileSecurityPolicy(ctx context.Context, s *adoptSession) error {
@@ -529,10 +540,8 @@ func (s *adoptSession) readmeStateError(err error) error {
 
 // markdownDocument joins lines into a Markdown file ending in one newline.
 //
-// The scaffolded governance documents below are an adopter's own files, which the
-// adopter's Markdown lint reads, so each line is written within markdownlint's default
-// 80-column limit instead of opening the file with a markdownlint-disable MD013 line
-// that would also silence the rule for everything the adopter adds (BUG-806).
+// Prose documents stay within markdownlint's default 80 columns (BUG-806). Pull request
+// bodies keep each paragraph and checkbox on one physical line for forge text validation.
 func markdownDocument(lines ...string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -594,22 +603,106 @@ func buildContributingGuide(repoName string) string {
 	)
 }
 
-func buildPullRequestTemplate() string {
-	return markdownDocument(
-		"# Pull Request",
-		"",
-		"## Description",
-		"",
-		"<!-- Summarize the changes and their architectural rationale. -->",
-		"",
-		"## Pre-Merge Verification Checklist",
-		"",
-		"- [ ] Local verification passed: `make verify-all`",
-		"- [ ] No new HISS / NASA Power-of-10 infractions (functions $\\le 60$ LOC)",
-		"- [ ] 3D Tests included (Positive, Negative, Boundary) for public APIs",
-		"- [ ] Agent contexts in sync: `standardsctl compile-context --verify`",
-		"- [ ] Commit messages adhere to Conventional Commits format",
-	)
+const (
+	prDescriptionHeading = "## Description"
+	prChecklistHeading   = "## Pre-Merge Verification Checklist"
+)
+
+// prTemplateIntro introduces the checklist and its effective HISS-04 limits.
+var prTemplateIntro = []string{
+	"# Pull Request",
+	"",
+	prDescriptionHeading,
+	"",
+	"<!-- markdownlint-capture -->",
+	"<!-- markdownlint-disable MD013 -->",
+	"<!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->",
+	"<!-- markdownlint-restore -->",
+	"",
+	prChecklistHeading,
+	"",
+	"- [ ] Local verification passed: `make verify-all`",
+	"- [ ] No new HISS / NASA Power-of-10 infractions",
+	"- [ ] 3D Tests included (Positive, Negative, Boundary) for public APIs",
+	"- [ ] Agent contexts in sync: `standardsctl compile-context --verify`",
+	"- [ ] Commit messages adhere to Conventional Commits format",
+	"",
+	"### 1. High-Integrity Systems Standard (HISS) Checklist",
+	"",
+	"All PRs must strictly adhere to the declared HISS invariants before merging:",
+	"",
+	"#### Static & Runtime Determinism",
+	"",
+	"- [ ] **HISS-01** The call graph is acyclic, including indirect calls.",
+	"- [ ] **HISS-02** Every loop has a compile-time scalar upper bound.",
+	"- [ ] **HISS-02** All network and disk I/O uses explicit context timeouts.",
+	"- [ ] **HISS-03** Hot-path loops allocate zero heap bytes per tick.",
+	"- [ ] **HISS-04** Meet the effective per-function limits from `.standards.yaml`.",
+}
+
+// prTemplateVerification continues the checklist after the repository-specific HISS-04 limits.
+var prTemplateVerification = []string{
+	"",
+	"#### Memory & Error Integrity",
+	"",
+	"- [ ] **HISS-07** Handle or wrap every error. No `.unwrap()` or `.expect()`.",
+	"- [ ] **HISS-08** No dynamic evaluation or banned C calls (e.g. `strcpy`).",
+	"- [ ] **HISS-09** Each unsafe operation has a preceding `// SAFETY:` proof.",
+	"- [ ] **HISS-10** The compiler and all configured linters report zero warnings.",
+	"",
+	"#### Supply Chain & API Governance",
+	"",
+	"- [ ] **HISS-11** Pin dependencies, lockfiles, and container images.",
+	"- [ ] **HISS-14** Mark breaking API changes with `!` and a `Migration:` footer.",
+	"",
+	"---",
+	"",
+	"### 2. Three-Dimensional (3D) Testing Verification (HISS-15)",
+	"",
+	"Cover every public method and changed component with automated tests.",
+	"",
+	"- [ ] **HISS-15 positive tests** Check outputs for normal and golden inputs.",
+	"- [ ] **HISS-15 negative tests** Check errors for invalid or denied inputs.",
+	"- [ ] **HISS-15 boundary tests** Cover zero, one, empty inputs, and maxima.",
+	"- [ ] **HISS-13** Scan every supported file and keep total debt from rising.",
+	"",
+	"---",
+	"",
+	"### 3. Context Integrity & Agent Governance (HISS-16)",
+	"",
+	"- [ ] Edit agent rules in the canonical `AGENTS.md`.",
+	"- [ ] `standardsctl compile-context --verify` reports zero diffs.",
+	"- [ ] Generate all client rule files from the canonical instructions.",
+	"- [ ] Leave hooks enabled and `.git/hooks` intact.",
+	"",
+	"---",
+	"",
+	"### 4. Ed25519 Exit-0 Verification Receipt",
+	"",
+	"If the gate signs a receipt for this head, paste its JSON in the fence below.",
+	"",
+	"Otherwise, record which verification ran and the reason the gate reported.",
+	"",
+	"Repositories enforcing `forge validate-pr` need a signed receipt before merge.",
+	"",
+	"`praetorctl gate run` writes signed receipts to `.standards-receipt.json`.",
+	"",
+	"If pre-push kept a copy, find it at `.git/praetor-receipts/<sha>.json`.",
+	"",
+	"Run the gate again after a rebase.",
+	"",
+	"```receipt",
+	"```",
+	"",
+	"- [ ] Record the test command you ran and its outcome.",
+}
+
+// buildPullRequestTemplate renders the pull request template for both adoption and the engine.
+func buildPullRequestTemplate(limits config.ComplexityPolicy) string {
+	return markdownDocument(prTemplateIntro...) + markdownDocument(
+		fmt.Sprintf("  - Function LOC <= %d and statements <= %d.", limits.MaxFuncLOC, limits.MaxStatements),
+		fmt.Sprintf("  - McCabe cyclomatic <= %d and cognitive <= %d.", limits.MaxCyclomatic, limits.MaxCognitive),
+	) + markdownDocument(prTemplateVerification...)
 }
 
 func buildSecurityPolicy() string {
@@ -672,7 +765,16 @@ Describe the decision taken and the architectural rationale.
 `
 }
 
-// Order: engine-fr-rule-checks-20261027. Only unedited prior renderings refresh.
+// priorPRTemplateDigests records the shipped scaffolds, including the current engine rendering.
 var priorPRTemplateDigests = map[string]string{
-	"68ab0cf67859f207428dea6901db7121ad32f943838b65f1fe36bf965a7770a2": "template before forge text enforcement",
+	"68ab0cf67859f207428dea6901db7121ad32f943838b65f1fe36bf965a7770a2": "wrapped scaffold checklist (#477)",
+	"8430a36f64a0164981b3e95d22182fe8201af21d3d8f061935fe1d46a3a4c566": "initial HISS-16 checklist (#14)",
+	"34d4678528bac660ecaea4d9d0a2254a543a8c99ec89950e2398f8c687219292": "HISS checklist after the standard rename (#283)",
+	"523db04e188480eb0d5d08d21d400a80afe3c1919de26a776696a6d6a70c8902": "single-line scaffold checklist (#1643)",
+	"146faf6f2df563898a4de3e51473a6d8641dd3f92171c4987ea304dc39ca45bd": "shared preset headings and nested HISS checklist (2026-11-25)",
+	"feac202b5f9ffb025be8af0848b1ba4f72b6f8439866b344dd2a8edca39ac4c7": "concise checklist for the default Markdown width (#2063)",
+	"f8208c878433aa167841408a5e19ac07e17c3e5ef602c025123567b912b5737d": "scoped description marker and author-supplied test result (#2063)",
+	"ff2d340d908204fc04649b5437f37b1150ea0ba0023f04611933a7c510efac81": "restored lint settings and policy-aware verification checklist (#2063)",
+	"f7bc6f14ae6db6538510fcc4640200188fbcd6f33e7c8c91c056b97f810c7603": "effective per-function limits under the engine framework policy (#2063)",
+	"5b99577c018ca840d21537863b36bacfb4b3c2c6b28cd41c219c346c3d1fea8b": "signed receipt required when forge validate-pr is enforced (#2063)",
 }

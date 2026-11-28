@@ -2929,7 +2929,7 @@ repository's own text.
 | File | Rules disabled |
 | :--- | :--- |
 | `CONTRIBUTING.md`, `SECURITY.md`, `docs/adr/README.md`, `docs/adr/0000-template.md` | none; lines are wrapped within 80 columns |
-| `.github/pull_request_template.md` | none; each paragraph and list item stays on one line within 80 columns |
+| `.github/pull_request_template.md` | The template captures the repository's markdownlint settings, disables MD013 for the 87-column description marker that ops replaces verbatim, then restores the captured settings. |
 | `.agents/agents/repo-auditor.md`, `.agents/agents/repo-gatekeeper.md` | none |
 | `.paperclip/rules.md` | none, except MD013 around a push command too long to wrap; contract lines are wrapped within 80 columns |
 | `AGENTS.md` | MD013 from the first line to `<!-- praetor:harness:end -->`, for the harness table; MD025 after it, because the repository's instructions open with their own H1 |
@@ -2943,13 +2943,25 @@ never rewrites an existing `CONTRIBUTING.md`, `SECURITY.md` or
 `docs/adr/`: those belong to the repository once written (`internal/adopt/governance.go`),
 so delete their disable line by hand and wrap the lines it covered.
 
-An unedited pull request template matching a prior digest is refreshed automatically,
-including a CRLF checkout. The current template keeps each paragraph and list item on
-one physical line. Edited copies are preserved. `priorPRTemplateDigests` in
-`internal/adopt/governance.go` records the earlier text, replayed from
-`internal/adopt/testdata/pr-template/wrapped.md.prior`. `TestForgeText_PriorTemplate`
-covers refresh, line endings and preservation. The [forge text policy](git-hooks.md#forge-text-policy)
-explains body wrapping and foreign references.
+The HISS-04 checklist in the pull request template gives four limits per function from the
+resolved `.standards.yaml` policy. For example, a repository that tightens McCabe cyclomatic
+complexity to 8 sees 8 alongside its effective cognitive complexity, function LOC and statement
+limits. Adoption uses the audit policy that `reconcilePolicyCatalog` loads, including the
+audit ceiling on function LOC. A dry run without the pinned policy reports why it skipped the
+template.
+
+When adoption writes or verifies the template, it saves the canonical SHA-256 under
+`.workingdir/adopt-installed/<template-path>.sha256`. On readoption, a match refreshes
+the template to the current policy in its existing LF or CRLF style. A checkout without
+the local record can still refresh known release texts listed in `priorPRTemplateDigests`.
+Adoption preserves and reports other copies. `TestPRTemplateReadoptionAfterPolicyChange`
+and `TestForgeText_PriorTemplate` cover policy changes and historical releases.
+
+The template keeps each paragraph and list item on one physical line.
+The checklist asks authors to record which verification ran when the gate issued no
+receipt. Repositories enforcing `forge validate-pr` require a signed receipt before
+merge. The [forge text policy](git-hooks.md#forge-text-policy) explains body wrapping
+and foreign references.
 
 `internal/adopt/generated_markdown_test.go` and
 `internal/paperclip/rules_markdown_test.go` check each file with

@@ -2,10 +2,31 @@ package contextopt
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// TestObserveOptionalSnapshotIn distinguishes a blocked parent from the same file as a leaf.
+func TestObserveOptionalSnapshotIn(t *testing.T) {
+	root := t.TempDir()
+	const file = "installed"
+	const content = "record\n"
+	if err := os.WriteFile(filepath.Join(root, file), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join(file, "templates", "digest")
+	if _, _, err := ObserveSnapshotIn(t.Context(), root, rel); !errors.Is(err, ErrNonDirectoryComponent) {
+		t.Fatalf("strict observation of blocked parent: %v", err)
+	}
+	if data, exists, err := ObserveOptionalSnapshotIn(t.Context(), root, rel); err != nil || exists || data != nil {
+		t.Fatalf("optional record below file = %q, %t, %v", data, exists, err)
+	}
+	if data, exists, err := ObserveOptionalSnapshotIn(t.Context(), root, file); err != nil || !exists || string(data) != content {
+		t.Fatalf("optional record at file = %q, %t, %v", data, exists, err)
+	}
+}
 
 // Positive: ObserveSnapshotIn reads a regular file below root and reports it as existing.
 func TestObserveSnapshotIn_Positive_ReadsRegularFile(t *testing.T) {

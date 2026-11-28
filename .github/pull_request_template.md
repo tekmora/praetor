@@ -1,66 +1,83 @@
-<!-- cordanaLLM/praetor Pull Request Verification Gate -->
-
 # Pull Request
 
-## Summary of Changes
+## Description
 
+<!-- markdownlint-capture -->
+<!-- markdownlint-disable MD013 -->
 <!-- Provide a concise description of what this PR introduces, refactors, or fixes. -->
+<!-- markdownlint-restore -->
 
----
+## Pre-Merge Verification Checklist
 
-## 1. High-Integrity Systems Standard (HISS) Checklist
+- [ ] Local verification passed: `make verify-all`
+- [ ] No new HISS / NASA Power-of-10 infractions
+- [ ] 3D Tests included (Positive, Negative, Boundary) for public APIs
+- [ ] Agent contexts in sync: `standardsctl compile-context --verify`
+- [ ] Commit messages adhere to Conventional Commits format
+
+### 1. High-Integrity Systems Standard (HISS) Checklist
 
 All PRs must strictly adhere to the declared HISS invariants before merging:
 
-### Static & Runtime Determinism
+#### Static & Runtime Determinism
 
-- [ ] **HISS-01 (Control Flow)**: Call graph is strictly a Directed Acyclic Graph (DAG); zero recursion.
-- [ ] **HISS-02 (Bounded Loops & I/O)**: All loops declare a static compile-time scalar upper bound; all network/disk I/O operations enforce explicit `context.Context` timeouts.
-- [ ] **HISS-03 (Zero Frame Malloc)**: Hot-path loops maintain zero dynamic heap allocations ($\Delta \text{HeapAlloc}_{\text{tick}} = 0$).
-- [ ] **HISS-04 (Complexity Bounds)**: McCabe Cyclomatic $\le 10$, Cognitive $\le 15$, Func LOC $\le 60$, Statements $\le 50$.
+- [ ] **HISS-01** The call graph is acyclic, including indirect calls.
+- [ ] **HISS-02** Every loop has a compile-time scalar upper bound.
+- [ ] **HISS-02** All network and disk I/O uses explicit context timeouts.
+- [ ] **HISS-03** Hot-path loops allocate zero heap bytes per tick.
+- [ ] **HISS-04** Meet the effective per-function limits from `.standards.yaml`.
+  - Function LOC <= 60 and statements <= 50.
+  - McCabe cyclomatic <= 10 and cognitive <= 15.
 
-### Memory & Error Integrity
+#### Memory & Error Integrity
 
-- [ ] **HISS-07 (Checked Errors)**: Zero `.unwrap()` / `.expect()`; zero unchecked error returns (`_ = err`); all errors handled or wrapped with domain context.
-- [ ] **HISS-08 (Static Determinism)**: Zero `eval()`, zero dynamic evaluation, zero banned unsafe C functions (`gets`, `strcpy`, `sprintf`).
-- [ ] **HISS-09 (Safety Proofs)**: Any `unsafe` block or operation is preceded by an explanatory `// SAFETY:` rationale proving invariant maintenance.
-- [ ] **HISS-10 (Zero-Warning Cascade)**: Zero warnings across compiler, `go vet`, and all configured linters.
+- [ ] **HISS-07** Handle or wrap every error. No `.unwrap()` or `.expect()`.
+- [ ] **HISS-08** No dynamic evaluation or banned C calls (e.g. `strcpy`).
+- [ ] **HISS-09** Each unsafe operation has a preceding `// SAFETY:` proof.
+- [ ] **HISS-10** The compiler and all configured linters report zero warnings.
 
-### Supply Chain & API Governance
+#### Supply Chain & API Governance
 
-- [ ] **HISS-11 (Hermetic Supply Chain)**: All dependencies and lockfiles (`go.sum`) pinned; zero unpinned floating container tags.
-- [ ] **HISS-14 (Append-Only ABI)**: Public APIs are append-only. Any breaking change includes `!` in the conventional commit title and a mandatory `Migration:` footer.
-
----
-
-## 2. Three-Dimensional (3D) Testing Verification (HISS-15)
-
-Every public method and modified component must include three dimensions of automated testing:
-
-- [ ] **HISS-15 Dimension 1: Positive Tests**: Validated expected outputs against normal and golden operational inputs.
-- [ ] **HISS-15 Dimension 2: Negative Tests**: Validated deterministic error propagation on corrupted, unauthorized, or invalid inputs.
-- [ ] **HISS-15 Dimension 3: Boundary Tests**: Validated limits ($0$, $1$, $N_{\max}$, empty buffers, max field limits).
-- [ ] **HISS-13 Whole-Tree Debt Ratchet**: The full supported source tree was scanned; no finding is exempt because of file origin, language, or ownership, and debt may only decrease.
+- [ ] **HISS-11** Pin dependencies, lockfiles, and container images.
+- [ ] **HISS-14** Mark breaking API changes with `!` and a `Migration:` footer.
 
 ---
 
-## 3. Context Integrity & Agent Governance (HISS-16)
+### 2. Three-Dimensional (3D) Testing Verification (HISS-15)
 
-- [ ] **Canonical Single Source of Truth**: All agent rule updates were made directly in `AGENTS.md`.
-- [ ] **Context Transpilation Verification**: Ran `standardsctl compile-context --verify` with 0 diffs.
-- [ ] **Zero Manual Evasion**: No manual edits to `CLAUDE.md`, `.cursor/rules/*.mdc`, `.windsurfrules`, or `.github/copilot-instructions.md`.
-- [ ] **No Bypass Flags**: Did NOT use `--no-verify`, `LEFTHOOK=0`, or mutate `.git/hooks`.
+Cover every public method and changed component with automated tests.
+
+- [ ] **HISS-15 positive tests** Check outputs for normal and golden inputs.
+- [ ] **HISS-15 negative tests** Check errors for invalid or denied inputs.
+- [ ] **HISS-15 boundary tests** Cover zero, one, empty inputs, and maxima.
+- [ ] **HISS-13** Scan every supported file and keep total debt from rising.
 
 ---
 
-## 4. Ed25519 Exit-0 Verification Receipt
+### 3. Context Integrity & Agent Governance (HISS-16)
 
-Paste the **signed receipt JSON** below, inside the fence labelled `receipt`. The label is what the validator looks for: an unlabelled or `text` fence is treated as a code snippet in a description and never read.
+- [ ] Edit agent rules in the canonical `AGENTS.md`.
+- [ ] `standardsctl compile-context --verify` reports zero diffs.
+- [ ] Generate all client rule files from the canonical instructions.
+- [ ] Leave hooks enabled and `.git/hooks` intact.
 
-`praetorctl gate run` writes it to `.standards-receipt.json`, and the pre-push hook keeps a copy at `.git/praetor-receipts/<sha>.json`. It must certify the pull request's head commit; a rebase invalidates it, so re-mint after one.
+---
+
+### 4. Ed25519 Exit-0 Verification Receipt
+
+If the gate signs a receipt for this head, paste its JSON in the fence below.
+
+Otherwise, record which verification ran and the reason the gate reported.
+
+Repositories enforcing `forge validate-pr` need a signed receipt before merge.
+
+`praetorctl gate run` writes signed receipts to `.standards-receipt.json`.
+
+If pre-push kept a copy, find it at `.git/praetor-receipts/<sha>.json`.
+
+Run the gate again after a rebase.
 
 ```receipt
-<!-- Paste the contents of .standards-receipt.json here, replacing this line. -->
 ```
 
-- **Local Race Detector Status**: `go test -v -race ./...` (PASS)
+- [ ] Record the test command you ran and its outcome.

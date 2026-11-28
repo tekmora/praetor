@@ -130,8 +130,41 @@ func openDirectory(ctx context.Context, absolute string) (*os.Root, error) {
 // direction that matters. Repository content is attacker-influenceable; the operator's own
 // filesystem above the root is not, and conflating the two is what #109 was.
 //
-// Prefer this over OpenDirectory wherever the caller already holds a root and a path beneath it.
+// Use OpenDirectoryBelow when the caller already has an open handle for the boundary.
 func OpenDirectoryIn(ctx context.Context, root, rel string) (*os.Root, error) {
+	return openDirectoryIn(ctx, namedDirectory(root), rel, false)
+}
+
+// OpenDirectoryBelow pins a directory below a borrowed root, refusing symlinks in rel.
+// The caller owns the returned directory and retains ownership of root.
+func OpenDirectoryBelow(ctx context.Context, root *os.Root, rel string) (*os.Root, error) {
+	return openDirectoryIn(ctx, borrowedDirectory(root), rel, false)
+}
+
+// directorySource opens an owned handle for a component walk, which closes it as it descends.
+type directorySource func(context.Context) (*os.Root, error)
+
+// namedDirectory opens the boundary supplied by a pathname-based caller.
+func namedDirectory(path string) directorySource {
+	return func(ctx context.Context) (*os.Root, error) { return OpenDirectory(ctx, path) }
+}
+
+// borrowedDirectory starts each walk at the caller's pinned directory. Opening "." gives the
+// walker its own handle without looking up the name under which the directory was opened.
+func borrowedDirectory(root *os.Root) directorySource {
+	return func(ctx context.Context) (*os.Root, error) {
+		if root == nil {
+			return nil, errors.New("snapshot operation requires a pinned root")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return root.OpenRoot(".")
+	}
+}
+
+// openDirectoryIn returns a nil directory for an initially absent or blocked child in an optional walk.
+func openDirectoryIn(ctx context.Context, open directorySource, rel string, optional bool) (*os.Root, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -142,15 +175,11 @@ func OpenDirectoryIn(ctx context.Context, root, rel string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	absRoot, err := filepath.Abs(root)
+	current, err := open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	current, err := openDirectory(ctx, absRoot)
-	if err != nil {
-		return nil, err
-	}
-	return walkComponents(ctx, current, parts)
+	return walkComponents(ctx, current, parts, optional)
 }
 
 // relativeComponents splits a root-relative path into the components to walk.
@@ -170,14 +199,14 @@ func relativeComponents(rel string) ([]string, error) {
 }
 
 // walkComponents descends each component strictly, closing whichever root it does not return.
-func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *os.Root, err error) {
+func walkComponents(ctx context.Context, current *os.Root, parts []string, optional bool) (_ *os.Root, err error) {
 	for i := 0; i < len(parts) && i < MaxPathDepth; i++ {
 		if parts[i] == "" || parts[i] == "." {
 			continue
 		}
-		next, openErr := childDirectory(ctx, current, parts[i])
+		next, openErr := lookupChildDirectory(ctx, current, parts[i], optional)
 		err = errors.Join(openErr, current.Close())
-		if err != nil {
+		if err != nil || next == nil {
 			if next != nil {
 				err = errors.Join(err, next.Close())
 			}
@@ -188,17 +217,32 @@ func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *o
 	return current, nil
 }
 
+// childDirectory opens one verified directory beneath a pinned parent and checks its identity.
 func childDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
+	return lookupChildDirectory(ctx, parent, name, false)
+}
+
+// lookupChildDirectory classifies only the initial Lstat. Once a directory has been observed,
+// its disappearance or replacement must fail the open, including for an optional record.
+func lookupChildDirectory(ctx context.Context, parent *os.Root, name string, optional bool) (*os.Root, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	before, err := parent.Lstat(name)
+	if err == nil && !before.IsDir() {
+		err = nonDirectoryError(before, "path component must be a directory, never a symlink")
+	}
+	if optional && (errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNonDirectoryComponent)) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if !before.IsDir() {
-		return nil, fmt.Errorf("path component must be a directory, never a symlink")
-	}
+	return openObservedDirectory(parent, name, before)
+}
+
+// openObservedDirectory pins the child only if the opened directory matches the observed entry.
+func openObservedDirectory(parent *os.Root, name string, before os.FileInfo) (*os.Root, error) {
 	child, err := parent.OpenRoot(name)
 	if err != nil {
 		return nil, err

@@ -19,7 +19,15 @@ type ReplaceOptions struct {
 	Mode     os.FileMode
 	// ExpectedLimit raises only the prior snapshot read bound for a bounded recovery.
 	ExpectedLimit int64
+	// AcceptCurrent accepts a competing writer's exact bytes within the requested mode ceiling.
+	AcceptCurrent bool
 }
+
+// errSnapshotChanged identifies a readable file whose bytes differ from the expected snapshot.
+var errSnapshotChanged = errors.New("snapshot changed before replacement")
+
+// errSnapshotExists identifies a name found occupied after an absence observation.
+var errSnapshotExists = errors.New("snapshot already exists")
 
 // ReplaceSnapshot publishes bounded UTF-8 text through a pinned parent directory.
 // Cooperative writers serialize on that directory (LockDirectory: the writers of one process
@@ -80,6 +88,9 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
 	mode, err := verifyReplacement(ctx, root, name, options)
+	if options.AcceptCurrent && (errors.Is(err, errSnapshotChanged) || errors.Is(err, errSnapshotExists)) {
+		return confirmConcurrentReplacement(ctx, root, name, data, options.Mode, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -94,6 +105,30 @@ func replaceInRoot(ctx context.Context, root *os.Root, name string, data []byte,
 		return fmt.Errorf("publish snapshot (inspect %s): %w", stagedPath(root, stage), err)
 	}
 	return SyncDirectory(ctx, root)
+}
+
+// confirmConcurrentReplacement checks the winning bytes and mode while the parent is locked.
+func confirmConcurrentReplacement(ctx context.Context, root *os.Root, name string, data []byte, ceiling os.FileMode, conflict error) error {
+	current, exists, err := ObserveRootSnapshot(ctx, root, name)
+	if err != nil {
+		return errors.Join(conflict, err)
+	}
+	if !exists || !bytes.Equal(current, data) {
+		return conflict
+	}
+	info, err := root.Lstat(name)
+	if err != nil {
+		return errors.Join(conflict, err)
+	}
+	mode := info.Mode()
+	if runtime.GOOS == "windows" && mode.IsRegular() {
+		// Chmod controls only the owner-write bit on Windows.
+		mode &= 0o200
+	}
+	if mode&^ceiling != 0 {
+		return conflict
+	}
+	return nil
 }
 
 // stagedPath names the staging entry the way the operator has to look for it. Every
@@ -189,7 +224,7 @@ func verifyReplacement(ctx context.Context, root *os.Root, name string, options 
 		return 0, err
 	}
 	if !options.Exists {
-		return 0, fmt.Errorf("snapshot already exists: %s", name)
+		return 0, fmt.Errorf("%w: %s", errSnapshotExists, name)
 	}
 	var current bytes.Buffer
 	_, err = snapshotRootCopy(ctx, root, name, &current, replacementReadLimit(options))
@@ -197,7 +232,7 @@ func verifyReplacement(ctx context.Context, root *os.Root, name string, options 
 		return 0, err
 	}
 	if !bytes.Equal(current.Bytes(), options.Expected) {
-		return 0, fmt.Errorf("snapshot changed before replacement: %s", name)
+		return 0, fmt.Errorf("%w: %s", errSnapshotChanged, name)
 	}
 	return options.Mode & info.Mode().Perm(), nil
 }
@@ -232,7 +267,7 @@ func publishSnapshot(ctx context.Context, root *os.Root, name, stage string, fil
 		return err
 	}
 	if !created {
-		return fmt.Errorf("snapshot already exists: %s", name)
+		return fmt.Errorf("%w: %s", errSnapshotExists, name)
 	}
 	return nil
 }
