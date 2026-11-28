@@ -279,10 +279,11 @@ jobs:
     # runner about twice as slow (median package time x1.96, go test 94 minutes, the harness
     # self-tests over 21) cancelled main at the 120-minute limit with every finished step green.
     # The leg is a required check, so a limit at that edge cancels a green run and blocks the
-    # pull request; 180 minutes keeps a third over that run, inside the job-timeout gate's
-    # measured window (1.25 to 4 times the slowest green run). Splitting the leg is the durable
-    # fix (#729 tracks the suite's growth).
-    timeout-minutes: 180
+    # pull request. Windows runs in the windows-shard job below; the slowest leg left is macOS,
+    # p95 76.3 minutes over 15 green main runs before 2026-11-06 (Linux 36.8). Twice that p95,
+    # rounded up, inside the job-timeout gate's window (1.25 to 4 times the slowest green run);
+    # above the 120-minute static ceiling, excepted in .standards.yaml (#729: suite growth).
+    timeout-minutes: 153
     strategy:
       # One platform failing must never cancel the others. Which platforms are broken is
       # the entire output of this job; cancelling the rest discards it.
@@ -815,7 +816,9 @@ jobs:
     # It runs after review-gate failure to produce the held annotation on the shard status.
     if: "!cancelled() && !(startsWith(github.head_ref, 'renovate/') && github.event.pull_request.user.login == 'renovate[bot]') && (github.repository == (vars.PRAETOR_CANONICAL_REPOSITORY || 'tekmora/praetor') || vars.PRAETOR_FORK_PORTABILITY == 'enabled')"
     runs-on: windows-2025
-    timeout-minutes: 180
+    # Twice the p95 of 30 green shard runs on main before 2026-11-06 (81.3 minutes, slowest
+    # 86.0), rounded up; excepted from the 120-minute static ceiling in .standards.yaml.
+    timeout-minutes: 163
     strategy:
       fail-fast: false
       matrix:

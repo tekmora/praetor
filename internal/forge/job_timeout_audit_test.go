@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/tools/apicompat"
 )
 
 type fakeJobTimeoutReader struct {
@@ -80,12 +82,13 @@ func TestJobTimeout_Finite_MissingReusableExpression(t *testing.T) {
 		"  expr:\n    timeout-minutes: ${{ inputs.timeout }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 2\n"
 	writeWorkflow(t, root, "ci.yml", content)
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), OfflineReason: "--offline",
+		Root: root, Today: beforeFailFrom(), OfflineReason: "--offline",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "[WARN] job-timeout: .github/workflows/ci.yml:3 job missing: declares no timeout-minutes") {
+	wantWarn := "[WARN] job-timeout: .github/workflows/ci.yml:3 job missing: declares no timeout-minutes" + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(out, "\n"), wantWarn) {
 		t.Errorf("missing timeout-minutes must warn; output:\n%s", out)
 	}
 	if strings.Contains(out, "job reuse") {
@@ -105,7 +108,7 @@ func TestJobTimeout_Static_CeilingAndBoundaries(t *testing.T) {
 		"  above:\n    timeout-minutes: 121\n    steps:\n      - run: echo 121\n"
 	writeWorkflow(t, root, "static.yml", content)
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), OfflineReason: "--offline",
+		Root: root, Today: beforeFailFrom(), OfflineReason: "--offline",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -118,6 +121,41 @@ func TestJobTimeout_Static_CeilingAndBoundaries(t *testing.T) {
 	}
 	if !strings.Contains(out, "job above: timeout-minutes 121 is above 120m bound") {
 		t.Errorf("121 minutes must warn; output:\n%s", out)
+	}
+}
+
+// TestJobTimeout_RenderedAPIInstallationBudget audits an actual configured rendering with
+// a fast successful run and checks the allowance stays scoped to the generated job budget.
+func TestJobTimeout_RenderedAPIInstallationBudget(t *testing.T) {
+	rendered, err := apicompat.RenderWorkflow(apicompat.Workflow, apicompat.Settings{SystemPackages: []string{"libudev-dev"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Base(apicompat.WorkflowFile)
+	for _, tc := range [...]struct {
+		name, file, workflow string
+		wantFail             bool
+	}{
+		{"configured budget", name, rendered, false},
+		{"above budget", name, strings.Replace(rendered, "timeout-minutes: 40", "timeout-minutes: 46", 1), true},
+		{"unconfigured job", name, strings.Replace(apicompat.Workflow, "timeout-minutes: 25", "timeout-minutes: 40", 1), true},
+		{"other workflow", "other.yml", rendered, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeWorkflow(t, root, tc.file, tc.workflow)
+			out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{Root: root, Today: JobTimeoutFailFrom,
+				Reader: singleRunJobTimeoutReader(tc.file, jobDurationRecord(apicompat.StatusContext, 5)), Branch: "main"})
+			if tc.wantFail {
+				if err == nil || !strings.Contains(err.Error(), "(runaway)") {
+					t.Fatalf("want runaway finding, got %v\n%s", err, out)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(out, "measured path for 1 jobs") {
+				t.Fatalf("the configured budget must pass on the measured path, got %v\n%s", err, out)
+			}
+		})
 	}
 }
 
@@ -146,7 +184,7 @@ func TestJobTimeout_Measured_CancelRiskAndRunaway(t *testing.T) {
 		},
 	}
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -171,7 +209,7 @@ func TestJobTimeout_PathNaming(t *testing.T) {
 	writeWorkflow(t, root, "a.yml", "on: push\njobs:\n  j1:\n    timeout-minutes: 10\n    steps:\n      - run: echo 1\n")
 	writeWorkflow(t, root, "b.yml", "on: push\njobs:\n  j2:\n    timeout-minutes: 10\n    steps:\n      - run: echo 2\n")
 	offlineOut, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), OfflineReason: "--offline",
+		Root: root, Today: beforeFailFrom(), OfflineReason: "--offline",
 	})
 	if err != nil {
 		t.Fatalf("offline error: %v", err)
@@ -189,7 +227,7 @@ func TestJobTimeout_PathNaming(t *testing.T) {
 		},
 	}
 	measuredOut, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("measured error: %v", err)
@@ -205,7 +243,7 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 	root := t.TempDir()
 	writeWorkflow(t, root, "fail.yml", "on: push\njobs:\n  j:\n    timeout-minutes: 300\n    steps:\n      - run: echo 1\n")
 	writeWorkflow(t, root, "clean.yml", "on: push\njobs:\n  j:\n    timeout-minutes: 30\n    steps:\n      - run: echo 2\n")
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	today := beforeFailFrom()
 	liveEx := []config.Exception{{
 		Rule: config.ExceptionRuleJobTimeout, Path: ".github/workflows/fail.yml", Reason: "waived", Category: "A", Expires: "2026-12-31",
 	}}
@@ -228,7 +266,8 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(outExp, "[WARN] job-timeout: .github/workflows/fail.yml:4 job j: timeout-minutes 300 is above 120m bound") {
+	wantFinding := "[WARN] job-timeout: .github/workflows/fail.yml:4 job j: timeout-minutes 300 is above 120m bound" + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(outExp, "\n"), wantFinding) {
 		t.Errorf("expired exception must not silence finding; got:\n%s", outExp)
 	}
 	staleEx := []config.Exception{{
@@ -240,13 +279,245 @@ func TestJobTimeout_Exceptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(outStale, "[WARN] job-timeout: the exceptions entry (rule job-timeout, .github/workflows/clean.yml) excuses no finding") {
+	wantStale := "[WARN] " + jobTimeoutUnusedException + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(outStale, "\n"), wantStale) {
 		t.Errorf("stale exception must warn; got:\n%s", outStale)
 	}
 }
 
-// The gate never fails the audit (warn-only): a repository with every kind of finding still exits 0 from the gate function.
-func TestJobTimeout_WarnOnlyNeverFails(t *testing.T) {
+// beforeFailFrom is the last warn-only day, so tests of the other rules do not change verdict
+// when the wall clock passes JobTimeoutFailFrom.
+func beforeFailFrom() time.Time {
+	return JobTimeoutFailFrom.AddDate(0, 0, -1)
+}
+
+const (
+	jobTimeoutMissingFinding  = "job-timeout: .github/workflows/ci.yml:3 job build: declares no timeout-minutes"
+	jobTimeoutUnusedException = "job-timeout: the exceptions entry (rule job-timeout, .github/workflows/clean.yml) excuses no finding, because the workflow it names has none; remove it."
+)
+
+func jobTimeoutWarningSuffix() string {
+	return " (fails the audit from " + JobTimeoutFailFrom.Format(time.DateOnly) + ")"
+}
+
+// The dated switch: a workflow job without timeout-minutes warns the day before
+// JobTimeoutFailFrom and fails the gate on that day and after it; a clean tree passes on the
+// switch day (positive), and the warn line names the switch day.
+func TestJobTimeout_FailFrom_SwitchBoundary(t *testing.T) {
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 1\n")
+	before, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{Root: root, Today: beforeFailFrom(), OfflineReason: "--offline"})
+	if err != nil {
+		t.Fatalf("the day before the switch must warn, not fail: %v", err)
+	}
+	wantWarn := "[WARN] " + jobTimeoutMissingFinding + jobTimeoutWarningSuffix()
+	wantInfo := "[INFO] job-timeout: findings warn until " + JobTimeoutFailFrom.Format(time.DateOnly) + " and fail the audit from that day on"
+	if !strings.HasSuffix(before, wantWarn+"\n"+wantInfo+"\n[PASS] job-timeout") {
+		t.Errorf("warn-period output must name the finding and the switch day; got:\n%s", before)
+	}
+	for _, day := range [...]time.Time{JobTimeoutFailFrom, JobTimeoutFailFrom.AddDate(0, 0, 1)} {
+		assertJobTimeoutFailsOnDay(t, root, day)
+	}
+	clean := t.TempDir()
+	writeWorkflow(t, clean, "ci.yml", "on: push\njobs:\n  build:\n    timeout-minutes: 10\n    steps:\n      - run: echo 1\n")
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{Root: clean, Today: JobTimeoutFailFrom, OfflineReason: "--offline"})
+	if err != nil || !strings.HasSuffix(out, "[PASS] job-timeout") || strings.Contains(out, "warn until") {
+		t.Errorf("a clean tree must pass on the switch day without the warn-period line; out:\n%s\nerr: %v", out, err)
+	}
+}
+
+func assertJobTimeoutFailsOnDay(t *testing.T, root string, day time.Time) {
+	t.Helper()
+	_, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{Root: root, Today: day, OfflineReason: "--offline"})
+	if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), "[FAIL] "+jobTimeoutMissingFinding) {
+		t.Errorf("on %s a job without timeout-minutes must fail the gate; got %v", day.Format(time.DateOnly), err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "[INFO] job-timeout: static path only (--offline)") {
+		t.Errorf("the failure must keep the path line; got %v", err)
+	}
+}
+
+// A job whose declared value is above the static ceiling but inside the measured band passes on
+// the measured path; the exception that excuses it on the static path (CI without a forge token)
+// is in use on both paths, so neither path calls it stale. An exception for a workflow whose
+// jobs all stay at or below the static ceiling is still stale on the measured path (negative),
+// and after the switch a stale entry fails while a live one still excuses its workflow.
+func TestJobTimeout_StaticOnlyExceptionUsedOnBothPaths(t *testing.T) {
+	root := t.TempDir()
+	writeWorkflow(t, root, "port.yml", "on: push\njobs:\n  shard:\n    name: Shard\n    timeout-minutes: 163\n    steps:\n      - run: echo 1\n")
+	writeWorkflow(t, root, "fast.yml", "on: push\njobs:\n  quick:\n    name: Quick\n    timeout-minutes: 120\n    steps:\n      - run: echo 2\n")
+	reader := &fakeJobTimeoutReader{
+		histories: map[string]WorkflowRunHistory{
+			"port.yml": {Known: true, Completed: []WorkflowRunRecord{{ID: 7, Conclusion: "success"}}},
+			"fast.yml": {Known: true, Completed: []WorkflowRunRecord{{ID: 8, Conclusion: "success"}}},
+		},
+		jobs: map[int64][]WorkflowJobRecord{7: {jobDurationRecord("Shard", 86.0)}, 8: {jobDurationRecord("Quick", 40.0)}},
+	}
+	port := config.Exception{Rule: config.ExceptionRuleJobTimeout, Path: ".github/workflows/port.yml", Reason: "measured above the static ceiling", Category: "D", Expires: "2027-03-01"}
+	measured, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Exceptions: []config.Exception{port}, Reader: reader, Branch: "main",
+	})
+	if err != nil {
+		t.Fatalf("the static-path exception must not be stale on the measured path: %v", err)
+	}
+	if !strings.Contains(measured, "[INFO] job-timeout: .github/workflows/port.yml: the exceptions entry (until 2027-03-01) covers jobs above the 120m static bound; the measured path finds none") {
+		t.Errorf("the measured path must name why the entry stays; got:\n%s", measured)
+	}
+	static, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Exceptions: []config.Exception{port}, OfflineReason: "--offline",
+	})
+	if err != nil || !strings.Contains(static, "[PASS] job-timeout: .github/workflows/port.yml excepted until 2027-03-01") {
+		t.Errorf("the static path must use the entry; out:\n%s\nerr: %v", static, err)
+	}
+	fast := port
+	fast.Path = ".github/workflows/fast.yml"
+	_, err = AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Exceptions: []config.Exception{port, fast}, Reader: reader, Branch: "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "[FAIL] job-timeout: the exceptions entry (rule job-timeout, .github/workflows/fast.yml) excuses no finding") {
+		t.Errorf("an entry for a workflow at or below the static bound must fail as stale after the switch; got %v", err)
+	}
+}
+
+// TestJobTimeout_ExpiredStaticOnlyException covers warn and fail severity, one expired
+// diagnostic for two measured jobs, and no duplicate when an unmeasured job also exceeds the bound.
+func TestJobTimeout_ExpiredStaticOnlyException(t *testing.T) {
+	root := t.TempDir()
+	const workflow = "on: push\njobs:\n  shard:\n    timeout-minutes: 150\n    steps:\n      - run: echo shard\n" +
+		"  other:\n    timeout-minutes: 150\n    steps:\n      - run: echo other\n"
+	writeWorkflow(t, root, "expired.yml", workflow)
+	const expired = "the exceptions entry for .github/workflows/expired.yml expired 2026-12-01"
+	entry := config.Exception{Rule: config.ExceptionRuleJobTimeout, Path: ".github/workflows/expired.yml",
+		Fingerprint: jobTimeoutKindStaticCeiling, Expires: "2026-12-01"}
+	opts := JobTimeoutOptions{Root: root, Today: JobTimeoutFailFrom.AddDate(0, 0, -1),
+		Reader: singleRunJobTimeoutReader("expired.yml", jobDurationRecord("shard", 60), jobDurationRecord("other", 60)),
+		Branch: "main", Exceptions: []config.Exception{entry}}
+	out, err := AuditJobTimeouts(t.Context(), opts)
+	if err != nil || strings.Count(out, "[WARN] job-timeout: "+expired) != 1 {
+		t.Fatalf("one warning for the expired entry, got err=%v, out:\n%s", err, out)
+	}
+	opts.Today = JobTimeoutFailFrom
+	_, err = AuditJobTimeouts(t.Context(), opts)
+	if err == nil || strings.Count(err.Error(), "[FAIL] job-timeout: "+expired) != 1 {
+		t.Fatalf("one failure for the expired entry, got %v", err)
+	}
+	opts.Reader = singleRunJobTimeoutReader("expired.yml", jobDurationRecord("shard", 60))
+	_, err = AuditJobTimeouts(t.Context(), opts)
+	if err == nil || strings.Count(err.Error(), "[FAIL] job-timeout:") != 1 ||
+		!strings.Contains(err.Error(), "job other: timeout-minutes 150 is above 120m bound") {
+		t.Fatalf("one failure for the static-ceiling finding, got %v", err)
+	}
+}
+
+// The repository's portability waiver excuses only static ceilings. Measured risks and
+// missing declarations must still fail, including when another job uses the waiver.
+func TestJobTimeout_PortabilityExceptionScope(t *testing.T) {
+	manifest, err := config.LoadManifest(filepath.Join("..", "..", config.ManifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := config.ExceptionsFor(manifest.Exceptions, config.ExceptionRuleJobTimeout)
+	cases := []struct {
+		name, timeout, finding string
+		minutes                float64
+	}{
+		{"static ceiling", "163", "", 0},
+		{"measured within band", "163", "", 81.3},
+		{"measured cancel risk", "153", "cancel risk", 150},
+		{"measured runaway", "163", "runaway", 10},
+		{"missing timeout", "", "declares no timeout-minutes", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			content := "on: push\njobs:\n  shard:\n    name: Shard\n"
+			if tc.timeout != "" {
+				content += "    timeout-minutes: " + tc.timeout + "\n"
+			}
+			content += "    steps:\n      - run: echo shard\n"
+			// A static finding in the same workflow must not excuse the shard's other kinds.
+			content += "  harness:\n    timeout-minutes: 153\n    steps:\n      - run: echo harness\n"
+			writeWorkflow(t, root, "portability.yml", content)
+			opts := JobTimeoutOptions{Root: root, Today: JobTimeoutFailFrom, Exceptions: entries}
+			if tc.minutes > 0 {
+				opts.Reader = singleRunJobTimeoutReader("portability.yml", jobDurationRecord("Shard", tc.minutes))
+				opts.Branch = "main"
+			}
+			out, err := AuditJobTimeouts(t.Context(), opts)
+			assertPortabilityTimeoutFinding(t, out, err, tc.finding, tc.minutes > 0)
+		})
+	}
+}
+
+// assertPortabilityTimeoutFinding checks a failing kind or the retained static exception.
+func assertPortabilityTimeoutFinding(t *testing.T, out string, err error, finding string, measured bool) {
+	t.Helper()
+	if finding == "" {
+		assertPortabilityTimeoutPass(t, out, err, measured)
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "[FAIL] job-timeout:") || !strings.Contains(err.Error(), finding) {
+		t.Fatalf("want failing %s; out=%s err=%v", finding, out, err)
+	}
+}
+
+// assertPortabilityTimeoutPass checks the exact jobs covered by the static waiver.
+func assertPortabilityTimeoutPass(t *testing.T, out string, err error, measured bool) {
+	t.Helper()
+	want := "job harness static-ceiling"
+	if measured {
+		if !strings.Contains(out, "measured path for 1 jobs") {
+			t.Errorf("the shard must remain measured; output:\n%s", out)
+		}
+	} else {
+		want += ", job shard static-ceiling"
+	}
+	_, waiver, _ := strings.Cut(out, "; excuses ")
+	covered, _, _ := strings.Cut(waiver, "\n")
+	if err != nil || covered != want {
+		t.Fatalf("want waiver to cover %q; out=%s err=%v", want, out, err)
+	}
+}
+
+// Scoped entries remain live on the measured path only for static-ceiling scope. Expired,
+// unknown and unmatched scopes stay unexcused, and unrelated findings never mark them used.
+func TestJobTimeout_ScopedExceptionUsage(t *testing.T) {
+	const workflow = ".github/workflows/portability.yml"
+	cases := []struct {
+		name, scope, kind, expires string
+		staticOnly                 bool
+		want                       int
+	}{
+		{"static", jobTimeoutKindStaticCeiling, jobTimeoutKindStaticCeiling, "2027-03-06", false, 0},
+		{"cancel", jobTimeoutKindStaticCeiling, jobTimeoutKindCancelRisk, "2027-03-06", false, 2},
+		{"unknown", "typo", jobTimeoutKindStaticCeiling, "2027-03-06", false, 2},
+		{"expired", jobTimeoutKindStaticCeiling, jobTimeoutKindStaticCeiling, "2026-01-01", false, 1},
+		{"measured", jobTimeoutKindStaticCeiling, "", "2027-03-06", true, 0},
+		{"wrong measured scope", jobTimeoutKindCancelRisk, "", "2027-03-06", true, 1},
+		{"mixed measured", jobTimeoutKindStaticCeiling, jobTimeoutKindMissing, "2027-03-06", true, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []config.Exception{{Rule: config.ExceptionRuleJobTimeout, Path: workflow,
+				Fingerprint: tc.scope, Expires: tc.expires}}
+			var findings []jobTimeoutFinding
+			if tc.kind != "" {
+				findings = []jobTimeoutFinding{{Workflow: workflow, JobID: "shard", Kind: tc.kind}}
+			}
+			var staticOnly []string
+			if tc.staticOnly {
+				staticOnly = []string{workflow}
+			}
+			lines, count := applyExceptions(findings, staticOnly, entries, JobTimeoutFailFrom, true)
+			if count != tc.want {
+				t.Fatalf("findings = %d, want %d; lines=%v", count, tc.want, lines)
+			}
+		})
+	}
+}
+
+// Before the switch the gate never fails the audit: a repository with every kind of finding still exits 0 from the gate function.
+func TestJobTimeout_WarnOnlyBeforeFailFrom(t *testing.T) {
 	root := t.TempDir()
 	content := "on: push\njobs:\n" +
 		"  missing:\n    steps:\n      - run: echo 1\n" +
@@ -262,7 +533,7 @@ func TestJobTimeout_WarnOnlyNeverFails(t *testing.T) {
 		},
 	}
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("warn-only gate must exit 0, got error: %v", err)
@@ -272,7 +543,7 @@ func TestJobTimeout_WarnOnlyNeverFails(t *testing.T) {
 	}
 }
 
-// Job name mapping matches matrix jobs and prefix before ${{ or ' ('.
+// Literal job names require exact matches; expression job names match their literal prefix before "${{".
 func TestJobMatches_MatrixAndPrefix(t *testing.T) {
 	cases := []struct {
 		target string
@@ -280,15 +551,268 @@ func TestJobMatches_MatrixAndPrefix(t *testing.T) {
 		want   bool
 	}{
 		{"Build (${{ matrix.os }})", "Build (ubuntu-latest)", true},
-		{"test", "test (1.22)", true},
+		{"Platform Neutrality (Windows shard ${{ matrix.shard }})", "Platform Neutrality (Windows shard 1)", true},
+		{"Platform Neutrality (${{ matrix.name }})", "Platform Neutrality skipped", false},
+		{"${{ matrix.name }}", "linux", false},
+		{"Build", "Build (extra)", false},
+		{"test", "test (1.22)", false},
 		{"lint", "lint", true},
-		{"test", "test-other (1.22)", false},
 		{"unit", "integration", false},
 	}
 	for _, tc := range cases {
 		if got := jobMatches(tc.target, tc.forge); got != tc.want {
 			t.Errorf("jobMatches(%q, %q) = %v, want %v", tc.target, tc.forge, got, tc.want)
 		}
+	}
+}
+
+// slowestBySpec parses workflowYAML and matches records through updateSlowestJobs.
+func slowestBySpec(t *testing.T, workflowYAML string, records ...WorkflowJobRecord) map[string]float64 {
+	t.Helper()
+	spec, err := ghworkflow.Parse([]byte(workflowYAML))
+	if err != nil {
+		t.Fatalf("parse workflow: %v", err)
+	}
+	slowest := make(map[string]float64)
+	updateSlowestJobs(slowest, records, &spec)
+	return slowest
+}
+
+// Positive: an exact literal job takes its record and prevents a sibling expression job from taking it,
+// regardless of record order; AuditJobTimeouts keeps the expression job on its own 5-minute measurement.
+func TestJobTimeout_MatchSlowestJob_Positive_LiteralPrecedence(t *testing.T) {
+	const wf = "on: push\njobs:\n" +
+		"  windows:\n    name: Platform Neutrality (Windows)\n    timeout-minutes: 45\n    steps:\n      - run: echo win\n" +
+		"  harness:\n    name: Platform Neutrality (${{ matrix.name }})\n    timeout-minutes: 30\n    steps:\n      - run: echo lin\n"
+	winRec := jobDurationRecord("Platform Neutrality (Windows)", 30)
+	linRec := jobDurationRecord("Platform Neutrality (linux)", 5)
+	for _, recs := range [...][]WorkflowJobRecord{{winRec, linRec}, {linRec, winRec}} {
+		got := slowestBySpec(t, wf, recs...)
+		if got["windows"] != 30 || got["harness"] != 5 {
+			t.Fatalf("slowest = %v, want windows=30 harness=5", got)
+		}
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", wf)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", winRec, linRec), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 2 jobs") {
+		t.Fatalf("expected both jobs measured at their own durations; err=%v\nout:\n%s", err, out)
+	}
+}
+
+// Negative: a literal job "Build" never takes a record "Build (extra)".
+func TestJobTimeout_MatchSlowestJob_Negative_LiteralRejectsSuffix(t *testing.T) {
+	const wf = "on: push\njobs:\n  build:\n    name: Build\n    timeout-minutes: 30\n    steps:\n      - run: echo build\n"
+	extra := jobDurationRecord("Build (extra)", 50)
+	if got := slowestBySpec(t, wf, extra); len(got) != 0 {
+		t.Fatalf("literal job Build must ignore Build (extra), got %v", got)
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", wf)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", extra), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 0 jobs (forge runs of main), static path for 1 jobs") {
+		t.Fatalf("expected Build to stay unmeasured and pass; err=%v\nout:\n%s", err, out)
+	}
+}
+
+// Boundary: an expression job with no matching prefix (or starting with an expression) takes nothing,
+// while two expression siblings with the same prefix share prefix records as before.
+func TestJobTimeout_MatchSlowestJob_Boundary_ExpressionSiblings(t *testing.T) {
+	const unmatched = "on: push\njobs:\n" +
+		"  matrix:\n    name: Build (${{ matrix.os }})\n    timeout-minutes: 30\n    steps:\n      - run: echo 1\n" +
+		"  bare:\n    name: ${{ matrix.os }}\n    timeout-minutes: 30\n    steps:\n      - run: echo 2\n"
+	if got := slowestBySpec(t, unmatched, jobDurationRecord("Lint (linux)", 20), jobDurationRecord("linux", 20)); len(got) != 0 {
+		t.Fatalf("unmatched or prefixless expression jobs must take nothing, got %v", got)
+	}
+	const siblings = "on: push\njobs:\n" +
+		"  linux:\n    name: Platform Neutrality (${{ matrix.linux }})\n    timeout-minutes: 50\n    steps:\n      - run: echo 1\n" +
+		"  macos:\n    name: Platform Neutrality (${{ matrix.macos }})\n    timeout-minutes: 50\n    steps:\n      - run: echo 2\n"
+	got := slowestBySpec(t, siblings,
+		jobDurationRecord("Platform Neutrality (ubuntu-26.04)", 12),
+		jobDurationRecord("Platform Neutrality (macos-26)", 28))
+	if got["linux"] != 28 || got["macos"] != 28 {
+		t.Fatalf("expression siblings sharing prefix must both get 28, got %v", got)
+	}
+}
+
+// Positive: a literal or omitted-name job declaring strategy.matrix takes "<name> (...)" records
+// when no exact literal or expression job claims them.
+func TestJobTimeout_MatchSlowestJob_Positive_MatrixLiteralFallback(t *testing.T) {
+	const omittedName = "on: push\njobs:\n  test:\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.22\", \"1.23\"]\n    steps:\n      - run: go test ./...\n"
+	if got := slowestBySpec(t, omittedName, jobDurationRecord("test (1.22)", 18)); got["test"] != 18 {
+		t.Fatalf("matrix job test must take test (1.22), got %v", got)
+	}
+	if got := slowestBySpec(t, omittedName, jobDurationRecord("test (1.22)", 18), jobDurationRecord("test (1.23)", 24)); got["test"] != 24 {
+		t.Fatalf("matrix job test must keep maximum across legs, got %v", got)
+	}
+	const explicitAndDynamic = "on: push\njobs:\n" +
+		"  unit:\n    name: test\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.22\"]\n    steps:\n      - run: go test ./...\n" +
+		"  dyn:\n    timeout-minutes: 30\n    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}\n    steps:\n      - run: echo dyn\n"
+	got := slowestBySpec(t, explicitAndDynamic, jobDurationRecord("test (1.22)", 14), jobDurationRecord("dyn (linux)", 9))
+	if got["unit"] != 14 || got["dyn"] != 9 {
+		t.Fatalf("literal-named and dynamic-matrix jobs must take suffixed records, got %v", got)
+	}
+}
+
+// Negative: a job without strategy.matrix never takes "test (1.22)", and "test-integration" or
+// malformed suffixes never reach matrix job "test".
+func TestJobTimeout_MatchSlowestJob_Negative_MatrixBoundaries(t *testing.T) {
+	const nonMatrix = "on: push\njobs:\n" +
+		"  test:\n    timeout-minutes: 30\n    steps:\n      - run: go test ./...\n" +
+		"  null-matrix:\n    name: test\n    timeout-minutes: 30\n    strategy:\n      matrix: null\n    steps:\n      - run: go test ./...\n"
+	if got := slowestBySpec(t, nonMatrix, jobDurationRecord("test (1.22)", 20)); len(got) != 0 {
+		t.Fatalf("non-matrix job test must ignore test (1.22), got %v", got)
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", nonMatrix)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", jobDurationRecord("test (1.22)", 29)), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 0 jobs") {
+		t.Fatalf("non-matrix job test must stay unmeasured on test (1.22); err=%v\nout:\n%s", err, out)
+	}
+	const matrixJob = "on: push\njobs:\n  test:\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.22\"]\n    steps:\n      - run: go test ./...\n"
+	got := slowestBySpec(t, matrixJob,
+		jobDurationRecord("test-integration", 25),
+		jobDurationRecord("test-integration (1.22)", 25),
+		jobDurationRecord("test (1.22) extra", 25),
+		jobDurationRecord("test (", 25))
+	if len(got) != 0 {
+		t.Fatalf("unrelated or non-parenthesized records must not reach matrix job test, got %v", got)
+	}
+}
+
+// Boundary: a record claimed by an exact literal sibling or an expression sibling never reaches
+// a literal matrix job, while unclaimed "<name> (...)" records still reach the literal matrix job.
+func TestJobTimeout_MatchSlowestJob_Boundary_SiblingClaimsPreemptMatrixFallback(t *testing.T) {
+	const matrixJob = "  matrix:\n    name: Platform Neutrality\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        os: [linux]\n    steps:\n      - run: echo matrix\n"
+	const withLiteral = "on: push\njobs:\n" + matrixJob +
+		"  windows:\n    name: Platform Neutrality (Windows)\n    timeout-minutes: 65\n    steps:\n      - run: echo win\n"
+	winRec := jobDurationRecord("Platform Neutrality (Windows)", 50)
+	linRec := jobDurationRecord("Platform Neutrality (linux)", 12)
+	for _, recs := range [...][]WorkflowJobRecord{{winRec, linRec}, {linRec, winRec}} {
+		if got := slowestBySpec(t, withLiteral, recs...); got["windows"] != 50 || got["matrix"] != 12 {
+			t.Fatalf("literal sibling must keep 50 and matrix must keep 12, got %v", got)
+		}
+	}
+	const withSameStemExpr = "on: push\njobs:\n" + matrixJob +
+		"  harness:\n    name: Platform Neutrality (${{ matrix.name }})\n    timeout-minutes: 60\n    steps:\n      - run: echo expr\n"
+	gotExpr := slowestBySpec(t, withSameStemExpr, jobDurationRecord("Platform Neutrality (Windows)", 40))
+	if _, claimed := gotExpr["matrix"]; gotExpr["harness"] != 40 || claimed {
+		t.Fatalf("expression sibling must claim Platform Neutrality (Windows) before matrix fallback, got %v", gotExpr)
+	}
+	const withShardExpr = "on: push\njobs:\n" + matrixJob +
+		"  shard:\n    name: Platform Neutrality (Windows shard ${{ matrix.shard }})\n    timeout-minutes: 110\n    steps:\n      - run: echo shard\n"
+	shardRec := jobDurationRecord("Platform Neutrality (Windows shard 1)", 80)
+	for _, recs := range [...][]WorkflowJobRecord{{shardRec, linRec}, {linRec, shardRec}} {
+		if got := slowestBySpec(t, withShardExpr, recs...); got["shard"] != 80 || got["matrix"] != 12 {
+			t.Fatalf("expression shard sibling must keep 80 and matrix must keep 12, got %v", got)
+		}
+	}
+}
+
+// Boundary: among literal matrix siblings, the longest matching target claims "<target> (...)"
+// records so a shorter sibling does not inherit a longer sibling's matrix leg, while a single
+// matrix job still takes its legs.
+func TestJobTimeout_MatchSlowestJob_Boundary_MatrixLongestTargetWins(t *testing.T) {
+	const siblings = "on: push\njobs:\n" +
+		"  build:\n    name: Build\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.21\"]\n    steps:\n      - run: echo build\n" +
+		"  build-linux:\n    name: Build (linux)\n    timeout-minutes: 60\n    strategy:\n      matrix:\n        version: [\"1.22\"]\n    steps:\n      - run: echo linux\n"
+	linuxLeg := jobDurationRecord("Build (linux) (1.22)", 44.8)
+	baseLeg := jobDurationRecord("Build (1.21)", 18)
+	for _, recs := range [...][]WorkflowJobRecord{{linuxLeg, baseLeg}, {baseLeg, linuxLeg}} {
+		got := slowestBySpec(t, siblings, recs...)
+		if got["build-linux"] != 44.8 || got["build"] != 18 {
+			t.Errorf("slowest = %v, want build-linux=44.8 build=18", got)
+		}
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", siblings)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("ci.yml", linuxLeg, baseLeg), Branch: "main",
+	})
+	if err != nil || strings.Contains(out, "cancel risk") || !strings.Contains(out, "measured path for 2 jobs") {
+		t.Errorf("30m Build must raise no cancel-risk finding; err=%v\nout:\n%s", err, out)
+	}
+	const single = "on: push\njobs:\n  build:\n    name: Build\n    timeout-minutes: 35\n    strategy:\n      matrix:\n        go: [\"1.21\", \"1.22\"]\n    steps:\n      - run: echo build\n"
+	if got := slowestBySpec(t, single, baseLeg, jobDurationRecord("Build (1.22)", 24)); got["build"] != 24 {
+		t.Errorf("single matrix job Build must take its legs, got %v", got)
+	}
+	if got := slowestBySpec(t, single, linuxLeg, baseLeg); got["build"] != 44.8 {
+		t.Errorf("single matrix job Build without longer sibling must take nested-paren leg, got %v", got)
+	}
+}
+
+// Boundary: longest-target matrix fallback shares ties of equal length and still matches a shorter
+// matrix sibling when a longer non-matching matrix sibling sorts ahead of it.
+func TestJobTimeout_MatchSlowestJob_Boundary_MatrixFallbackTiesAndSortOrder(t *testing.T) {
+	const tiesAndOrder = "on: push\njobs:\n" +
+		"  alpha-linux:\n    name: Build (linux)\n    timeout-minutes: 60\n    strategy:\n      matrix:\n        version: [\"1.22\"]\n    steps:\n      - run: echo a\n" +
+		"  beta-linux:\n    name: Build (linux)\n    timeout-minutes: 60\n    strategy:\n      matrix:\n        version: [\"1.22\"]\n    steps:\n      - run: echo b\n" +
+		"  zulu-build:\n    name: Build\n    timeout-minutes: 30\n    strategy:\n      matrix:\n        go: [\"1.21\"]\n    steps:\n      - run: echo build\n"
+	got := slowestBySpec(t, tiesAndOrder,
+		jobDurationRecord("Build (linux) (1.22)", 44.8),
+		jobDurationRecord("Build (1.21)", 18))
+	if got["alpha-linux"] != 44.8 || got["beta-linux"] != 44.8 || got["zulu-build"] != 18 {
+		t.Fatalf("slowest = %v, want alpha-linux=44.8 beta-linux=44.8 zulu-build=18", got)
+	}
+}
+
+// A matrix job with timeout-minutes 45 and a 44.8-minute measured matrix leg ("test (1.22)")
+// enters the measured path and reports cancel-risk (45 < 1.25 x 44.8 = 56).
+func TestJobTimeout_Measured_MatrixLiteralCancelRisk(t *testing.T) {
+	root := t.TempDir()
+	const wf = "on: push\njobs:\n  test:\n    timeout-minutes: 45\n    strategy:\n      matrix:\n        go: [\"1.22\", \"1.23\"]\n    steps:\n      - run: go test ./...\n"
+	writeWorkflow(t, root, "ci.yml", wf)
+	reader := singleRunJobTimeoutReader("ci.yml", jobDurationRecord("test (1.22)", 44.8), jobDurationRecord("test (1.23)", 12.0))
+	const wantDetail = "job-timeout: .github/workflows/ci.yml:4 job test: timeout-minutes 45 is below 1.25 x measured duration 44.8m (cancel risk)"
+	warnOut, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
+	})
+	if err != nil || !slices.Contains(strings.Split(warnOut, "\n"), "[WARN] "+wantDetail+jobTimeoutWarningSuffix()) {
+		t.Fatalf("expected warn cancel-risk finding for 44.8m matrix run; err=%v\nout:\n%s", err, warnOut)
+	}
+	_, err = AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: reader, Branch: "main",
+	})
+	if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), "[FAIL] "+wantDetail) {
+		t.Fatalf("expected fail cancel-risk finding on JobTimeoutFailFrom; got %v", err)
+	}
+}
+
+// The portability.yml shape (harness, windows-shard, windows) keeps each job's own maximum
+// on both a self-contained workflow with disjoint pass bands and the repository's portability.yml.
+func TestJobTimeout_PortabilityShape_IsolatedMaxima(t *testing.T) {
+	const wf = "on: push\njobs:\n" +
+		"  harness:\n    name: Platform Neutrality (${{ matrix.name }})\n    timeout-minutes: 60\n    steps:\n      - run: echo 1\n" +
+		"  windows-shard:\n    name: Platform Neutrality (Windows shard ${{ matrix.shard }})\n    timeout-minutes: 110\n    steps:\n      - run: echo 2\n" +
+		"  windows:\n    name: Platform Neutrality (Windows)\n    timeout-minutes: 20\n    steps:\n      - run: echo 3\n"
+	records := []WorkflowJobRecord{
+		jobDurationRecord("Platform Neutrality (Linux)", 12),
+		jobDurationRecord("Platform Neutrality (macOS)", 20),
+		jobDurationRecord("Platform Neutrality (Windows shard 1)", 80),
+		jobDurationRecord("Platform Neutrality (Windows shard 2)", 25),
+		jobDurationRecord("Platform Neutrality (Windows)", 10),
+	}
+	root := t.TempDir()
+	writeWorkflow(t, root, "portability.yml", wf)
+	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+		Root: root, Today: JobTimeoutFailFrom, Reader: singleRunJobTimeoutReader("portability.yml", records...), Branch: "main",
+	})
+	if err != nil || !strings.Contains(out, "measured path for 3 jobs") {
+		t.Fatalf("portability shape must pass with 3 measured jobs; err=%v\nout:\n%s", err, out)
+	}
+	realBytes, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "portability.yml"))
+	if err != nil {
+		t.Fatalf("read portability.yml: %v", err)
+	}
+	got := slowestBySpec(t, string(realBytes), records...)
+	if got["harness"] != 20 || got["windows-shard"] != 80 || got["windows"] != 10 {
+		t.Fatalf("portability.yml slowest = %v, want harness=20 windows-shard=80 windows=10", got)
 	}
 }
 
@@ -301,7 +825,7 @@ func TestJobTimeout_Unreadable_HistoryFailsJobStatic(t *testing.T) {
 		historyErrs: map[string]error{"ci.yml": histErr},
 	}
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("AuditJobTimeouts failed: %v", err)
@@ -332,7 +856,7 @@ func TestJobTimeout_Unreadable_RunJobsFallbackToReadableRun(t *testing.T) {
 		},
 	}
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("AuditJobTimeouts failed: %v", err)
@@ -355,7 +879,7 @@ func TestJobTimeout_Unreadable_ZeroRunIDSkipped(t *testing.T) {
 		},
 	}
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("AuditJobTimeouts failed: %v", err)
@@ -382,7 +906,7 @@ func TestJobTimeout_Unreadable_RunJobsFailsAllRuns(t *testing.T) {
 		jobsErrs: map[int64]error{99: errors.New("HTTP 502")},
 	}
 	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
-		Root: root, Today: time.Now(), Reader: reader, Branch: "main",
+		Root: root, Today: beforeFailFrom(), Reader: reader, Branch: "main",
 	})
 	if err != nil {
 		t.Fatalf("AuditJobTimeouts failed: %v", err)
@@ -420,10 +944,9 @@ func assertExcusedJobTimeoutPass(t *testing.T, name, content string, reader Acti
 	t.Helper()
 	root := t.TempDir()
 	writeWorkflow(t, root, name, content)
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
 	opts := JobTimeoutOptions{
 		Root:          root,
-		Today:         today,
+		Today:         beforeFailFrom(),
 		Exceptions:    liveJobTimeoutException(".github/workflows/"+name, reason),
 		Reader:        reader,
 		OfflineReason: offlineReason,
@@ -481,12 +1004,12 @@ func TestJobTimeout_ExcusedKind_StaticCeiling(t *testing.T) {
 	assertExcusedJobTimeoutPass(t, "static.yml", content, nil, "--offline", "waived", want)
 }
 
-// Negative: an unexcused workflow's [WARN] line carries no "excuses", and an expired exception keeps today's [WARN] lines.
+// An unexcused workflow keeps its [WARN] line when an expired exception names it.
 func TestJobTimeout_ExcusedKind_Negative_UnexcusedAndExpired(t *testing.T) {
 	root := t.TempDir()
 	content := "on: push\njobs:\n  gate:\n    name: Standards\n    timeout-minutes: 45\n    steps:\n      - run: echo gate\n"
 	writeWorkflow(t, root, "ci.yml", content)
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	today := beforeFailFrom()
 	reader := singleRunJobTimeoutReader("ci.yml", jobDurationRecord("Standards", 44.8))
 
 	outUnexcused, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
@@ -495,8 +1018,8 @@ func TestJobTimeout_ExcusedKind_Negative_UnexcusedAndExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexcused AuditJobTimeouts failed: %v", err)
 	}
-	wantWarn := "[WARN] job-timeout: .github/workflows/ci.yml:5 job gate: timeout-minutes 45 is below 1.25 x measured duration 44.8m (cancel risk)"
-	if !strings.Contains(outUnexcused, wantWarn) || strings.Contains(outUnexcused, "excuses") {
+	wantWarn := "[WARN] job-timeout: .github/workflows/ci.yml:5 job gate: timeout-minutes 45 is below 1.25 x measured duration 44.8m (cancel risk)" + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(outUnexcused, "\n"), wantWarn) || strings.Contains(outUnexcused, "excuses") {
 		t.Errorf("unexcused workflow must emit [WARN] without excuses; got:\n%s", outUnexcused)
 	}
 
@@ -509,7 +1032,7 @@ func TestJobTimeout_ExcusedKind_Negative_UnexcusedAndExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expired AuditJobTimeouts failed: %v", err)
 	}
-	if !strings.Contains(outExpired, wantWarn) || strings.Contains(outExpired, "excuses") {
+	if !slices.Contains(strings.Split(outExpired, "\n"), wantWarn) || strings.Contains(outExpired, "excuses") {
 		t.Errorf("expired exception must keep [WARN] line without excuses; got:\n%s", outExpired)
 	}
 }
@@ -554,7 +1077,7 @@ func TestAuditJobID_Negative_RejectsOversizedInput(t *testing.T) {
 	if got := formatExcusedFindings([]jobTimeoutFinding{finding}); got != "job "+want+" missing-timeout" {
 		t.Fatalf("excused oversized ID: got %d bytes", len(got))
 	}
-	lines := applyExceptions([]jobTimeoutFinding{finding}, nil, time.Time{})
+	lines, _ := applyExceptions([]jobTimeoutFinding{finding}, nil, nil, time.Time{}, false)
 	if len(lines) != 1 || !strings.Contains(lines[0], "job "+want+":") {
 		t.Fatal("warning path did not mark the oversized ID")
 	}
@@ -592,25 +1115,32 @@ func TestFormatExcusedFindings_Boundary_MaxJobsPerFile(t *testing.T) {
 	}
 }
 
-// Boundary: a workflow with an exception but zero findings keeps today's unused-entry [WARN] line and prints no excused-job text.
+// An unused exception warns with the fail date before the switch and fails on and after it.
 func TestJobTimeout_ExcusedKind_Boundary_UnusedException(t *testing.T) {
 	root := t.TempDir()
 	writeWorkflow(t, root, "clean.yml", "on: push\njobs:\n  ok:\n    timeout-minutes: 30\n    steps:\n      - run: echo ok\n")
-	today := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
-	out, err := AuditJobTimeouts(t.Context(), JobTimeoutOptions{
+	opts := JobTimeoutOptions{
 		Root:          root,
-		Today:         today,
+		Today:         beforeFailFrom(),
 		Exceptions:    liveJobTimeoutException(".github/workflows/clean.yml", "waived"),
 		OfflineReason: "--offline",
-	})
+	}
+	out, err := AuditJobTimeouts(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("AuditJobTimeouts failed: %v", err)
 	}
-	wantUnused := "[WARN] job-timeout: the exceptions entry (rule job-timeout, .github/workflows/clean.yml) excuses no finding, because the workflow it names has none; remove it."
-	if !strings.Contains(out, wantUnused) {
-		t.Errorf("unused exception must keep today's [WARN] line; got:\n%s", out)
+	wantWarn := "[WARN] " + jobTimeoutUnusedException + jobTimeoutWarningSuffix()
+	if !slices.Contains(strings.Split(out, "\n"), wantWarn) {
+		t.Errorf("unused exception warning must end with the fail date; got:\n%s", out)
 	}
 	if strings.Contains(out, "; excuses ") || strings.Contains(out, "excuses job ") || strings.Contains(out, "excepted until") {
 		t.Errorf("zero-finding workflow must print no excused-job text; got:\n%s", out)
+	}
+	for _, day := range [...]time.Time{JobTimeoutFailFrom, JobTimeoutFailFrom.AddDate(0, 0, 1)} {
+		opts.Today = day
+		_, err := AuditJobTimeouts(t.Context(), opts)
+		if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), "[FAIL] "+jobTimeoutUnusedException) {
+			t.Errorf("on %s an unused exception must fail with its original line; got %v", day.Format(time.DateOnly), err)
+		}
 	}
 }

@@ -39,6 +39,19 @@ import (
 // shell: bash on a Windows runner with the bash of Git for Windows, so the step prints the same
 // annotation on every hosted runner.
 const (
+	// APICompatibilityWorkflowFile is the managed API comparison workflow path.
+	APICompatibilityWorkflowFile = Dir + "/praetor-api.yml"
+	// APICompatibilityJobID is the comparison job the hosted API workflow runs.
+	APICompatibilityJobID = "api-compatibility"
+	// APICompatibilityInstallStepName names the optional package installation step.
+	APICompatibilityInstallStepName = "Install system packages for the Go build"
+	// APICompatibilityInstallTimeout is the reserved installation time in minutes.
+	APICompatibilityInstallTimeout = 15
+	// APICompatibilityUpdateCommand refreshes the package index before installing packages.
+	APICompatibilityUpdateCommand = "sudo apt-get update"
+	// APICompatibilityInstallCommand opens the managed package installation command.
+	APICompatibilityInstallCommand = "sudo apt-get install -y --no-install-recommends"
+
 	// HostedGateDefaultBranch is the default branch the emitted gate texts name; adoption renders
 	// them for the repository's own (managedasset.Family.ForBranch).
 	HostedGateDefaultBranch = "main"

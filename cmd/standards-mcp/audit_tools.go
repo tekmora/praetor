@@ -25,6 +25,8 @@ import (
 const (
 	// maxAuditGates bounds the governance gate loop (HISS-02).
 	maxAuditGates = 16
+	// mcpAuditOfflineReason explains why the shared gates use local workflow evidence.
+	mcpAuditOfflineReason = "the MCP standards_audit reads nothing from the forge"
 )
 
 // auditPaths carries the resolved input files of one standards_audit call.
@@ -74,7 +76,7 @@ func (s *Server) runAuditGates(ctx context.Context, p auditPaths) *mcp.ToolResul
 		passed++
 	}
 
-	report.Template("\nsummary: MCP audit gates; passed: %d/%d; repository: %s/%s; coverage: manifest, lockfile pins and digests, HISS ratchet, context sync, agent source caveman lint, branch protection, labels, supply chain, workflow triggers, build warnings, release token, README presentation, UI gates, hooks. "+
+	report.Template("\nsummary: MCP audit gates; passed: %d/%d; repository: %s/%s; coverage: manifest, lockfile, HISS ratchet, context sync, agent lint, branch protection, labels, supply chain, workflow triggers, test and job timeouts, build warnings, release token, README, UI, hooks. "+
 		"next: run 'praetorctl audit' for full CLI gate set: paperclip harness, runner matrix, hook activation, backlog caps.",
 		passed+1, len(gates)+1, manifest.Repository.Owner, manifest.Repository.Name)
 	return mcpComposedTextResult(report.Text())
@@ -108,13 +110,19 @@ func (s *Server) auditGates(p auditPaths, effective *config.EffectivePolicy) []a
 		func(ctx context.Context) (string, error) {
 			return forge.AuditWorkflowTriggers(ctx, forge.WorkflowTriggerOptions{
 				Root: s.rootDir, Exceptions: manifest.Exceptions, Today: time.Now(),
-				CalleesNotRead: "the MCP standards_audit reads nothing from the forge",
+				CalleesNotRead: mcpAuditOfflineReason,
 			})
 		},
 		// The CLI audit's test-timeout gate (#1381): a workflow timeout above the bound fails.
 		func(ctx context.Context) (string, error) {
 			return forge.AuditTestTimeouts(ctx, forge.TestTimeoutOptions{
 				Root: s.rootDir, Exceptions: manifest.Exceptions, Today: time.Now(),
+			})
+		},
+		func(ctx context.Context) (string, error) {
+			return forge.AuditJobTimeouts(ctx, forge.JobTimeoutOptions{
+				Root: s.rootDir, Exceptions: manifest.Exceptions, Today: s.auditToday(),
+				OfflineReason: mcpAuditOfflineReason,
 			})
 		},
 		// The CLI audit's HISS-10 build-warnings gate (#816).

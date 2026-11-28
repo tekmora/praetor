@@ -12,6 +12,7 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/contextopt"
+	"github.com/cordanaLLM/praetor/internal/forge"
 )
 
 func TestServerAuditEffectiveDeploymentPolicy(t *testing.T) {
@@ -183,6 +184,30 @@ func TestServerAuditRunsTheWorkflowTriggerCheck(t *testing.T) {
 	expectText(t, "excepted push", excepted, "[PASS] Workflow triggers (HISS-18): .github/workflows/everywhere.yml excepted until "+
 		expires+" by the exceptions entry (rule HISS-18, .github/workflows/everywhere.yml): builds every branch push by design")
 	expectText(t, "excepted push", excepted, auditAllPassed())
+}
+
+// TestServerAuditRunsTheJobTimeoutGate compares the tool's static gate with the shared
+// CLI audit authority on both sides of the cutoff and verifies that a fixed job passes.
+func TestServerAuditRunsTheJobTimeoutGate(t *testing.T) {
+	srv, root := newFixtureServer(t)
+	const path = ".github/workflows/job_missing.yml"
+	const workflow = "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 1\n"
+	writeFixtureFile(t, root, path, workflow)
+	for _, day := range [...]time.Time{forge.JobTimeoutFailFrom.AddDate(0, 0, -1), forge.JobTimeoutFailFrom} {
+		srv.auditToday = func() time.Time { return day }
+		out, err := forge.AuditJobTimeouts(t.Context(), forge.JobTimeoutOptions{
+			Root: root, Today: day, OfflineReason: mcpAuditOfflineReason,
+		})
+		got := callTool(t, srv, "standards_audit", nil)
+		if err != nil {
+			expectError(t, "cutoff", got, err.Error())
+			continue
+		}
+		expectText(t, "last warning day", got, out)
+		expectText(t, "last warning day", got, auditAllPassed())
+	}
+	writeFixtureFile(t, root, path, strings.Replace(workflow, "    steps:", "    timeout-minutes: 5\n    steps:", 1))
+	expectText(t, "declared timeout", callTool(t, srv, "standards_audit", nil), auditAllPassed())
 }
 
 // TestServerAuditSkipsAPinnedCallOfAnotherRepository (order engine-hiss18-cross-repo-reusable-20261027):

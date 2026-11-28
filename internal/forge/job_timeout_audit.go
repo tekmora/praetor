@@ -6,8 +6,10 @@ package forge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,11 +35,18 @@ const (
 	runawayMultiplier           = 4.0
 	cancelRiskMultiplier        = 1.25
 	maxWorkflowRuns             = 3
+	jobTimeoutWarn              = "[WARN]"
+	jobTimeoutFail              = "[FAIL]"
 )
+
+// JobTimeoutFailFrom ends the job-timeout gate's 14-day warn period from its landing day,
+// 2026-11-24 (decision engine-job-timeouts-fail-mode). Findings fail the audit from this day on.
+var JobTimeoutFailFrom = time.Date(2026, 12, 8, 0, 0, 0, 0, time.UTC)
 
 // JobTimeoutOptions is what AuditJobTimeouts reads: the repository root, the manifest's
 // exceptions list (the check reads the entries of config.ExceptionRuleJobTimeout), the day
-// those entries' expiry is judged against, the forge reader, and branch.
+// those entries' expiry is judged against, the forge reader, and branch. An exception's
+// fingerprint, when set, must equal the finding kind; an empty fingerprint covers all kinds.
 type JobTimeoutOptions struct {
 	Root          string
 	Exceptions    []config.Exception
@@ -69,8 +78,12 @@ type workflowRunMetrics struct {
 }
 
 type workflowAuditResult struct {
-	findings        []jobTimeoutFinding
-	infos           []string
+	findings []jobTimeoutFinding
+	infos    []string
+	// staticOnly lists the workflows with a job that passed on the measured path but declares a
+	// value above the static ceiling, so a run without measurements (CI without a forge token, an
+	// offline audit) finds it. An exception that covers such a workflow is in use on both paths.
+	staticOnly      []string
 	measuredCount   int
 	noSuccessCount  int
 	unreadableCount int
@@ -78,6 +91,8 @@ type workflowAuditResult struct {
 }
 
 // AuditJobTimeouts checks workflow jobs for timeout-minutes declarations and duration limits.
+// Before JobTimeoutFailFrom a finding is a [WARN] line and the gate passes; from that day on it
+// is a [FAIL] line and the gate returns every line as its error.
 func AuditJobTimeouts(ctx context.Context, opts JobTimeoutOptions) (string, error) {
 	files, err := readWorkflowFiles(ctx, opts.Root)
 	if err != nil {
@@ -87,33 +102,42 @@ func AuditJobTimeouts(ctx context.Context, opts JobTimeoutOptions) (string, erro
 		files = files[:maxWorkflowFiles]
 	}
 	canMeasure := opts.Reader != nil && opts.OfflineReason == "" && opts.Branch != ""
-	entries := config.ExceptionsFor(opts.Exceptions, config.ExceptionRuleJobTimeout)
-	var allFindings []jobTimeoutFinding
-	var infoLines []string
-	measuredCount, noSuccessCount, unreadableCount := 0, 0, 0
-	var firstReadErr string
+	var total workflowAuditResult
 	for _, file := range files {
 		res, err := auditWorkflowJobTimeouts(ctx, file, opts, canMeasure)
 		if err != nil {
 			return "", err
 		}
-		allFindings = append(allFindings, res.findings...)
-		infoLines = append(infoLines, res.infos...)
-		measuredCount += res.measuredCount
-		noSuccessCount += res.noSuccessCount
-		unreadableCount += res.unreadableCount
-		if firstReadErr == "" && res.readErr != "" {
-			firstReadErr = res.readErr
-		}
+		addWorkflowResult(&total, res)
 	}
-	staticCount := noSuccessCount + unreadableCount
-	pathInfo := formatJobTimeoutPathInfo(canMeasure, opts, measuredCount, staticCount, noSuccessCount, unreadableCount, firstReadErr)
-	var lines []string
-	lines = append(lines, pathInfo)
-	lines = append(lines, infoLines...)
-	lines = append(lines, applyExceptions(allFindings, entries, opts.Today)...)
-	lines = append(lines, "[PASS] "+jobTimeoutGate)
-	return strings.Join(lines, "\n"), nil
+	staticCount := total.noSuccessCount + total.unreadableCount
+	lines := []string{formatJobTimeoutPathInfo(canMeasure, opts, total.measuredCount, staticCount, total.noSuccessCount, total.unreadableCount, total.readErr)}
+	lines = append(lines, total.infos...)
+	failing := !opts.Today.Before(JobTimeoutFailFrom)
+	entries := config.ExceptionsFor(opts.Exceptions, config.ExceptionRuleJobTimeout)
+	judged, findings := applyExceptions(total.findings, total.staticOnly, entries, opts.Today, failing)
+	lines = append(lines, judged...)
+	if findings > 0 && failing {
+		return "", errors.New(strings.Join(lines, "\n"))
+	}
+	if findings > 0 {
+		lines = append(lines, fmt.Sprintf("[INFO] %s: findings warn until %s and fail the audit from that day on",
+			jobTimeoutGate, JobTimeoutFailFrom.Format(time.DateOnly)))
+	}
+	return strings.Join(append(lines, "[PASS] "+jobTimeoutGate), "\n"), nil
+}
+
+// addWorkflowResult adds one workflow's result to total; the first read error is kept.
+func addWorkflowResult(total *workflowAuditResult, res workflowAuditResult) {
+	total.findings = append(total.findings, res.findings...)
+	total.infos = append(total.infos, res.infos...)
+	total.staticOnly = append(total.staticOnly, res.staticOnly...)
+	total.measuredCount += res.measuredCount
+	total.noSuccessCount += res.noSuccessCount
+	total.unreadableCount += res.unreadableCount
+	if total.readErr == "" && res.readErr != "" {
+		total.readErr = res.readErr
+	}
 }
 
 func formatJobTimeoutPathInfo(canMeasure bool, opts JobTimeoutOptions, measured, static, noSuccess, unreadable int, readErr string) string {
@@ -132,6 +156,8 @@ func formatJobTimeoutPathInfo(canMeasure bool, opts JobTimeoutOptions, measured,
 		jobTimeoutGate, measured, opts.Branch, static)
 }
 
+// auditWorkflowJobTimeouts checks every job in a single workflow file for a timeout-minutes
+// declaration and compares it with the maximum observed job duration from up to three successful runs.
 func auditWorkflowJobTimeouts(ctx context.Context, file workflowFile, opts JobTimeoutOptions, canMeasure bool) (workflowAuditResult, error) {
 	spec, err := ghworkflow.Parse(file.Data)
 	if err != nil {
@@ -149,6 +175,9 @@ func auditWorkflowJobTimeouts(ctx context.Context, file workflowFile, opts JobTi
 		s, hasS := metrics.slowest[jobID]
 		v := judgeJob(rel, jobID, job, keyLines[jobID], hasS, s)
 		accumulateJobVerdict(&res, v, metrics.hadReadError)
+		if v.isMeasured && v.finding == nil && aboveStaticCeiling(job) && len(res.staticOnly) == 0 {
+			res.staticOnly = []string{rel}
+		}
 	}
 	if res.unreadableCount > 0 {
 		res.readErr = metrics.readErr
@@ -201,26 +230,50 @@ func judgeJob(rel, jobID string, job ghworkflow.Job, jobLine int, hasS bool, s f
 		return jobVerdict{finding: f, isMeasured: hasS, isStatic: !hasS}
 	}
 	if hasS {
-		return judgeMeasuredJob(rel, line, jobID, declared, s)
+		return judgeMeasuredJob(rel, line, jobID, declared, s, jobTimeoutRunawayFloor(rel, jobID, job))
 	}
 	return judgeStaticJob(rel, line, jobID, declared)
 }
 
+// jobTimeoutRunawayFloor reserves the generated installation step's full budget for the
+// managed API comparison job, even when recent successful runs needed little installation time.
+func jobTimeoutRunawayFloor(rel, jobID string, job ghworkflow.Job) float64 {
+	if rel != ghworkflow.APICompatibilityWorkflowFile || jobID != ghworkflow.APICompatibilityJobID {
+		return ceilingFloorMinutes
+	}
+	for i := 0; i < len(job.Steps) && i < ghworkflow.MaxStepsPerJob; i++ {
+		step := &job.Steps[i]
+		if step.Name == ghworkflow.APICompatibilityInstallStepName && step.If == ghworkflow.HostedGateNotDraft &&
+			step.TimeoutMinutes.Value == strconv.Itoa(ghworkflow.APICompatibilityInstallTimeout) &&
+			strings.HasPrefix(step.Run, ghworkflow.APICompatibilityUpdateCommand+"\n"+ghworkflow.APICompatibilityInstallCommand+" ") {
+			return ceilingFloorMinutes + ghworkflow.APICompatibilityInstallTimeout
+		}
+	}
+	return ceilingFloorMinutes
+}
+
 // judgeMeasuredJob compares declared timeout-minutes against slowest measured duration s.
-func judgeMeasuredJob(rel string, line int, jobID string, declared int, s float64) jobVerdict {
+func judgeMeasuredJob(rel string, line int, jobID string, declared int, s, floor float64) jobVerdict {
 	declFloat := float64(declared)
 	if declFloat < cancelRiskMultiplier*s {
 		reason := fmt.Sprintf("timeout-minutes %d is below 1.25 x measured duration %.1fm (cancel risk)", declared, s)
 		f := &jobTimeoutFinding{Workflow: rel, Line: line, JobID: jobID, Kind: jobTimeoutKindCancelRisk, Reason: reason}
 		return jobVerdict{finding: f, isMeasured: true}
 	}
-	ceil := math.Max(ceilingFloorMinutes, runawayMultiplier*s)
+	ceil := math.Max(floor, runawayMultiplier*s)
 	if declFloat > ceil {
-		reason := fmt.Sprintf("timeout-minutes %d is above max(30, 4 x %.1fm) bound of %.0fm (runaway)", declared, s, ceil)
+		reason := fmt.Sprintf("timeout-minutes %d is above max(%.0f, 4 x %.1fm) bound of %.0fm (runaway)", declared, floor, s, ceil)
 		f := &jobTimeoutFinding{Workflow: rel, Line: line, JobID: jobID, Kind: jobTimeoutKindRunaway, Reason: reason}
 		return jobVerdict{finding: f, isMeasured: true}
 	}
 	return jobVerdict{isMeasured: true}
+}
+
+// aboveStaticCeiling reports whether job declares a literal timeout-minutes above the static
+// ceiling, the finding judgeStaticJob makes when no measurement exists.
+func aboveStaticCeiling(job ghworkflow.Job) bool {
+	declared, err := strconv.Atoi(strings.TrimSpace(job.TimeoutMinutes.Value))
+	return err == nil && declared > staticCeilingMinutes
 }
 
 // judgeStaticJob checks declared timeout-minutes against staticCeilingMinutes when unmeasured.
@@ -233,9 +286,38 @@ func judgeStaticJob(rel string, line int, jobID string, declared int) jobVerdict
 	return jobVerdict{isStatic: true}
 }
 
-// applyExceptions formats workflow findings against live and unused job-timeout exceptions.
-func applyExceptions(findings []jobTimeoutFinding, entries []config.Exception, today time.Time) []string {
+// applyExceptions returns the judged lines and how many of them are findings: a finding of a
+// workflow without a live exception, or an entry that excuses nothing. failing marks findings
+// [FAIL] instead of [WARN]; an exception's [PASS] line names only its excused jobs and kinds.
+// A workflow in staticOnly also has a use for a static-ceiling entry on the offline path.
+func applyExceptions(findings []jobTimeoutFinding, staticOnly []string, entries []config.Exception, today time.Time, failing bool) ([]string, int) {
+	severity := jobTimeoutWarn
+	if failing {
+		severity = jobTimeoutFail
+	}
 	used := make([]bool, len(entries))
+	byWorkflow, wfOrder := groupFindingsByWorkflow(findings)
+	lines, count := judgeWorkflowFindings(byWorkflow, wfOrder, entries, today, used, severity)
+	staticLines, staticCount := staticOnlyExceptionLines(staticOnly, byWorkflow, entries, today, used, severity)
+	lines = append(lines, staticLines...)
+	count += staticCount
+	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
+		if !used[i] {
+			why := "the workflow it names has none"
+			if entries[i].Fingerprint != "" {
+				why = "the workflow it names has none of kind " + entries[i].Fingerprint
+			}
+			detail := fmt.Sprintf("the exceptions entry (rule %s, %s) excuses no finding, because %s; remove it.",
+				entries[i].Rule, entries[i].Target(), why)
+			lines = append(lines, formatJobTimeoutFindingLine(severity, detail))
+			count++
+		}
+	}
+	return lines, count
+}
+
+// groupFindingsByWorkflow groups findings by workflow, keeping the first-seen workflow order.
+func groupFindingsByWorkflow(findings []jobTimeoutFinding) (map[string][]jobTimeoutFinding, []string) {
 	byWorkflow := make(map[string][]jobTimeoutFinding)
 	var wfOrder []string
 	for _, f := range findings {
@@ -244,27 +326,88 @@ func applyExceptions(findings []jobTimeoutFinding, entries []config.Exception, t
 		}
 		byWorkflow[f.Workflow] = append(byWorkflow[f.Workflow], f)
 	}
-	var lines []string
-	for _, wf := range wfOrder {
-		wFindings := byWorkflow[wf]
-		live, _ := config.ExceptionFor(entries, wf, today, used)
-		if live != nil {
-			lines = append(lines, fmt.Sprintf("[PASS] %s: %s excepted until %s: %s; excuses %s",
-				jobTimeoutGate, wf, live.Expires, live.Reason, formatExcusedFindings(wFindings)))
+	return byWorkflow, wfOrder
+}
+
+// jobTimeoutExceptionFor returns the last live and first expired entries matching workflow and kind.
+// Only matching entries are marked used; unknown fingerprints excuse nothing.
+func jobTimeoutExceptionFor(entries []config.Exception, workflow, kind string, today time.Time, used []bool) (live, expired *config.Exception) {
+	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
+		if entries[i].Fingerprint != "" && entries[i].Fingerprint != kind {
 			continue
 		}
-		for _, f := range wFindings {
-			lines = append(lines, fmt.Sprintf("[WARN] %s: %s:%d job %s: %s",
-				jobTimeoutGate, f.Workflow, f.Line, auditJobID(f.JobID), f.Reason))
+		match, stale := config.ExceptionFor(entries[i:i+1], workflow, today, used[i:i+1])
+		if match != nil {
+			live = match
+		}
+		if expired == nil {
+			expired = stale
 		}
 	}
-	for i := 0; i < len(entries) && i < config.MaxExceptions; i++ {
-		if !used[i] {
-			lines = append(lines, fmt.Sprintf("[WARN] %s: the exceptions entry (rule %s, %s) excuses no finding, because the workflow it names has none; remove it.",
-				jobTimeoutGate, entries[i].Rule, entries[i].Target()))
+	return live, expired
+}
+
+// judgeWorkflowFindings prints unexcused findings at severity and counts them. Pass lines
+// group only findings matched by the same live entry, preserving their first-seen order.
+func judgeWorkflowFindings(byWorkflow map[string][]jobTimeoutFinding, wfOrder []string, entries []config.Exception, today time.Time, used []bool, severity string) ([]string, int) {
+	var lines []string
+	count := 0
+	for _, wf := range wfOrder {
+		excused := make(map[*config.Exception][]jobTimeoutFinding)
+		var order []*config.Exception
+		for _, f := range byWorkflow[wf] {
+			if live, _ := jobTimeoutExceptionFor(entries, wf, f.Kind, today, used); live != nil {
+				if _, exists := excused[live]; !exists {
+					order = append(order, live)
+				}
+				excused[live] = append(excused[live], f)
+				continue
+			}
+			detail := fmt.Sprintf("%s:%d job %s: %s", f.Workflow, f.Line, auditJobID(f.JobID), f.Reason)
+			lines = append(lines, formatJobTimeoutFindingLine(severity, detail))
+			count++
+		}
+		for _, live := range order {
+			lines = append(lines, fmt.Sprintf("[PASS] %s: %s excepted until %s: %s; excuses %s",
+				jobTimeoutGate, wf, live.Expires, live.Reason, formatExcusedFindings(excused[live])))
 		}
 	}
-	return lines
+	return lines, count
+}
+
+// formatJobTimeoutFindingLine renders one finding line at severity; a [WARN] line names the day the
+// gate starts to fail, so an adopter reading a warning knows its deadline.
+func formatJobTimeoutFindingLine(severity, detail string) string {
+	line := severity + " " + jobTimeoutGate + ": " + detail
+	if severity == jobTimeoutWarn {
+		line += " (fails the audit from " + JobTimeoutFailFrom.Format(time.DateOnly) + ")"
+	}
+	return line
+}
+
+// staticOnlyExceptionLines reports and counts expired static-ceiling entries for workflows
+// whose measured jobs passed above the static bound. A live entry still covers the offline path.
+func staticOnlyExceptionLines(staticOnly []string, byWorkflow map[string][]jobTimeoutFinding, entries []config.Exception, today time.Time, used []bool, severity string) ([]string, int) {
+	var lines []string
+	count := 0
+	for _, wf := range staticOnly {
+		live, expired := jobTimeoutExceptionFor(entries, wf, jobTimeoutKindStaticCeiling, today, used)
+		if live != nil {
+			lines = append(lines, fmt.Sprintf("[INFO] %s: %s: the exceptions entry (until %s) covers jobs above the %dm static bound; the measured path finds none",
+				jobTimeoutGate, wf, live.Expires, staticCeilingMinutes))
+		} else if expired != nil && !slices.ContainsFunc(byWorkflow[wf], isStaticCeilingFinding) {
+			detail := fmt.Sprintf("the exceptions entry for %s expired %s; bring the timeout back to the %dm bound or renew the entry with a reason",
+				wf, expired.Expires, staticCeilingMinutes)
+			lines = append(lines, formatJobTimeoutFindingLine(severity, detail))
+			count++
+		}
+	}
+	return lines, count
+}
+
+// isStaticCeilingFinding reports whether the offline bound already produced a finding.
+func isStaticCeilingFinding(f jobTimeoutFinding) bool {
+	return f.Kind == jobTimeoutKindStaticCeiling
 }
 
 // auditJobID returns jobID with terminal control characters replaced so audit lines cannot be forged.
@@ -352,6 +495,7 @@ func jobsReadError(err error) string {
 	return "read run jobs: " + msg
 }
 
+// updateSlowestJobs records the maximum successful job duration per spec job from one run.
 func updateSlowestJobs(slowest map[string]float64, jobs []WorkflowJobRecord, spec *ghworkflow.Spec) {
 	for i := 0; i < len(jobs) && i < maxWorkflowRunJobs; i++ {
 		jobRec := jobs[i]
@@ -366,37 +510,150 @@ func updateSlowestJobs(slowest map[string]float64, jobs []WorkflowJobRecord, spe
 	}
 }
 
+// matchSlowestJob assigns dur to the matching jobs in spec in three steps:
+//  1. Exact literal match: a spec job whose target holds no "${{" expression and equals forgeName
+//     records dur and ends the search.
+//  2. Expression prefix match: among spec jobs whose target holds "${{" and matches forgeName by
+//     its literal prefix before "${{", the longest prefix wins (ties share the record) and ends
+//     the search.
+//  3. Matrix suffix fallback: only when steps 1 and 2 match nothing, among spec jobs whose target
+//     holds no "${{" expression, that declare strategy.matrix, and that match forgeName of the
+//     form "<target> (...)", the longest target wins (ties share the record).
 func matchSlowestJob(slowest map[string]float64, forgeName string, dur float64, spec *ghworkflow.Spec) {
-	for jobID, job := range spec.Jobs {
-		target := job.Name
-		if target == "" {
-			target = jobID
+	if spec == nil {
+		return
+	}
+	jobIDs := ghworkflow.SortedJobIDs(spec.Jobs)
+	if matchLiteralJobs(slowest, jobIDs, forgeName, dur, spec) {
+		return
+	}
+	if matchExpressionJobs(slowest, jobIDs, forgeName, dur, spec) {
+		return
+	}
+	matchMatrixFallbackJobs(slowest, jobIDs, forgeName, dur, spec)
+}
+
+// matchLiteralJobs updates every literal spec job whose name equals forgeName and reports whether any matched.
+func matchLiteralJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) bool {
+	matched := false
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		target := specJobTarget(jobID, spec.Jobs[jobID])
+		if !strings.Contains(target, "${{") && jobMatches(target, forgeName) {
+			recordSlowest(slowest, jobID, dur)
+			matched = true
 		}
+	}
+	return matched
+}
+
+// matchExpressionJobs updates every expression spec job sharing the longest matching literal prefix
+// and reports whether any matched.
+func matchExpressionJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) bool {
+	best := longestExpressionPrefixMatch(jobIDs, forgeName, spec)
+	if best == 0 {
+		return false
+	}
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		target := specJobTarget(jobID, spec.Jobs[jobID])
+		if jobMatches(target, forgeName) && len(expressionJobPrefix(target)) == best {
+			recordSlowest(slowest, jobID, dur)
+		}
+	}
+	return true
+}
+
+// longestExpressionPrefixMatch returns the byte length of the longest matching expression-job prefix.
+func longestExpressionPrefixMatch(jobIDs []string, forgeName string, spec *ghworkflow.Spec) int {
+	best := 0
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		target := specJobTarget(jobIDs[i], spec.Jobs[jobIDs[i]])
 		if jobMatches(target, forgeName) {
-			if dur > slowest[jobID] {
-				slowest[jobID] = dur
+			if n := len(expressionJobPrefix(target)); n > best {
+				best = n
 			}
 		}
 	}
+	return best
 }
 
+// matchMatrixFallbackJobs updates every literal-target spec job declaring strategy.matrix that
+// shares the longest target matching forgeName as "<target> (...)".
+func matchMatrixFallbackJobs(slowest map[string]float64, jobIDs []string, forgeName string, dur float64, spec *ghworkflow.Spec) {
+	best := longestMatrixFallbackMatch(jobIDs, forgeName, spec)
+	if best == 0 {
+		return
+	}
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		job := spec.Jobs[jobID]
+		target := specJobTarget(jobID, job)
+		if len(target) == best && matrixFallbackMatches(target, job, forgeName) {
+			recordSlowest(slowest, jobID, dur)
+		}
+	}
+}
+
+// longestMatrixFallbackMatch returns the byte length of the longest literal matrix target matching forgeName.
+func longestMatrixFallbackMatch(jobIDs []string, forgeName string, spec *ghworkflow.Spec) int {
+	best := 0
+	for i := 0; i < len(jobIDs) && i < ghworkflow.MaxJobsPerFile; i++ {
+		jobID := jobIDs[i]
+		job := spec.Jobs[jobID]
+		target := specJobTarget(jobID, job)
+		if len(target) > best && matrixFallbackMatches(target, job, forgeName) {
+			best = len(target)
+		}
+	}
+	return best
+}
+
+// matrixFallbackMatches reports whether job has a literal target, declares strategy.matrix,
+// and matches a GitHub matrix-suffixed record named "<target> (...)".
+func matrixFallbackMatches(target string, job ghworkflow.Job, forgeName string) bool {
+	if target == "" || strings.Contains(target, "${{") || job.Strategy.Matrix.Kind == 0 || job.Strategy.Matrix.ShortTag() == "!!null" {
+		return false
+	}
+	rest, ok := strings.CutPrefix(forgeName, target+" (")
+	return ok && strings.HasSuffix(rest, ")")
+}
+
+// specJobTarget returns job.Name when set, or jobID when the workflow omits a display name.
+func specJobTarget(jobID string, job ghworkflow.Job) string {
+	if job.Name != "" {
+		return job.Name
+	}
+	return jobID
+}
+
+// recordSlowest updates jobID's maximum observed duration when dur exceeds any prior value.
+func recordSlowest(slowest map[string]float64, jobID string, dur float64) {
+	if prev, ok := slowest[jobID]; !ok || dur > prev {
+		slowest[jobID] = dur
+	}
+}
+
+// jobMatches reports whether a single spec job target matches forgeName before sibling precedence:
+// a literal target requires an exact match, and an expression target requires its literal prefix before "${{".
 func jobMatches(target, forgeName string) bool {
-	if forgeName == target {
-		return true
+	if !strings.Contains(target, "${{") {
+		return forgeName == target
 	}
-	targetPrefix := matchJobPrefix(target)
-	forgePrefix := matchJobPrefix(forgeName)
-	return targetPrefix != "" && targetPrefix == forgePrefix
+	prefix := expressionJobPrefix(target)
+	return prefix != "" && strings.HasPrefix(forgeName, prefix)
 }
 
-func matchJobPrefix(name string) string {
-	if idx := strings.Index(name, "${{"); idx != -1 {
-		name = name[:idx]
+// expressionJobPrefix returns the non-blank literal prefix before the first "${{" in target, or "".
+func expressionJobPrefix(target string) string {
+	idx := strings.Index(target, "${{")
+	if idx <= 0 {
+		return ""
 	}
-	if idx := strings.Index(name, " ("); idx != -1 {
-		name = name[:idx]
+	if strings.TrimSpace(target[:idx]) == "" {
+		return ""
 	}
-	return strings.TrimSpace(name)
+	return target[:idx]
 }
 
 func parseJobDuration(startedAt, completedAt string) (float64, bool) {

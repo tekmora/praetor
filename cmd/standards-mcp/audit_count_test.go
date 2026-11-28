@@ -18,7 +18,7 @@ func auditAllPassed() string {
 // TestAuditAllPassed_Boundary_CountsEveryGate pins the derived count, so a gate added or dropped is a visible
 // change of this one line rather than of every audit test.
 func TestAuditAllPassed_Boundary_CountsEveryGate(t *testing.T) {
-	if got := auditAllPassed(); got != "passed: 16/16" {
-		t.Fatalf("auditAllPassed() = %q, want %q (one per auditGates entry plus the manifest gate)", got, "passed: 16/16")
+	if got := auditAllPassed(); got != "passed: 17/17" {
+		t.Fatalf("auditAllPassed() = %q, want %q (one per auditGates entry plus the manifest gate)", got, "passed: 17/17")
 	}
 }

@@ -68,7 +68,8 @@ func TestRenderWorkflow_Positive_InstallStepRunsBeforeTheChecker(t *testing.T) {
 // Boundary: no packages and no exceptions render the locked bytes, so the empty-settings rendering
 // equals the current base rendering; a nil and an empty list are the same. The previous base
 // renderings (digest f7e57ed8, before the compare step set GOTOOLCHAIN: auto; digest b1b8cda8,
-// before review runs shared the pull request's concurrency group) stay reachable as priors.
+// before review runs shared the pull request's concurrency group; digest 2e42c9c2, the 60-minute
+// job bound) stay reachable as priors.
 func TestRenderWorkflow_Boundary_EmptySettingsKeepTheBytes(t *testing.T) {
 	for _, settings := range []Settings{{}, {SystemPackages: []string{}}, {Exceptions: []ModuleException{}}} {
 		if got := mustRender(t, settings); got != Workflow {
@@ -76,7 +77,7 @@ func TestRenderWorkflow_Boundary_EmptySettingsKeepTheBytes(t *testing.T) {
 		}
 	}
 	digest, _, err := util.CanonicalTextDigest([]byte(Workflow))
-	if err != nil || digest != "2e42c9c296492a39b5657e364b9bffc589731aaa96f676d3c320d1650896c3d9" {
+	if err != nil || digest != "3599cee98174add1d3f0f36997c01b50d4f7ef4dd7ef947bcd0c25bf1076c7eb" {
 		t.Fatalf("Workflow digest = %s (%v): the default rendering is no longer byte-identical to the shipped text", digest, err)
 	}
 }
@@ -125,6 +126,30 @@ func TestRenderWorkflow_Negative_RefusesWhatItCannotRender(t *testing.T) {
 	}
 	if _, err := RenderWorkflow(Workflow, Settings{SystemPackages: tooMany}); err == nil {
 		t.Fatal("more packages than the bound rendered")
+	}
+}
+
+// Missing, nonliteral and insufficient job budgets cannot take the installation adjustment.
+// Historical literal budgets retain their own comparison time and round-trip exactly.
+func TestRenderWorkflow_InstallationJobTimeoutBounds(t *testing.T) {
+	settings := Settings{SystemPackages: []string{"libudev-dev"}}
+	for _, timeout := range []string{"", "    timeout-minutes: ${{ inputs.timeout }}\n", "    timeout-minutes: 15\n"} {
+		plain := strings.Replace(Workflow, "    timeout-minutes: 25\n", timeout, 1)
+		if _, err := RenderWorkflow(plain, settings); err == nil {
+			t.Errorf("invalid job timeout %q accepted", timeout)
+		}
+	}
+	prior := strings.Replace(Workflow, "    timeout-minutes: 25\n", "    timeout-minutes: 60\n", 1)
+	rendered := mustRenderOver(t, prior, settings)
+	if !strings.Contains(rendered, "    timeout-minutes: 75\n") {
+		t.Fatal("historical comparison timeout lost its installation budget")
+	}
+	if plain, ok := StripSettings(rendered); !ok || plain != prior {
+		t.Fatalf("historical timeout did not round-trip: ok=%v", ok)
+	}
+	legacy := strings.Replace(rendered, installJobTimeoutMarker+"    timeout-minutes: 75\n", "    timeout-minutes: 60\n", 1)
+	if plain, ok := StripSettings(legacy); !ok || plain != prior {
+		t.Fatalf("legacy installation rendering was not recognised: ok=%v", ok)
 	}
 }
 

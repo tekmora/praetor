@@ -99,6 +99,13 @@ exceptions:
     category: "D"
     reason: "release provenance not yet built by an isolated Level 3 builder; the release job reaches Level 2 (#799)"
     expires: "2027-01-04"
+  - rule: "job-timeout"
+    path: ".github/workflows/portability.yml"
+    fingerprint: "static-ceiling"
+    category: "D"
+    reason: "category D: the harness job (153 minutes, macOS p95 76.3) and windows-shard (163 minutes, p95 81.3) take twice their measured p95, above the 120-minute static ceiling; CI audits run without a forge token on the static path, which cannot read that measurement (#729 tracks splitting the suite)"
+    entered: "2026-11-06"
+    expires: "2027-03-06"
   - rule: "HISS-19"
     path: "tools/apicompat/gate/main.go"
     fingerprint: "b2b91312"
@@ -1299,7 +1306,7 @@ register:
   sources:
     expected: 301
     not_applicable: 143
-    sha256: "sha256:9e272fc023e9928f633c334bdb6f3e164d1437cb6f6d29315f55215d98167bdc"
+    sha256: "sha256:382f7aa45aa8a4735965f03f2374aff26bdbc0da0a732bf038efb18a06cf430a"
     inputs:
       - path: ".paperclip/harness.json"
         surface: prompts

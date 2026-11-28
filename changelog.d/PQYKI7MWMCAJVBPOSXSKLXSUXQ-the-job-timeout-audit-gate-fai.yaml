@@ -1,0 +1,3 @@
+type: changed
+title: Job-timeout findings fail audits from 2026-12-08. Fix workflow timeouts or renew applicable dated exceptions before the cutoff.
+breaking: true

@@ -551,16 +551,29 @@ may name the root `Makefile`; other workflow-scoped exceptions still require a w
 `internal/forge/test_timeout_audit_test.go`; `TestValidateExceptionsTestTimeoutMakefile` in
 `internal/config/exceptions_test.go`).
 
-The job-timeout gate runs right beside it (`forge.AuditJobTimeouts`): every job that runs steps
+The CLI and `standards_audit` both run the job-timeout gate (`forge.AuditJobTimeouts`). Every job that runs steps
 declares `timeout-minutes`. A reusable workflow call (`uses:` at job level) cannot carry it and
 is exempt; an expression value (`${{ ... }}`) is reported as not judged, by name. The gate has two paths:
 the static path warns on any declared value above 120 minutes; when the forge is readable, the
 measured path reads up to the latest 3 successful runs on the default branch and warns on a
 declared value below 1.25 x slowest run S (cancel risk) or above max(30, 4 x S) (runaway),
-falling back to the static path for jobs without measurements. During warn-only rollout, findings
-emit `[WARN]` lines and the gate passes, silenced by a dated `job-timeout` exception. The excused
-`[PASS]` line names each excused job and its kind (`cancel-risk`, `runaway`, `static-ceiling`,
-`missing-timeout` or `unreadable-timeout`), so an exception never hides which risk it covers.
+falling back to the static path for jobs without measurements. The rendered API comparison job
+adds the install step's reserved minutes to the 30-minute floor when it installs system packages.
+The MCP tool always uses the static path because it does not read the forge. Until 2026-12-08
+(`forge.JobTimeoutFailFrom`), findings emit `[WARN]` lines ending in
+`(fails the audit from 2026-12-08)` and the gate passes. From that day on, findings emit
+`[FAIL]` lines and the gate fails the audit (`TestJobTimeout_FailFrom_SwitchBoundary`).
+A dated `job-timeout` exception for the workflow excuses its findings; the excused `[PASS]` line
+names each excused job and its kind (`cancel-risk`, `runaway`, `static-ceiling`,
+`missing-timeout` or `unreadable-timeout`), so an exception never hides which risk it covers. An
+optional `fingerprint` narrows the exception to exactly one of those kinds. For example,
+`fingerprint: static-ceiling` excuses only the static bound; measured cancel risks, runaways,
+and missing timeouts in the same workflow still fail after the switch
+(`TestJobTimeout_PortabilityExceptionScope`). An unknown fingerprint excuses nothing. The
+gate reports an entry that excuses nothing as a finding. A job above the static ceiling that
+passes on the measured path keeps its matching static-ceiling entry in use, because a CI run without a forge
+token takes the static path and needs it (`TestJobTimeout_StaticOnlyExceptionUsedOnBothPaths`). An
+expired matching exception is a finding on the measured path as well (`TestJobTimeout_ExpiredStaticOnlyException`).
 
 The context gate inside `standards_audit` also runs the cache-stability check
 (`compiler.VerifyStableContext`, called from `auditContextSync` in

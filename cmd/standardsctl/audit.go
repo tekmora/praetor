@@ -38,6 +38,10 @@ const (
 	legacyModulePath = "github.com/cordanaLLM/standards"
 )
 
+// auditToday is the instant forge and adopt audit gates use as Today for dated rollouts and
+// exception expiry. Production reads the wall clock; tests replace the func with t.Cleanup.
+var auditToday = time.Now
+
 // auditOptions carries the resolved audit inputs. Every companion file defaults to the
 // directory of the manifest, so `audit --config=/repo/.standards.yaml` audits /repo and
 // never the process working directory.
@@ -574,7 +578,7 @@ func auditBranchProtectionAndSupplyChain(ctx context.Context, manifest *config.M
 
 	// The supply-chain gate standards_audit runs too, with the manifest's HISS-11 exceptions.
 	supplyChain, err := adopt.AuditSupplyChain(ctx, adopt.SupplyChainOptions{
-		Root: rootDir, Policy: policy, Exceptions: manifest.Exceptions, Today: time.Now(),
+		Root: rootDir, Policy: policy, Exceptions: manifest.Exceptions, Today: auditToday(),
 	})
 	if err != nil {
 		return err
@@ -602,7 +606,7 @@ func auditWorkflowTriggers(ctx context.Context, manifest *config.Manifest, rootD
 		}
 	}
 	triggers, err := forge.AuditWorkflowTriggers(ctx, forge.WorkflowTriggerOptions{
-		Root: rootDir, Exceptions: manifest.Exceptions, Today: time.Now(),
+		Root: rootDir, Exceptions: manifest.Exceptions, Today: auditToday(),
 		Callees: reader, CalleesNotRead: notRead,
 	})
 	if err != nil {
@@ -616,7 +620,7 @@ func auditWorkflowTriggers(ctx context.Context, manifest *config.Manifest, rootD
 // test-timeout exceptions: a workflow timeout above the bound fails the audit.
 func auditTestTimeouts(ctx context.Context, manifest *config.Manifest, rootDir string) error {
 	out, err := forge.AuditTestTimeouts(ctx, forge.TestTimeoutOptions{
-		Root: rootDir, Exceptions: manifest.Exceptions, Today: time.Now(),
+		Root: rootDir, Exceptions: manifest.Exceptions, Today: auditToday(),
 	})
 	if err != nil {
 		return err
@@ -626,7 +630,7 @@ func auditTestTimeouts(ctx context.Context, manifest *config.Manifest, rootDir s
 }
 
 // auditJobTimeouts runs the job-timeout gate (forge.AuditJobTimeouts): every job running steps
-// declares timeout-minutes; findings warn and the gate passes.
+// declares timeout-minutes; findings warn before forge.JobTimeoutFailFrom and fail from that day on.
 func auditJobTimeouts(ctx context.Context, manifest *config.Manifest, rootDir string, offline bool) error {
 	branch, branchErr := forge.RepositoryDefaultBranch(ctx, rootDir, manifest)
 	live := openActionsForge(ctx, rootDir, manifest.Repository, offline)
@@ -637,7 +641,7 @@ func auditJobTimeouts(ctx context.Context, manifest *config.Manifest, rootDir st
 	out, err := forge.AuditJobTimeouts(ctx, forge.JobTimeoutOptions{
 		Root:          rootDir,
 		Exceptions:    manifest.Exceptions,
-		Today:         time.Now(),
+		Today:         auditToday(),
 		Reader:        live.reader,
 		OfflineReason: offlineReason,
 		Branch:        branch,
@@ -803,7 +807,7 @@ func auditRunnerMatrix(ctx context.Context, manifest *config.Manifest, rootDir s
 // a pinned text fixture without an eol rule or -text in .gitattributes fails the audit.
 func auditPinnedFixturesEOL(ctx context.Context, manifest *config.Manifest, rootDir string) error {
 	out, err := forge.AuditPinnedFixturesEOL(ctx, forge.PinnedFixtureEOLOptions{
-		Root: rootDir, Exceptions: manifest.Exceptions, Today: time.Now(),
+		Root: rootDir, Exceptions: manifest.Exceptions, Today: auditToday(),
 	})
 	if err != nil {
 		return err
