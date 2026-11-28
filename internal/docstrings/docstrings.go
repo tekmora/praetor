@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -329,7 +330,7 @@ func hasShellShebang(data []byte) bool {
 func HasDocstring(rel string, data []byte, lines []string, fn hiss.FunctionSpan) bool {
 	switch resolveDocStyle(rel, data) {
 	case docStyleCommentAbove:
-		return hasCommentAbove(lines, fn.Start)
+		return hasCommentAbove(lines, fn.Start, util.SourceLanguage(rel))
 	case docStylePythonBody:
 		return hasPythonDocstring(lines, fn.Start, fn.End)
 	case docStyleShellAbove:
@@ -341,7 +342,7 @@ func HasDocstring(rel string, data []byte, lines []string, fn hiss.FunctionSpan)
 
 // hasCommentAbove checks for a //, ///, /* */, or /** */ comment ending directly above startLine,
 // skipping intervening attributes and decorators.
-func hasCommentAbove(lines []string, startLine int) bool {
+func hasCommentAbove(lines []string, startLine int, language string) bool {
 	if startLine <= 1 || startLine-1 > len(lines) {
 		return false
 	}
@@ -349,13 +350,8 @@ func hasCommentAbove(lines []string, startLine int) bool {
 	if strings.TrimSpace(lines[startLine-1]) == "{" && idx >= 1 {
 		idx--
 	}
-	for steps := 0; steps < maxAttributeLines && idx >= 0; steps++ {
-		if !isAttributeOrDecorator(strings.TrimSpace(lines[idx])) {
-			break
-		}
-		idx--
-	}
-	if idx < 0 {
+	idx, ok := skipAttributesAbove(lines, idx, language)
+	if !ok || idx < 0 {
 		return false
 	}
 	above := strings.TrimSpace(lines[idx])
@@ -366,6 +362,97 @@ func hasCommentAbove(lines []string, startLine int) bool {
 		return hasBlockCommentStart(lines, idx)
 	}
 	return false
+}
+
+// skipAttributesAbove steps backwards from idx over at most maxAttributeLines of balanced
+// single-line or multi-line attributes and decorators, returning the index above them.
+func skipAttributesAbove(lines []string, idx int, language string) (int, bool) {
+	remaining := maxAttributeLines
+	for steps := 0; steps < maxAttributeLines && remaining > 0 && idx >= 0; steps++ {
+		trimmed := strings.TrimSpace(lines[idx])
+		if !isAttributeOrDecorator(trimmed) && !strings.ContainsAny(trimmed, "])") {
+			return idx, true
+		}
+		start, ok := attributeGroupStart(lines, idx, remaining, language)
+		if start < 0 {
+			return idx, !isAttributeOrDecorator(trimmed)
+		}
+		if !ok {
+			return -1, false
+		}
+		remaining -= idx - start + 1
+		idx = start - 1
+	}
+	return idx, true
+}
+
+// attributeGroupStart finds the closest annotation that ends at idx. Lexing forward
+// gives comments and literals their opening context. Every physical line uses the budget.
+func attributeGroupStart(lines []string, idx, remaining int, language string) (int, bool) {
+	for start := idx; start >= 0 && idx-start < remaining; start-- {
+		if !isAttributeOrDecorator(strings.TrimSpace(lines[start])) {
+			continue
+		}
+		code, supported := hiss.MaskAttributeLines(language, lines[start:idx+1])
+		tail := code[strings.LastIndexByte(code, '\n')+1:]
+		if strings.TrimSpace(tail) != "" && onlyCompleteAttributes(strings.TrimSpace(code)) {
+			return start, supported
+		}
+	}
+	return -1, false
+}
+
+// attributePrefix includes an opening delimiter when the annotation has a body.
+var attributePrefix = regexp.MustCompile(`^(?:#\[|\[\[|__attribute__[ \t]*\(|@(?:[\pL_$][\pL\pN_$]*:)?[\pL_$][\pL\pN_$]*(?:\.[\pL_$][\pL\pN_$]*)*[ \t]*\(?)`)
+
+// onlyCompleteAttributes verifies that each top-level token belongs to an annotation.
+func onlyCompleteAttributes(code string) bool {
+	for len(code) > 0 {
+		prefix := attributePrefix.FindString(code)
+		if prefix == "" {
+			return false
+		}
+		end := len(prefix)
+		switch prefix[end-1] {
+		case '[', '(':
+			start := end - 1
+			if prefix == "[[" {
+				start = 0
+			}
+			width := attributeBodyWidth(code[start:])
+			if width == 0 {
+				return false
+			}
+			end = start + width
+		}
+		code = strings.TrimSpace(code[end:])
+	}
+	return true
+}
+
+// attributeBodyWidth returns the width of one matched delimiter group, or zero for malformed input.
+func attributeBodyWidth(code string) int {
+	const opens, closes = "([{", ")]}"
+	var expected []byte
+	for i := 0; i < len(code); i++ {
+		ch := code[i]
+		if at := strings.IndexByte(opens, ch); at >= 0 {
+			expected = append(expected, closes[at])
+			continue
+		}
+		if strings.IndexByte(closes, ch) < 0 {
+			continue
+		}
+		last := len(expected) - 1
+		if last < 0 || expected[last] != ch {
+			return 0
+		}
+		if last == 0 {
+			return i + 1
+		}
+		expected = expected[:last]
+	}
+	return 0
 }
 
 // isAttributeOrDecorator reports whether a trimmed line is an attribute or decorator annotation.

@@ -1,0 +1,5 @@
+/// Returns x after applying two attributes.
+[[nodiscard]] [[maybe_unused]]
+int pair(int x) {
+    return x;
+}

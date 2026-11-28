@@ -1,0 +1,7 @@
+/// Documents f.
+#[cfg_attr(
+    feature = "fast",
+
+    inline
+)]
+pub fn f() {}

@@ -4,7 +4,32 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/baseline"
 )
+
+// TestLaneSignatureFingerprint replays the C++ findings against the pre-wrap baseline.
+func TestLaneSignatureFingerprint(t *testing.T) {
+	const path = "lib.cpp"
+	const source = "int f(\n    int n = sprintf(nullptr, \"%d\", 1)\n) {\n    char buf[32];\n    sprintf(buf, \"%d\", n);\n    return n;\n}\n"
+	recorded := []baseline.Infraction{
+		{RuleID: "HISS-08", FilePath: path, LineNumber: 2, Anchor: "text:4e4026b0f26b", Fingerprint: "lib.cpp:HISS-08:text:4e4026b0f26b#1"},
+		{RuleID: "HISS-08", FilePath: path, LineNumber: 5, Anchor: "fn:f", Fingerprint: "lib.cpp:HISS-08:fn:f#1"},
+	}
+	current := ConvertToBaseline(scanFixtureFile(t, path, source).Violations)
+	if len(current) != len(recorded) {
+		t.Fatalf("findings %v, want %d", current, len(recorded))
+	}
+	for i := range recorded {
+		if got, want := current[i].Fingerprint, recorded[i].Fingerprint; got != want {
+			t.Errorf("finding %d fingerprint %q, want %q", i, got, want)
+		}
+	}
+	snapshot := &baseline.Baseline{Version: 1, TotalInfractions: len(recorded), Infractions: recorded}
+	if result := baseline.EvaluateRatchet(snapshot, current, nil); !result.Passed || result.Stale != 0 {
+		t.Errorf("unchanged source failed the recorded baseline: %s", result.FullSummary())
+	}
+}
 
 // scannedKeys scans one file and returns the baseline fingerprint and the line of each finding,
 // in scan order.
@@ -157,11 +182,11 @@ func TestAnchor_Helpers_3D(t *testing.T) {
 		t.Errorf("lines differing in whitespace and line ending must share a text anchor: %q, %q", first, second)
 	}
 
-	if got := appendFunction(nil, "", 1, 2); len(got) != 0 {
+	if got := appendFunction(nil, funcSpan{start: 1, end: 2}); len(got) != 0 {
 		t.Errorf("an unnamed function must not be noted: %v", got)
 	}
 	full := make([]funcSpan, maxNotedFunctions)
-	if got := appendFunction(full, "f", 1, 2); len(got) != maxNotedFunctions {
+	if got := appendFunction(full, funcSpan{name: "f", start: 1, end: 2}); len(got) != maxNotedFunctions {
 		t.Errorf("the note bound must hold: %d functions", len(got))
 	}
 	if qualifiedName("", "f") != "f" || qualifiedName("T", "f") != "T.f" || qualifiedName("T", "") != "" {
@@ -265,11 +290,18 @@ func TestExtractFileFunctions_Positive_AllScannerFamilies(t *testing.T) {
 			{Name: "Alpha", Start: 3, End: 4},
 			{Name: "S.Beta", Start: 8, End: 9},
 		}},
-		{"src/lib.rs", "pub fn compute() {\n    let x = 1;\n}\n", []FunctionSpan{{Name: "compute", Start: 1, End: 3}}},
+		{"src/lib.rs", "pub fn compute() {\n    let x = 1;\n}\n\npub fn wrapped(\n    a: u32,\n    b: u32,\n) -> u32 {\n    a + b\n}\n", []FunctionSpan{
+			{Name: "compute", Start: 1, End: 3},
+			{Name: "wrapped", Start: 5, End: 10},
+		}},
 		{"app/mod.py", "def run():\n    return 1\n", []FunctionSpan{{Name: "run", Start: 1, End: 2}}},
-		{"web/app.ts", "export function greet() {\n  return 1;\n}\n", []FunctionSpan{{Name: "greet", Start: 1, End: 3}}},
+		{"web/app.ts", "export function greet() {\n  return 1;\n}\n\nexport function combine(\n  a: number,\n  b: number,\n): number {\n  return a + b;\n}\n", []FunctionSpan{
+			{Name: "greet", Start: 1, End: 3},
+			{Name: "combine", Start: 5, End: 10},
+		}},
 		{"bin/run.sh", "#!/bin/sh\ndeploy() {\n  echo ok\n}\n", []FunctionSpan{{Name: "deploy", Start: 2, End: 4}}},
 		{"App.java", "class App {\n  void start() {\n  }\n}\n", []FunctionSpan{{Name: "start", Start: 2, End: 3}}},
+		{"src/add.c", "int add(\n    int a,\n    int b)\n{\n    return a + b;\n}\n", []FunctionSpan{{Name: "add", Start: 1, End: 6}}},
 	}
 	for _, tc := range cases {
 		got, err := ExtractFileFunctions(tc.rel, []byte(tc.src))

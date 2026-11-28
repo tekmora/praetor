@@ -1,0 +1,5 @@
+/// Returns x after applying two attributes.
+#[inline] #[must_use]
+pub fn pair(
+    x: u8,
+) -> u8 { x }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/docstrings"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
@@ -45,6 +46,7 @@ func newDocstringTestRepo(t *testing.T, baseFiles map[string]string) string {
 func writeTestFile(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	full := filepath.Join(dir, filepath.FromSlash(rel))
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- fixture directories need owner traversal.
 	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -225,6 +227,7 @@ func TestCheck_Boundary_SubmoduleGitlinkAndSymlinkSkipped(t *testing.T) {
 	headOID := runGitOut(t, dir, "rev-parse", "HEAD")
 
 	writeTestFile(t, dir, "pkg/a.go", "package pkg\n\n// Covered is documented.\nfunc Covered() {\n\t_ = 1\n}\n")
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- fixture directories need owner traversal.
 	if err := os.MkdirAll(filepath.Join(dir, "vendor", "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -476,4 +479,257 @@ func TestParsePrePushStdin_Deadline_3D(t *testing.T) {
 	if _, err := docstrings.ParsePrePushStdin(t.Context(), strings.NewReader(exactMax+"\n")); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("ParsePrePushStdin 1 MiB + 1 byte boundary: got err=%v, want exceeds error", err)
 	}
+}
+
+type docstringFixtureCase struct {
+	name          string
+	fixture       string
+	targetPath    string
+	passed        bool
+	counted       int
+	covered       int
+	uncoveredName string
+	uncoveredLine int
+}
+
+// readDocstringFixture reads data bytes and verifies the source suffix matches the reader's target language.
+func readDocstringFixture(t *testing.T, fixture, targetPath string) string {
+	t.Helper()
+	sourceName := strings.TrimSuffix(fixture, ".txt")
+	if util.SourceLanguage(sourceName) != util.SourceLanguage(targetPath) {
+		t.Fatalf("fixture %s and target %s select different languages", fixture, targetPath)
+	}
+	raw, err := os.ReadFile(filepath.Join("testdata", fixture))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", fixture, err)
+	}
+	return string(raw)
+}
+
+// TestCheck_FixtureDataNotSource verifies that no corpus file has a suffix the docstring reader inspects.
+func TestCheck_FixtureDataNotSource(t *testing.T) {
+	entries, err := os.ReadDir("testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected a nonempty fixture corpus")
+	}
+	dir := newDocstringTestRepo(t, map[string]string{"pkg/seed.go": "package pkg\n"})
+	for i := 0; i < len(entries); i++ {
+		name := entries[i].Name()
+		raw := readDocstringFixture(t, name, strings.TrimSuffix(name, ".txt"))
+		writeTestFile(t, dir, filepath.Join("testdata", name), raw)
+	}
+	writeTestFile(t, dir, "pkg/covered.go", "package pkg\n\n// Covered provides a counted control.\nfunc Covered() {}\n")
+	runGitCmd(t, dir, "add", ".")
+	restore := docstrings.SetTargetFileReaderForTest(func(ctx context.Context, repoDir, headRef, rel string) ([]byte, bool, error) {
+		if strings.HasPrefix(rel, "testdata/") {
+			return nil, false, errors.New("fixture carries a source extension: " + rel)
+		}
+		return docstrings.ReadTargetFileDefault(ctx, repoDir, headRef, rel)
+	})
+	defer restore()
+	rep, err := docstrings.Check(t.Context(), docstrings.Options{RepoDir: dir, BaseRef: "origin/main"})
+	assertDocstringReport(t, "fixture data excluded; documented control counted", rep, err, true, 1, 1)
+}
+
+// runDocstringFixtureCase checks coverage in a fresh git repository and returns the fixture source.
+func runDocstringFixtureCase(t *testing.T, tc docstringFixtureCase) string {
+	t.Helper()
+	raw := readDocstringFixture(t, tc.fixture, tc.targetPath)
+	dir := newDocstringTestRepo(t, map[string]string{"pkg/seed.go": "package pkg\n"})
+	writeTestFile(t, dir, tc.targetPath, raw)
+	runGitCmd(t, dir, "add", ".")
+	rep, err := docstrings.Check(t.Context(), docstrings.Options{RepoDir: dir, BaseRef: "origin/main"})
+	assertDocstringReport(t, tc.name, rep, err, tc.passed, tc.counted, tc.covered)
+	if tc.uncoveredName != "" {
+		if len(rep.Uncovered) == 0 || rep.Uncovered[0].Name != tc.uncoveredName || rep.Uncovered[0].Line != tc.uncoveredLine {
+			t.Fatalf("%s: want first uncovered %s:%d, got %+v", tc.name, tc.uncoveredName, tc.uncoveredLine, rep.Uncovered)
+		}
+	}
+	return raw
+}
+
+// TestCheck_RustMultilineSignaturesAndAttributes_3D verifies positive, negative, and boundary
+// docstring detection for Rust wrapped signatures, where clauses, and multi-line attributes.
+func TestCheck_RustMultilineSignaturesAndAttributes_3D(t *testing.T) {
+	cases := []docstringFixtureCase{
+		{"a_two_functions", "rust_a_two_functions.rs.txt", "src/lib.rs", true, 2, 2, "", 0},
+		{"b_multiline_attr_oneline_fn", "rust_b_multiline_attr_oneline_fn.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"c_multiline_attr_wrapped_fn", "rust_c_multiline_attr_wrapped_fn.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"d_wrapped_where_clause", "rust_d_wrapped_where_clause.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"e1_wrapped_no_comment", "rust_e1_wrapped_no_comment.rs.txt", "src/lib.rs", false, 1, 0, "wrapped_undoc", 1},
+		{"e2_wrapped_blank_line_separated", "rust_e2_wrapped_blank_line_separated.rs.txt", "src/lib.rs", false, 2, 1, "wrapped_after_blank", 7},
+		{"e3_wrapped_param_comment_only", "rust_e3_wrapped_param_comment_only.rs.txt", "src/lib.rs", false, 1, 0, "wrapped_param_comment", 1},
+		{"f_unclosed_attr_bound", "rust_f_unclosed_attr_bound.rs.txt", "src/lib.rs", false, 2, 0, "unclosed_attr", 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDocstringFixtureCase(t, tc)
+		})
+	}
+}
+
+// TestCheck_WrappedSignaturesAcrossLanguages_3D verifies wrapped function signatures across Go,
+// Python (with a multi-line decorator), TypeScript, and C (with the brace on its own line).
+func TestCheck_WrappedSignaturesAcrossLanguages_3D(t *testing.T) {
+	cases := []docstringFixtureCase{
+		{"go_positive", "go_wrapped_pos.go.txt", "pkg/wrapped.go", true, 1, 1, "", 0},
+		{"go_negative", "go_wrapped_neg.go.txt", "pkg/wrapped.go", false, 1, 0, "CombineUndoc", 3},
+		{"python_positive", "python_wrapped_pos.py.txt", "app/wrapped.py", true, 1, 1, "", 0},
+		{"python_negative", "python_wrapped_neg.py.txt", "app/wrapped.py", false, 1, 0, "combine_undoc", 5},
+		{"typescript_positive", "ts_wrapped_pos.ts.txt", "web/wrapped.ts", true, 1, 1, "", 0},
+		{"typescript_negative", "ts_wrapped_neg.ts.txt", "web/wrapped.ts", false, 1, 0, "combineUndoc", 1},
+		{"c_positive", "c_wrapped_pos.c.txt", "src/wrapped.c", true, 1, 1, "", 0},
+		{"c_negative", "c_wrapped_neg.c.txt", "src/wrapped.c", false, 1, 0, "combine_undoc", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDocstringFixtureCase(t, tc)
+		})
+	}
+}
+
+// TestCheck_AttributeRegressions_3D checks annotation runs and pins each uncovered function's header.
+func TestCheck_AttributeRegressions_3D(t *testing.T) {
+	cases := []docstringFixtureCase{
+		{"r1_single_quote_documented", "r1_single_quote_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"r1_single_quote_undocumented", "r1_single_quote_neg.ts.txt", "web/routes.ts", false, 1, 0, "route", 3},
+		{"r2_inline_item_documented", "r2_inline_item_pos.rs.txt", "src/lib.rs", true, 2, 2, "", 0},
+		{"r2_inline_item_undocumented", "r2_inline_item_neg.rs.txt", "src/lib.rs", false, 2, 1, "b", 3},
+		{"r3_rust_pair_documented", "r3_pair_pos.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"r3_rust_pair_undocumented", "r3_pair_neg.rs.txt", "src/lib.rs", false, 1, 0, "pair", 2},
+		{"r3_decorator_pair_documented", "r3_pair_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"r3_decorator_pair_undocumented", "r3_pair_neg.ts.txt", "web/routes.ts", false, 1, 0, "pair", 3},
+		{"r3_cpp_pair_documented", "r3_pair_pos.cpp.txt", "src/pair.cpp", true, 1, 1, "", 0},
+		{"r3_cpp_pair_undocumented", "r3_pair_neg.cpp.txt", "src/pair.cpp", false, 1, 0, "pair", 2},
+		{"r4_backtick_documented", "r4_backtick_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"r4_backtick_undocumented", "r4_backtick_neg.ts.txt", "web/routes.ts", false, 1, 0, "render", 3},
+		{"malformed_attributes", "malformed_attributes.rs.txt", "src/lib.rs", false, 2, 0, "mismatched", 5},
+		{"rust_inner_comment_documented", "rust_inner_comment_pos.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"rust_inner_comment_undocumented", "rust_inner_comment_neg.rs.txt", "src/lib.rs", false, 1, 0, "f", 6},
+		{"rust_inner_blank_documented", "rust_inner_blank_pos.rs.txt", "src/lib.rs", true, 1, 1, "", 0},
+		{"rust_inner_blank_undocumented", "rust_inner_blank_neg.rs.txt", "src/lib.rs", false, 1, 0, "f", 6},
+		{"python_inner_comment_documented", "python_inner_comment_pos.py.txt", "app/decorated.py", true, 1, 1, "", 0},
+		{"python_inner_comment_undocumented", "python_inner_comment_neg.py.txt", "app/decorated.py", false, 1, 0, "f", 7},
+		{"typescript_inner_comment_documented", "ts_inner_comment_pos.ts.txt", "web/routes.ts", true, 1, 1, "", 0},
+		{"typescript_inner_comment_undocumented", "ts_inner_comment_neg.ts.txt", "web/routes.ts", false, 1, 0, "route", 6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := runDocstringFixtureCase(t, tc)
+			if util.SourceLanguage(tc.targetPath) == "python" {
+				assertPythonDecoratorAnchor(t, raw, tc.passed)
+			}
+		})
+	}
+}
+
+// assertPythonDecoratorAnchor exercises the attribute reader directly because Python coverage uses a body docstring.
+func assertPythonDecoratorAnchor(t *testing.T, raw string, wantComment bool) {
+	t.Helper()
+	decorator, _, found := strings.Cut(raw, "\ndef ")
+	if !found {
+		t.Fatal("missing fixture function after decorator")
+	}
+	lines := strings.Split(decorator, "\n")
+	idx, ok := docstrings.SkipPythonDecoratorForTest(lines, len(lines)-1)
+	gotComment := ok && idx >= 0 && strings.HasPrefix(lines[idx], "#")
+	if gotComment != wantComment {
+		t.Fatalf("Python decorator anchor: got index=%d ok=%v, want comment=%v", idx, ok, wantComment)
+	}
+}
+
+// TestLaneAttributeLiterals pairs each literal fixture with and without a preceding doc comment.
+func TestLaneAttributeLiterals(t *testing.T) {
+	cases := []struct {
+		name, path, attribute string
+		singleLine            bool
+	}{
+		{"rust_raw_quote", "lib.rs", `#[cfg_attr(test, doc = r#"raw " ) ] tail"#)]`, true},
+		{"cpp_raw_quote", "lib.cpp", `[[deprecated(R"msg(old " ) ] text)msg")]]`, true},
+		{"ts_nested_template", "lib.ts", "@stamp(`outer ${`inner )`}`)", true},
+		{"rust_lifetime_token", "lib.rs", `#[attribute(for<'a> fn(&'a ()))]`, true},
+		{"rust_raw_multiline", "lib.rs", "#[cfg_attr(test, doc = r#\"first\nsecond\"#)]", false},
+		{"ts_multiline_template", "lib.ts", "@stamp(`first\nsecond`)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checkLaneAttributePair(t, tc.path, tc.attribute, tc.singleLine)
+		})
+	}
+}
+
+// TestLaneAttributeComments pairs comment-bearing attributes with and without documentation.
+func TestLaneAttributeComments(t *testing.T) {
+	cases := []struct{ name, path, attribute string }{
+		{"rust_block_comment", "lib.rs", "#[inline] /* reason */"},
+		{"rust_block_comment_delimiter", "lib.rs", "#[inline /* ] */]"},
+		{"ts_block_comment", "lib.ts", "@stamp('ok') /* reason */"},
+		{"rust_wrapped_blank", "lib.rs", "#[cfg_attr(\n\n    test, inline\n)]"},
+		{"rust_wrapped_comment", "lib.rs", "#[cfg_attr(\n    // )] ignored\n    test, inline\n)]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checkLaneAttributePair(t, tc.path, tc.attribute, true)
+		})
+	}
+}
+
+// checkLaneAttributePair compares the documented and undocumented twins through the source reader.
+func checkLaneAttributePair(t *testing.T, path, attribute string, coversComment bool) {
+	t.Helper()
+	prefix, suffix := "", "fn f() {}\n"
+	switch util.SourceLanguage(path) {
+	case "cpp":
+		suffix = "void f() {}\n"
+	case "typescript":
+		prefix, suffix = "class Example {\n", "f() {}\n}\n"
+	}
+	t.Run("documented", func(t *testing.T) {
+		checkLaneAttribute(t, path, prefix+"// Documents f.\n"+attribute+"\n"+suffix, coversComment)
+	})
+	t.Run("undocumented", func(t *testing.T) {
+		checkLaneAttribute(t, path, prefix+attribute+"\n"+suffix, false)
+	})
+}
+
+// checkLaneAttribute verifies documentation attaches to exactly the fixture's function.
+func checkLaneAttribute(t *testing.T, path, source string, want bool) {
+	t.Helper()
+	data := []byte(source)
+	functions, err := hiss.ExtractFileFunctions(path, data)
+	if err != nil || len(functions) != 1 || functions[0].Name != "f" {
+		t.Fatalf("expected only f, got %v, %v", functions, err)
+	}
+	if got := docstrings.HasDocstring(path, data, strings.Split(source, "\n"), functions[0]); got != want {
+		t.Errorf("HasDocstring = %v, want %v", got, want)
+	}
+}
+
+// TestCheck_Boundary_MaxAttributeLines_3D verifies the exact 32-line scalar bound on attribute
+// skipping: a 32-line balanced attribute passes, a 33-line attribute fails as undocumented, and
+// quoted brackets, comments, and blank lines do not desynchronise the delimiter walk.
+func TestCheck_Boundary_MaxAttributeLines_3D(t *testing.T) {
+	dir := newDocstringTestRepo(t, map[string]string{"pkg/seed.go": "package pkg\n"})
+
+	// Boundary positive: 32 attribute lines total (#[cfg_attr( + 30 inner lines + )]).
+	exact32 := "/// Documented at the exact 32-line attribute bound.\n#[cfg_attr(\n" +
+		strings.Repeat("    feature = \"a)]\", // trailing )]\n", 28) +
+		"    // Standalone )]\n\n" +
+		")]\npub fn at_bound(\n    a: u32,\n) -> u32 {\n    a\n}\n"
+	writeTestFile(t, dir, "src/lib.rs", exact32)
+	runGitCmd(t, dir, "add", ".")
+	repAt, err := docstrings.Check(t.Context(), docstrings.Options{RepoDir: dir, BaseRef: "origin/main"})
+	assertDocstringReport(t, "exact 32-line attribute", repAt, err, true, 1, 1)
+
+	// Boundary negative: 33 attribute lines total (#[cfg_attr( + 31 inner lines + )]).
+	over33 := "/// Documented above a 33-line attribute exceeding the bound.\n#[cfg_attr(\n" +
+		strings.Repeat("    feature = \"a\",\n", 29) +
+		"    // Standalone )]\n\n" +
+		")]\npub fn over_bound(\n    a: u32,\n) -> u32 {\n    a\n}\n"
+	writeTestFile(t, dir, "src/lib.rs", over33)
+	repOver, err := docstrings.Check(t.Context(), docstrings.Options{RepoDir: dir, BaseRef: "origin/main"})
+	assertDocstringReport(t, "33-line attribute exceeds bound", repOver, err, false, 1, 0)
 }

@@ -1,0 +1,7 @@
+class View {
+  // Returns the rendered response.
+  @Component(`a)b`)
+  render() {
+    return 1;
+  }
+}

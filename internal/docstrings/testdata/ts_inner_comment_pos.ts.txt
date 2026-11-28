@@ -1,0 +1,10 @@
+class Routes {
+  // Returns the route response.
+  @app.route(
+    // Delimiters in this comment are ignored: )]
+    '/fast',
+  )
+  route() {
+    return 1;
+  }
+}

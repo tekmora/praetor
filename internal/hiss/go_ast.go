@@ -61,7 +61,7 @@ func scanGoSource(data []byte, rel string, rep *ScanReport, opts ScanOptions) {
 func (g *goScanner) noteFunctions(file *ast.File) {
 	functions := extractGoFunctions(g.fset, file)
 	for i := 0; i < len(functions); i++ {
-		noteFunction(g.rep, functions[i].name, functions[i].start, functions[i].end)
+		noteFunction(g.rep, functions[i])
 	}
 }
 
