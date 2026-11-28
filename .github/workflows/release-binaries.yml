@@ -66,10 +66,10 @@ jobs:
           go-version: ${{ steps.setup-go.outputs.go-version }}
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
 
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        uses: anchore/sbom-action/download-syft@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
 
       # Pinned rather than latest so a new Helm release cannot change the packaged chart
       # between two tags. internal/deploychart's render, lint and package tests pass on this
@@ -77,7 +77,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.3.1
+          version: v4.3.2
 
       # dockers_v2 builds a multi-platform manifest list with buildx, which needs a
       # docker-container builder. The Dockerfile only copies prebuilt binaries and runs
