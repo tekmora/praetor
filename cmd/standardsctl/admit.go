@@ -13,40 +13,58 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/admission"
+	"github.com/cordanaLLM/praetor/internal/sentinel"
 )
 
 // admitUsage is the usage line `admit` prints on a malformed call.
-const admitUsage = "usage: praetorctl admit [--local] [--fallback MODE] [--label L] [--memory-high 16G] [--memory-max 24G] [--memory-swap-max 4G] [--min-available-gib 12] " +
+const admitUsage = "usage: praetorctl admit [--local] [--fallback MODE] [--class CLASS] [--label L] [--memory-high 16G] [--memory-max 24G] [--memory-swap-max 4G] [--min-available-gib 12] " +
 	"[--min-swap-free-gib 15] [--max-load N] [--wait 6h] [--timeout 6h] -- <command> [args...]"
+
+const admitClassPush = "push"
 
 const admitExecutorEnv = "PRAETOR_ADMIT_EXECUTOR"
 const admitExecutorsEnv = "PRAETOR_ADMIT_EXECUTORS"
+
+// admitHostStatsReader samples the local host for push-class policy capping; tests replace it with a stub.
+var admitHostStatsReader = admission.HostReader(".")
 
 // maxAdmitGiB bounds the memory thresholds a call may ask for, far above any workstation.
 const maxAdmitGiB = 1 << 20
 
 // admitOptions are the flags of one `admit` call.
 type admitOptions struct {
-	label        string
-	policy       admission.Policy
-	limits       admission.Limits
-	wait, poll   time.Duration
-	timeout      time.Duration
-	argv         []string
-	local        bool
-	defaultLoad  bool
-	fallbackMode string
+	label            string
+	admitClass       string
+	policy           admission.Policy
+	limits           admission.Limits
+	wait, poll       time.Duration
+	timeout          time.Duration
+	argv             []string
+	local            bool
+	defaultLoad      bool
+	explicitMinAvail bool
+	explicitMinSwap  bool
+	fallbackMode     string
 }
 
 // runAdmit is `praetorctl admit`: it holds a heavy step until the host has the memory, swap and
 // load the fleet's rule asks for (internal/admission), then runs it in its own memory-limited
 // systemd scope, and exits with the step's own status (#1131). Run it in the background: it
 // returns when the step ends, and prints one line when it is admitted.
-func runAdmit(args []string) error {
+func runAdmit(args []string) (resultErr error) {
 	opts, err := parseAdmit(args)
 	if err != nil {
 		return err
 	}
+	releasePush, err := acquirePushSlotIfNeeded(opts)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releasePush != nil {
+			resultErr = errors.Join(resultErr, releasePush())
+		}
+	}()
 	mode := os.Getenv(admitExecutorEnv)
 	if opts.local || mode == "local" {
 		return runLocalAdmit(opts)
@@ -59,6 +77,7 @@ func runAdmit(args []string) error {
 
 // runLocalAdmit waits for local host admission and runs the step on the workstation.
 func runLocalAdmit(opts admitOptions) error {
+	opts.policy = resolveAdmitPolicy(opts)
 	ctx, cancel := commandContext(opts.wait)
 	defer cancel()
 	label := opts.label + " on local (named)"
@@ -127,6 +146,23 @@ func runAdmittedRemoteStep(opts admitOptions, executor admission.Executor, info 
 	return admitStatus(code, err)
 }
 
+// acquirePushSlotIfNeeded takes the host push slot before load admission when class is push. The
+// slot wait has its own -wait context, so the load admission that follows keeps its full -wait and
+// a refusal at its deadline still exits 75 (the remote waiter reads rootContext, as before the slot).
+func acquirePushSlotIfNeeded(opts admitOptions) (func() error, error) {
+	if opts.admitClass != admitClassPush {
+		return nil, nil
+	}
+	release, err := admission.WaitPushSlot(rootContext(), opts.wait, opts.poll, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(os.Stderr, "%s admitted push slot for %s\n", time.Now().Format("15:04:05"), opts.label); err != nil {
+		return nil, errors.Join(err, release())
+	}
+	return release, nil
+}
+
 // logAdmitted writes the local admission timestamp, label, and verdict reason to standard error.
 func logAdmitted(label string, verdict admission.Verdict) error {
 	_, err := fmt.Fprintf(os.Stderr, "%s admitted %s: %s\n", time.Now().Format("15:04:05"), label, verdict.Reason)
@@ -159,6 +195,7 @@ func admitStatus(code int, err error) error {
 func parseAdmit(args []string) (admitOptions, error) {
 	fs := flag.NewFlagSet("admit", flag.ContinueOnError)
 	label := fs.String("label", "", "name of the step in admission lines and its scope (default: the command's name)")
+	admitClass := fs.String("class", "", "admission class: push takes the one host push gate slot before load admission")
 	local := fs.Bool("local", false, "run on the workstation explicitly; otherwise use "+admitExecutorsEnv)
 	fallback := fs.String("fallback", "", "when a remote executor loses a step mid-run, run on the workstation if MODE is local")
 	high := fs.String("memory-high", "16G", "MemoryHigh of the step's scope: above it the kernel reclaims from the step")
@@ -182,20 +219,73 @@ func parseAdmit(args []string) (admitOptions, error) {
 	if err != nil {
 		return admitOptions{}, err
 	}
-	if *fallback != "" && *fallback != "local" {
-		return admitOptions{}, fmt.Errorf("--fallback %q is invalid, use local", *fallback)
+	if err := validateAdmitClassAndFallback(*admitClass, *fallback); err != nil {
+		return admitOptions{}, err
 	}
-	opts := admitOptions{label: *label, policy: policy, limits: admission.Limits{MemoryHigh: *high, MemoryMax: *limit, MemorySwapMax: *swapMax},
+	opts := admitOptions{label: *label, admitClass: *admitClass, policy: policy, limits: admission.Limits{MemoryHigh: *high, MemoryMax: *limit, MemorySwapMax: *swapMax},
 		wait: *wait, poll: *poll, timeout: *timeout, argv: argv, local: *local, defaultLoad: true, fallbackMode: *fallback}
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "max-load" {
-			opts.defaultLoad = false
-		}
-	})
+	applyAdmitExplicitFlags(fs, &opts)
 	if opts.label == "" {
 		opts.label = argv[0]
 	}
 	return opts, opts.validate()
+}
+
+// resolveAdmitPolicy applies host-capped thresholds for push-class admission unless the caller set them.
+func resolveAdmitPolicy(opts admitOptions) admission.Policy {
+	if opts.admitClass != admitClassPush {
+		return opts.policy
+	}
+	stats, err := admitHostStatsReader()
+	if err != nil {
+		// The caller's policy is the fallback whether or not the warning reaches stderr.
+		if _, werr := fmt.Fprintf(os.Stderr, "%s push-class host-capped thresholds not applied: %v\n",
+			time.Now().Format("15:04:05"), err); werr != nil {
+			return opts.policy
+		}
+		return opts.policy
+	}
+	return applyPushHostPolicy(opts.policy, stats, opts.explicitMinAvail, opts.explicitMinSwap, opts.defaultLoad)
+}
+
+// applyPushHostPolicy caps push-class load thresholds to the host, keeping fields the caller set explicitly.
+func applyPushHostPolicy(base admission.Policy, stats sentinel.HostStats, explicitMinAvail, explicitMinSwap, defaultLoad bool) admission.Policy {
+	capped := admission.HostCappedPolicy(stats)
+	if !explicitMinAvail {
+		base.MinAvailableBytes = capped.MinAvailableBytes
+	}
+	if !explicitMinSwap {
+		base.MinSwapFreeBytes = capped.MinSwapFreeBytes
+	}
+	if defaultLoad {
+		base.MaxLoad1 = capped.MaxLoad1
+	}
+	return base
+}
+
+// validateAdmitClassAndFallback refuses unknown --class and --fallback values before options are built.
+func validateAdmitClassAndFallback(admitClass, fallback string) error {
+	if fallback != "" && fallback != "local" {
+		return fmt.Errorf("--fallback %q is invalid, use local", fallback)
+	}
+	if admitClass != "" && admitClass != admitClassPush {
+		return fmt.Errorf("--class %q is invalid, use push", admitClass)
+	}
+	return nil
+}
+
+// applyAdmitExplicitFlags marks push-class host-cap fields the caller set on the flag set.
+func applyAdmitExplicitFlags(fs *flag.FlagSet, opts *admitOptions) {
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "max-load":
+			opts.defaultLoad = false
+		case "min-available-gib":
+			opts.explicitMinAvail = true
+		case "min-swap-free-gib":
+			opts.explicitMinSwap = true
+		}
+	})
 }
 
 // admitPolicy constructs an admission policy from GiB thresholds and load average, refusing values exceeding maxAdmitGiB or negative loads.

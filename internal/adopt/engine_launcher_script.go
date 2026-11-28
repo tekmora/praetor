@@ -42,7 +42,10 @@ func engineUsesRepositoryPattern() string {
 	return pattern.String()
 }
 
-var engineLauncherScript = strings.ReplaceAll(engineLauncherTemplate, "@ENGINE_REPOSITORIES@", engineUsesRepositoryPattern())
+var engineLauncherScript = strings.NewReplacer(
+	"@ENGINE_REPOSITORIES@", engineUsesRepositoryPattern(),
+	"@PRE_PUSH_GATE_ARGS@", prePushGateArgs,
+).Replace(engineLauncherTemplate)
 
 // engineLauncherTemplate holds the text of the engine launcher (engineLauncherFile). It is a POSIX shell
 // script because a hook must resolve its engine before any Praetor binary runs, and it runs under
@@ -208,9 +211,36 @@ run_pinned() {                                                      #
     printf '%s\n' "$directory/$binary.exe"                                    #
     exit 0                                                                    #
   fi                                                                          #
-  if [ -x "$directory/$binary" ]; then exec "$directory/$binary" "$@"; fi     #
-  exec "$directory/$binary.exe" "$@"                                          #
+  if [ -x "$directory/$binary" ]; then                                        #
+    run_engine "$directory/$binary" "$@"                                      #
+  fi                                                                          #
+  run_engine "$directory/$binary.exe" "$@"                                    #
 }                                                                             #
+#
+# has_push_slot ENGINE: confirm the OS has Unix advisory locks and this engine advertises --class.
+has_push_slot() {                                                                                     #
+  kernel=$(uname -s 2>/dev/null) || return 1                                                          #
+  case "${OS-}:$kernel" in                                                                            #
+    Windows_NT:*) return 1 ;;                                                                         #
+    *:AIX | *:Darwin | *:DragonFly | *:FreeBSD | *:GNU | *:Linux | *:NetBSD | *:OpenBSD | *:SunOS) ;; #
+    *) return 1 ;;                                                                                    #
+  esac                                                                                                #
+  help=$("$1" admit --help 2>&1) || return 1                                                          #
+  [ -n "$(printf '%s\n' "$help" | sed -En '/^[[:space:]]*--?class[[:space:]]/p')" ]                   #
+}                                                                                                     #
+#
+# run_engine ENGINE ARGUMENT...: run one resolved engine, using the push queue only when supported.
+run_engine() {                                                                                                     #
+  engine=$1                                                                                                        #
+  shift                                                                                                            #
+  if [ "$#" -eq 4 ] && [ "$*" = "@PRE_PUSH_GATE_ARGS@" ]; then                                    #
+    if has_push_slot "$engine"; then                                                                               #
+      exec "$engine" admit --class push --local --label push-gate -- "$engine" "$@"                                #
+    fi                                                                                                             #
+    echo "praetor hooks: push slot unavailable on this platform or engine; running the verified gate directly" >&2 #
+  fi                                                                                                               #
+  exec "$engine" "$@"                                                                                              #
+}                                                                                                                  #
 #
 # watch_install PID: kill the installer PID once the timeout has passed. install_pinned runs it
 # in a subshell of its own, whose sleep goes with it when the install ends first.
@@ -298,7 +328,7 @@ if path=$(command -v praetorctl 2>/dev/null || command -v standardsctl 2>/dev/nu
   #
   echo "praetor hooks: no PRAETOR_REF pin or full PRAETOR_COMMIT pin under .github/workflows; running the engine on PATH: $path" >&2 #
   #
-  exec "$path" "$@"                                                                               #
+  run_engine "$path" "$@"                                                                         #
 fi                                                                                                #
 refuse "HISS governance hook cannot run because neither praetorctl nor standardsctl is installed" #
 `

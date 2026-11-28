@@ -52,6 +52,9 @@ SEMGREP_SUFFIXES = frozenset().union(*SEMGREP_LANGUAGE_EXTENSIONS.values())
 # deadline itself; this margin only keeps the hook from killing it before it can report
 # which deadline fired.
 GATE_LAUNCH_MARGIN = 120
+# The engine builds its slot implementation only on Go's Unix targets.
+PUSH_SLOT_PLATFORMS = ("aix", "android", "darwin", "dragonfly", "freebsd", "gnu",
+                       "illumos", "ios", "linux", "netbsd", "openbsd", "sunos")
 # Bounds `gate deadline --json`: a build of the CLI and one environment read.
 GATE_QUERY_TIMEOUT = 300
 # The repository's own CLI, built from the checked snapshot.
@@ -678,15 +681,21 @@ def gate_timeout(report):
 
 
 def run_full_gate(directory, packages=None):
+    """Run the gate with the available push admission, then verify its receipt separately."""
     command = [*CLI, "gate"]
     report = run([*command, "deadline", "--json"], cwd=directory, env=clean_env(),
                  timeout=GATE_QUERY_TIMEOUT)
     timeout = gate_timeout(report)
     scope = [] if packages is None else ["--race-packages=" + (",".join(packages) or "none")]
-    for subcommand in ("run", "verify"):
-        args = scope if subcommand == "run" else []
-        run([*command, subcommand, "--path=.", *args], cwd=directory, env=clean_env(),
-            timeout=timeout, capture=False)
+    gate = [*command, "run", "--path=.", *scope]
+    run_timeout = timeout
+    if sys.platform.startswith(PUSH_SLOT_PLATFORMS):
+        gate = [*CLI, "admit", "--class", "push", "--local", "--label", "push-gate",
+                "--wait", f"{timeout}s", "--timeout", f"{timeout}s", "--", *gate]
+        # Admit budgets the slot and load waits separately. The outer go run has its own launch.
+        run_timeout += 2 * timeout + GATE_LAUNCH_MARGIN
+    run(gate, cwd=directory, env=clean_env(), timeout=run_timeout, capture=False)
+    run([*command, "verify", "--path=."], cwd=directory, env=clean_env(), timeout=timeout, capture=False)
     return True
 
 

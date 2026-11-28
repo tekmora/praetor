@@ -40,11 +40,13 @@ const (
 	// prePushAuditArgs is the audit the generated pre-push hook runs: online, the live checks
 	// included.
 	prePushAuditArgs = "audit"
-	// prePushGateArgs is the gate the generated pre-push hook runs. It passes
+	// prePushGateArgs is the gate the launcher runs on the resolved engine. It passes
 	// gating.AdmitUnsupportedFlag, so a root with neither go.mod nor Cargo.lock (Meson, CMake,
 	// npm, Python) is admitted without a receipt, its unverified languages named, instead of every
 	// push being refused (#648); a Go or Cargo root is refused as before when its stages did not run.
 	prePushGateArgs = "gate run --path=. --" + gating.AdmitUnsupportedFlag
+	// prePushAdmissionNote records the launcher behavior in the generated configuration.
+	prePushAdmissionNote = "# The launcher uses push admission when the platform and engine support it.\n"
 	// govulnGateArgs is the Go vulnerability gate the generated pre-push security job runs where
 	// govulncheck is installed: govulncheck at symbol level, judged against the repository's
 	// OpenVEX document (internal/govuln), the check the gate run's security stage makes. The job
@@ -309,7 +311,7 @@ func lefthookHeader(shape lefthookShape) string {
 		"# (go.mod) or Cargo (Cargo.lock) toolchain stage ran. A root with neither\n" +
 		"# gets no receipt: the job names the languages it could not verify and\n" +
 		"# admits the push; a root with either fails when its stages did not run.\n" +
-		lefthookReuseNote(shape)
+		prePushAdmissionNote + lefthookReuseNote(shape)
 }
 
 // lefthookShape is what one lefthook.yml rendering carries jobs for: the languages

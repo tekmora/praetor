@@ -103,7 +103,7 @@ func runHookLine(t *testing.T, shell, line, stubDir, workDir string) (string, in
 // hookToolNames are the utilities the engine launcher and the fallback hook use, and nothing else:
 // a hook run sees only these and the stubs of the test, so a binary of the machine the test runs on
 // can never answer for an absent one.
-var hookToolNames = []string{"sh", "bash", "sed", "tr", "cut", "sort", "wc", "head", "env", "mkdir", "rm", "mv", "sleep", "cat", "chmod"}
+var hookToolNames = []string{"sh", "bash", "sed", "tr", "cut", "sort", "wc", "head", "env", "mkdir", "rm", "mv", "sleep", "cat", "chmod", "uname"}
 
 // linkTools links named tools into a fresh directory and returns it.
 func linkTools(t *testing.T, names ...string) string {

@@ -587,16 +587,26 @@ markers is migrated without `--force`, keeping its checkpoint jobs.
 the line against a stub reuse, and `TestReuseLintCommand_Negative_UnlabelledFileFailsTheJob`
 against the installed one.
 
-The pre-push `gate` job runs `gate run --path=. --admit-unsupported` (`prePushGateArgs`). A root
-with neither `go.mod` nor `Cargo.lock`, such as a Meson, CMake, npm or Python repository, gets no
-receipt, because the gate runs no toolchain for it: the job runs every other stage, names the
-languages it could not verify and admits the push instead of refusing every one. Where such a root's
-makefile declares `verify-all`, the job runs it first, and a failing `verify-all` refuses the push
+The pre-push `gate` job runs `sh .config/lefthook/engine.sh gate run --path=. --admit-unsupported`.
+On Unix, when the resolved engine advertises `--class`, the launcher runs the gate through
+`admit --class push --local`. Slot and load admission each use the resolved engine's default wait.
+Local load admission uses host-capped defaults from `HostCappedPolicy` in
+`internal/admission/admission.go`. The resolved engine runs `gate run --path=. --admit-unsupported`
+directly on other platforms or when its version predates the class flag.
+A root with neither `go.mod` nor `Cargo.lock`, such as a Meson, CMake, npm or Python
+repository, gets no receipt, because the gate runs no toolchain for it: the job runs every other
+stage, names the languages it could not verify and admits the push instead of refusing every one.
+Where such a root's makefile declares `verify-all`, the job runs it first, and a failing
+`verify-all` refuses the push
 ([A declared `verify-all` runs where no toolchain stage applies](adoption-verification.md#a-declared-verify-all-runs-where-no-toolchain-stage-applies)).
 A root with either marker still fails the job when its toolchain stages did not run
 ([The pre-push hook admits languages the gate has no runner for](adoption-verification.md#the-pre-push-hook-admits-languages-the-gate-has-no-runner-for)).
-`TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages` in
-`internal/adopt/lefthook_gate_admit_test.go` runs the job line against a stub.
+`TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages` and
+`TestLefthookGate_Positive_PrePushGateRunsGateThroughAdmit` in
+`internal/adopt/lefthook_gate_admit_test.go` run the job line against stubs;
+`TestApplyPushHostPolicy_Positive_NoSwapHostCapped` and
+`TestRunAdmit_PushClass_Boundary_NoSwapHostAdmits_3D` in `cmd/standardsctl/admit_push_policy_test.go`
+cover the push-class policy.
 
 The `rust-systems` and `rust-library` flavors describe this setting as pre-commit clippy and
 rustfmt enforcement, and `flavor audit` holds it to that: `lefthook.yml` satisfies it only when its `pre-commit` run
@@ -1038,16 +1048,17 @@ checks tracked Go package directories; a file in or below one conservatively
 selects Go tests, covering testdata and embedded inputs of any extension. Unknown
 file kinds still fail closed.
 
-The hook bounds the `gate run` and `gate verify` subprocesses by the gate's own run deadline,
-not by a figure of its own. `run_full_gate` in
+The canonical hook budgets for admission and the gate's full runtime. `run_full_gate` in
 [`checks.py`](https://github.com/cordanaLLM/praetor/blob/main/.config/lefthook/scripts/checks.py) first runs `gate deadline --json`, which
 resolves `PRAETOR_TEST_STAGE_TIMEOUT` through the pipeline's parser: the race-stage bound, clamped
 to its 30-minute ceiling, once per test suite the repository holds, plus the allowance for the
 other stages. It runs from the repository root, so a root holding both a `go.mod` and a
-`Cargo.lock` gets the two-suite deadline `gate run` grants itself. It then adds a two-minute
-launch margin (`GATE_LAUNCH_MARGIN`) for `go run` to rebuild the CLI. With the variable unset that
-is 8 + 2 = 10 minutes; at the ceiling it is 37 minutes, so a raised bound takes effect on a push
-(#314). A deadline report the hook cannot use fails the
+`Cargo.lock` gets the two-suite deadline `gate run` grants itself. It adds a two-minute
+launch margin (`GATE_LAUNCH_MARGIN`) for `go run` to rebuild the CLI. On Unix the hook gives
+the gate process, the push slot wait and the load wait that same budget each. The outer timeout
+covers all three budgets plus a separate `go run` launch margin for `admit`.
+`gate verify` runs separately after slot release with the gate deadline and launch margin.
+A deadline report the hook cannot use fails the
 push rather than running the gate under a guessed bound. The deadline itself is described in
 [adoption verification](adoption-verification.md#the-whole-runs-deadline).
 

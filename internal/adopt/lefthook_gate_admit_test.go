@@ -1,7 +1,9 @@
 package adopt
 
 import (
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,7 +40,6 @@ func strictGateFixtureNames(fixture string) []string {
 // flag's own constant, and its header says a root with neither go.mod nor Cargo.lock is admitted
 // without a receipt. Run against a recording stub, the line calls exactly those arguments.
 func TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages(t *testing.T) {
-	want := "gate run --path=. --" + gating.AdmitUnsupportedFlag
 	for _, languages := range lefthookLanguageSets {
 		for _, checkpoint := range []bool{false, true} {
 			rendered := buildLefthookYAMLFor(lefthookShape{languages: languages}, checkpoint)
@@ -46,7 +47,7 @@ func TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages(t *testing.
 			if err := yaml.Unmarshal([]byte(rendered), &decoded); err != nil {
 				t.Fatalf("languages=%v checkpoint=%v: %v", languages, checkpoint, err)
 			}
-			if got := decodedJob(t, decoded, "pre-push", "gate")["run"]; got != lefthookGovernedCommand(want) {
+			if got := decodedJob(t, decoded, "pre-push", "gate")["run"]; got != lefthookGovernedCommand(prePushGateArgs) {
 				t.Errorf("languages=%v checkpoint=%v: pre-push gate = %v", languages, checkpoint, got)
 			}
 			if !strings.Contains(rendered, "# gets no receipt: the job names the languages it could not verify and\n") {
@@ -60,8 +61,140 @@ func TestLefthookGate_Positive_PrePushGateAdmitsUnsupportedLanguages(t *testing.
 	if out, code := runHookLine(t, "sh", lefthookGovernedCommand(prePushGateArgs), stubs, work); code != 0 {
 		t.Fatalf("gate hook line exited %d: %s", code, out)
 	}
-	if got := mustRead(t, log); got != util.PraetorCLI+" "+want+"\n" {
+	if got := mustRead(t, log); !strings.HasSuffix(got, util.PraetorCLI+" gate run --path=. --"+gating.AdmitUnsupportedFlag+"\n") {
 		t.Fatalf("calls = %q", got)
+	}
+}
+
+// Positive: admit runs the resolved pinned engine and gate subcommand after --, even when the
+// pin's cache path contains spaces and a different engine is on PATH.
+func TestLefthookGate_Positive_PrePushGateRunsGateThroughAdmit(t *testing.T) {
+	f := newEngineFixture(t)
+	f.cache = filepath.Join(f.cache, "engine cache")
+	directory := f.cached(enginePin)
+	f.declare("gate.yml", "env:\n  PRAETOR_REF: "+enginePin+"\n")
+	writeStub(t, f.stubs, util.PraetorCLI, "exit 99\n")
+	writeStub(t, f.stubs, "uname", "printf '%s\\n' Linux\n")
+	admitPassthroughStub(t, directory, util.LegacyCLI, f.log, 0)
+	if out, code := f.runLine(generatedPrePushGate(t), "OS="); code != 0 {
+		t.Fatalf("gate hook line exited %d: %s", code, out)
+	}
+	got := mustRead(t, f.log)
+	pinned := filepath.Join(directory, util.LegacyCLI)
+	if !strings.Contains(got, "admit --class push --local --label push-gate -- "+pinned+" gate run") {
+		t.Fatalf("admit must run the pinned gate with the engine's default wait: %q", got)
+	}
+	if !strings.Contains(got, util.LegacyCLI+" gate run --path=. --"+gating.AdmitUnsupportedFlag) {
+		t.Fatalf("inner gate subcommand not executed: %q", got)
+	}
+}
+
+// admitPassthroughStub advertises push admission, logs every call and executes the argv after admit's --.
+func admitPassthroughStub(t *testing.T, dir, name, log string, code int) {
+	t.Helper()
+	body := "set -eu\necho \"" + name + " $*\" >> '" + log + "'\n" +
+		"case \"$1\" in\nadmit)\n  shift\n" +
+		"  if [ \"$1\" = --help ]; then printf 'Usage of admit:\\n  -class string\\n' >&2; exit 0; fi\n" +
+		"  while [ $# -gt 0 ]; do [ \"$1\" = \"--\" ] && shift && break; shift; done\n" +
+		"  exec \"$@\"\n  ;;\nesac\nexit " + strconv.Itoa(code) + "\n"
+	writeStub(t, dir, name, body)
+}
+
+// generatedPrePushGate returns the actual gate command from the generated Go hook.
+func generatedPrePushGate(t *testing.T) string {
+	t.Helper()
+	rendered := buildLefthookYAMLFor(lefthookShape{languages: hisscatalog.LanguageGo}, false)
+	var decoded map[string]any
+	if err := yaml.Unmarshal([]byte(rendered), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	command, ok := decodedJob(t, decoded, "pre-push", "gate")["run"].(string)
+	if !ok {
+		t.Fatal("generated gate has no run command")
+	}
+	return command
+}
+
+// TestReview2044GeneratedPrePushRunsOnNonUnix exercises the direct gate when the launcher cannot
+// confirm the platform supports push slots.
+func TestReview2044GeneratedPrePushRunsOnNonUnix(t *testing.T) {
+	const engine = `case "$*" in
+  "admit --help") printf 'Usage of admit:\n  -class string\n' >&2 ;;
+  admit*) echo 'push slot: host push slot leases require Unix advisory file locks' >&2; exit 1 ;;
+  "gate run --path=. --admit-unsupported") echo 'verified gate' ;;
+  *) exit 2 ;;
+esac
+`
+	for _, tc := range []struct{ name, osEnv, uname string }{
+		{"Windows", "OS=Windows_NT", "printf '%s\\n' MINGW64_NT-10.0\n"},
+		{"unknown uname", "OS=", "printf '%s\\n' unknown\n"},
+		{"failed uname", "OS=", "printf '%s\\n' Linux\nexit 1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEngineFixture(t)
+			writeStub(t, f.stubs, "uname", tc.uname)
+			writeStub(t, f.stubs, util.PraetorCLI, engine)
+			out, code := f.runLine(generatedPrePushGate(t), tc.osEnv)
+			if code != 0 || !strings.Contains(out, "verified gate") {
+				t.Fatalf("direct gate: exit %d, output %q", code, out)
+			}
+		})
+	}
+}
+
+// TestReview2044PrePushWithOlderEngine exercises both the resolved PATH engine and a pinned
+// engine that lacks --class, even when a newer engine is installed on PATH.
+func TestReview2044PrePushWithOlderEngine(t *testing.T) {
+	const older = `case "$*" in
+  "admit --help") printf 'Usage of admit:\n  -wait duration\n' >&2 ;;
+  admit*) echo 'flag provided but not defined: -class' >&2; exit 1 ;;
+  "gate run --path=. --admit-unsupported") echo 'verified old engine gate' ;;
+  *) exit 2 ;;
+esac
+`
+	for _, name := range []string{"PATH", "pin", "edited launcher"} {
+		t.Run(name, func(t *testing.T) {
+			f := newEngineFixture(t)
+			if name == "pin" {
+				directory := f.cached(enginePin)
+				f.declare("gate.yml", "env:\n  PRAETOR_REF: "+enginePin+"\n")
+				writeStub(t, f.stubs, util.PraetorCLI, "printf '  -class string\\n' >&2\nexit 2\n")
+				writeStub(t, directory, util.LegacyCLI, older)
+			} else {
+				writeStub(t, f.stubs, util.PraetorCLI, older)
+			}
+			if name == "edited launcher" {
+				mustWrite(t, filepath.Join(f.work, engineLauncherFile), "#!/bin/sh\nexec praetorctl \"$@\"\n# local edit\n")
+			}
+			writeStub(t, f.stubs, "uname", "printf '%s\\n' Linux\n")
+			out, code := f.runLine(generatedPrePushGate(t), "OS=")
+			if code != 0 || !strings.Contains(out, "verified old engine gate") {
+				t.Fatalf("old engine gate: exit %d, output %q", code, out)
+			}
+		})
+	}
+}
+
+// TestReview2044PreviousGoRenderingMigrates exercises the exact Go rendering from the parent
+// commit with its original direct gate, then checks that a locally edited copy stays untouched.
+func TestReview2044PreviousGoRenderingMigrates(t *testing.T) {
+	previous := mustRead(t, "testdata/lefthook/before-push-slot-go-reuse.lefthook.yml")
+	markers := map[string]string{"go.mod": goModMarker}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	repo, rep := adoptMarkedRepo(t, "previous-go-gate", markers, previous)
+	reconciled := hasAction(rep, lefthookFile, actionReconcile)
+	activated := fileExists(filepath.Join(repo, ".git", "hooks", preCommitHook))
+	if !reconciled || !activated {
+		t.Errorf("exact previous rendering: reconciled=%t activated=%t", reconciled, activated)
+	}
+	edited := previous + "# local edit\n"
+	repo, rep = adoptMarkedRepo(t, "edited-previous-go-gate", markers, edited)
+	retained := mustRead(t, filepath.Join(repo, lefthookFile)) == edited
+	skipped := hasAction(rep, lefthookFile, actionSkip)
+	activated = fileExists(filepath.Join(repo, ".git", "hooks", preCommitHook))
+	if !retained || !skipped || activated {
+		t.Errorf("locally edited previous rendering: retained=%t skipped=%t activated=%t", retained, skipped, activated)
 	}
 }
 

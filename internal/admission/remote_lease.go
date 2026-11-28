@@ -53,19 +53,20 @@ func executorLeaseDir(name string) (string, error) {
 	if !validExecutorName(name) {
 		return "", fmt.Errorf("executor %s: invalid or reserved executor name", name)
 	}
+	label := "executor " + name
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
 		uid := os.Getuid()
 		base = filepath.Join(os.TempDir(), fmt.Sprintf("praetor-admit-%d", uid))
 		if err := ensurePrivateRuntimeDir(base, uid); err != nil {
-			return "", fmt.Errorf("executor %s: lease directory: %w", name, err)
+			return "", fmt.Errorf("%s: lease directory: %w", label, err)
 		}
 	}
 	dir := filepath.Join(base, executorLeasesDir, name)
-	// #nosec G703 -- name matches validExecutorName (alphanumeric, no path separators) under the user's runtime directory.
+	// #nosec G703 -- name matches validExecutorName (no path separators) under the user's runtime directory.
 	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a lease directory needs the owner search bit; 0o700 is least privilege
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("executor %s: lease directory: %w", name, err)
+		return "", fmt.Errorf("%s: lease directory: %w", label, err)
 	}
 	return dir, nil
 }
@@ -94,17 +95,22 @@ func createExecutorLease(name, dir string, root *os.Root) (string, func() error,
 		return "", nil, fmt.Errorf("executor %s: lease token: %w", name, err)
 	}
 	ownName := fmt.Sprintf("%d-%s.lock", os.Getpid(), hex.EncodeToString(token[:]))
+	return createLockedLease(name, dir, root, ownName, "executor "+name+" lease")
+}
+
+// createLockedLease creates ownName under dir, flock-holds it, and returns a release closure.
+func createLockedLease(label, dir string, root *os.Root, ownName, lockLabel string) (string, func() error, error) {
 	tmpName := "." + ownName + ".tmp"
-	unlock, busy, err := util.LockPrivateFile(root, tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, "executor "+name+" lease")
+	unlock, busy, err := util.LockPrivateFile(root, tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, lockLabel)
 	if err != nil {
-		return "", nil, fmt.Errorf("executor %s: lease directory: %w", name, err)
+		return "", nil, fmt.Errorf("%s: lease directory: %w", label, err)
 	}
 	if busy {
-		return "", nil, fmt.Errorf("executor %s: lease %s already held", name, ownName)
+		return "", nil, fmt.Errorf("%s: lease %s already held", label, ownName)
 	}
 	ownPath := filepath.Join(dir, ownName)
 	if err := os.Rename(filepath.Join(dir, tmpName), ownPath); err != nil {
-		return "", nil, errors.Join(fmt.Errorf("executor %s: lease directory: %w", name, err), root.Remove(tmpName), unlock())
+		return "", nil, errors.Join(fmt.Errorf("%s: lease directory: %w", label, err), root.Remove(tmpName), unlock())
 	}
 	var once sync.Once
 	var releaseErr error
@@ -145,7 +151,7 @@ func countExecutorLeases(name, ownName string, root *os.Root) (int, error) {
 
 // peerExecutorLeaseNames lists peer .lock filenames in root and refuses when total .lock files exceed maxExecutorLeaseFiles.
 func peerExecutorLeaseNames(name, ownName string, root *os.Root) ([]string, error) {
-	entries, err := readExecutorLeaseEntries(name, root)
+	entries, err := readLeaseEntries("executor "+name, root)
 	if err != nil {
 		return nil, err
 	}
@@ -167,33 +173,38 @@ func peerExecutorLeaseNames(name, ownName string, root *os.Root) ([]string, erro
 	return peers, nil
 }
 
-// readExecutorLeaseEntries reads up to maxExecutorLeaseDirEntries plus one directory entries from the lease root.
-func readExecutorLeaseEntries(name string, root *os.Root) ([]os.DirEntry, error) {
+// readLeaseEntries reads a bounded number of directory entries from the lease root.
+func readLeaseEntries(label string, root *os.Root) ([]os.DirEntry, error) {
 	f, err := root.Open(".")
 	if err != nil {
-		return nil, fmt.Errorf("executor %s: lease directory: %w", name, err)
+		return nil, fmt.Errorf("%s: lease directory: %w", label, err)
 	}
 	entries, readErr := f.ReadDir(maxExecutorLeaseDirEntries + 1)
 	if errors.Is(readErr, io.EOF) {
 		readErr = nil
 	}
 	if err := errors.Join(readErr, f.Close()); err != nil {
-		return nil, fmt.Errorf("executor %s: lease directory: %w", name, err)
+		return nil, fmt.Errorf("%s: lease directory: %w", label, err)
 	}
 	if len(entries) > maxExecutorLeaseDirEntries {
-		return nil, fmt.Errorf("executor %s: %w (%d)", name, ErrExecutorLeaseCap, maxExecutorLeaseFiles)
+		return nil, fmt.Errorf("%s: %w (%d)", label, ErrExecutorLeaseCap, maxExecutorLeaseFiles)
 	}
 	return entries, nil
 }
 
 // probeExecutorLease tests whether a lease file is actively locked, removing stale unheld lock files.
 func probeExecutorLease(name string, root *os.Root, entryName string) (bool, error) {
-	unlock, busy, err := util.LockPrivateFile(root, entryName, os.O_RDONLY, "executor "+name+" lease")
+	return probeLeaseFile("executor "+name, root, entryName, "executor "+name+" lease")
+}
+
+// probeLeaseFile tests whether a lease file is actively locked, removing stale unheld lock files.
+func probeLeaseFile(label string, root *os.Root, entryName, lockLabel string) (bool, error) {
+	unlock, busy, err := util.LockPrivateFile(root, entryName, os.O_RDONLY, lockLabel)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("executor %s: %w", name, err)
+		return false, fmt.Errorf("%s: %w", label, err)
 	}
 	if busy {
 		return true, nil
@@ -203,7 +214,7 @@ func probeExecutorLease(name string, root *os.Root, entryName string) (bool, err
 		removeErr = nil
 	}
 	if err := errors.Join(removeErr, unlock()); err != nil {
-		return false, fmt.Errorf("executor %s: remove stale lease %s: %w", name, entryName, err)
+		return false, fmt.Errorf("%s: remove stale lease %s: %w", label, entryName, err)
 	}
 	return false, nil
 }

@@ -106,6 +106,39 @@ func TestAdopt_Negative_EditedPriorLefthookPreserved(t *testing.T) {
 // lefthookLanguageSets are the language sets lefthook.yml renders distinct jobs for.
 var lefthookLanguageSets = []hisscatalog.Language{0, hisscatalog.LanguageGo, hisscatalog.LanguageRust, lefthookJobLanguages}
 
+// TestPriorLefthookDigests_Boundary_PrePushSlotShapes covers every distinct prior rendering.
+func TestPriorLefthookDigests_Boundary_PrePushSlotShapes(t *testing.T) {
+	for _, languages := range lefthookLanguageSets {
+		for _, reuse := range []bool{false, true} {
+			for _, tool := range []bool{false, true} {
+				if tool && languages&hisscatalog.LanguageGo == 0 {
+					continue
+				}
+				shape := lefthookShape{languages: languages, reuse: reuse, toolGovuln: tool}
+				for _, checkpoint := range []bool{false, true} {
+					assertPrePushSlotPriorRendering(t, shape, checkpoint)
+				}
+			}
+		}
+	}
+}
+
+// assertPrePushSlotPriorRendering checks the pre-admission rendering in both checkout line endings.
+func assertPrePushSlotPriorRendering(t *testing.T, shape lefthookShape, checkpoint bool) {
+	t.Helper()
+	current := buildLefthookYAMLFor(shape, checkpoint)
+	previous := strings.Replace(current, prePushAdmissionNote, "", 1)
+	if previous == current {
+		t.Fatal("current rendering has no push admission note")
+	}
+	if !isPriorLefthookConfig([]byte(previous)) || !isPriorLefthookConfig([]byte(crlfText(previous))) {
+		t.Errorf("prior rendering not recognised for %+v checkpoint=%t", shape, checkpoint)
+	}
+	if isPriorLefthookConfig([]byte(previous + "# local edit\n")) {
+		t.Errorf("locally edited rendering recognised for %+v checkpoint=%t", shape, checkpoint)
+	}
+}
+
 // Boundary: no current rendering, for any language set, is a prior one (none needs migration),
 // and a prior rendering that lost its final newline is no longer exact.
 func TestIsPriorLefthookConfig_Boundary_CurrentAndTruncated(t *testing.T) {

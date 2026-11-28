@@ -27,6 +27,9 @@ const (
 	maxExecutorLeaseFiles = 256
 )
 
+// ErrPushSlotHeld is returned when a push-class step gives up waiting for the host push slot.
+var ErrPushSlotHeld = errors.New("push slot still held")
+
 // ErrExecutorLeaseCap is raised when an executor's lease directory exceeds maxExecutorLeaseFiles lock files.
 var ErrExecutorLeaseCap = errors.New("lease directory exceeds lock file limit")
 

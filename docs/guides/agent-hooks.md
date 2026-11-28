@@ -1241,6 +1241,12 @@ taken from the command:
 [BLOCKED BY HISS] heavy step needs host admission: go test; run: PRAETOR_ADMIT_EXECUTORS=<executor list> praetorctl admit --label go-test -- <command> or praetorctl admit --local --label go-test -- <command>, in background; admit waits for memory, swap and load headroom (docs/guides/admission.md)
 ```
 
+The pre-push gate and `run_full_gate` in `.config/lefthook/scripts/checks.py` wrap the gate in
+`praetorctl admit --class push --local --label push-gate --` so only one push gate runs on the
+host at a time. The push class takes that slot before load and memory admission, serves waiters
+first come, first served by lease request time, and releases the slot when the step exits for any
+reason ([admission for heavy local steps](admission.md)).
+
 A `git push` has a second admitted form, `PRAETOR_ADMIT=<label> git push ...`, for a
 worktree-isolated Claude Code session, which refuses git named under a launcher such as
 `praetorctl admit`. The check reads the assignment only in front of that push and admits it

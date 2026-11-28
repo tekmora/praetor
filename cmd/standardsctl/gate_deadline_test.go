@@ -7,12 +7,125 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/gating"
 	"github.com/cordanaLLM/praetor/internal/testsupport"
+	"github.com/cordanaLLM/praetor/internal/util"
 )
+
+// TestReview2044HookDeadlineReservesGateRuntime executes the hook budget against a stand-in gate.
+func TestReview2044HookDeadlineReservesGateRuntime(t *testing.T) {
+	runHookDeadlineFixture(t, hookDeadlineFixture)
+}
+
+// runHookDeadlineFixture runs a stubbed hook budget check and returns its stdout.
+func runHookDeadlineFixture(t *testing.T, script string) string {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required to exercise the hook budget")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	dir := filepath.Join("..", "..", ".config", "lefthook", "scripts")
+	skipWithoutHookStdlib(ctx, t, dir, python)
+	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", hookFixturePrelude+script)
+	if err != nil {
+		t.Fatalf("stubbed hook budget: %v\n%s\n%s", err, out.Stdout, out.Stderr)
+	}
+	return string(out.Stdout)
+}
+
+// skipWithoutHookStdlib skips when python lacks a standard-library module the hook module checks.py imports: the gate's
+// toolchain container ships a python3 without concurrent and unittest, while the hooks run on the host python. A missing
+// module that lives beside checks.py, or any other import failure, fails the test.
+func skipWithoutHookStdlib(ctx context.Context, t *testing.T, dir, python string) {
+	t.Helper()
+	out, err := util.RunCommandBytes(ctx, dir, python, 8192, "-B", "-c", "import checks")
+	if err == nil {
+		return
+	}
+	stderr := string(out.Stderr)
+	const marker = "No module named '"
+	at := strings.LastIndex(stderr, marker)
+	if at < 0 {
+		t.Fatalf("import checks: %v\n%s", err, stderr)
+	}
+	name, _, ok := strings.Cut(stderr[at+len(marker):], "'")
+	top, _, _ := strings.Cut(name, ".")
+	if !ok || top == "" {
+		t.Fatalf("import checks: unreadable module name: %v\n%s", err, stderr)
+	}
+	for _, local := range []string{top + ".py", top} {
+		if _, statErr := os.Stat(filepath.Join(dir, local)); statErr == nil {
+			t.Fatalf("import checks: hook module %s is missing a local import %q: %v\n%s", dir, name, err, stderr)
+		}
+	}
+	t.Skipf("%s has no standard-library module %q that checks.py imports (minimal toolchain python); the hooks run on the host python", python, name)
+}
+
+// hookFixturePrelude gives the hook fixtures patch.object without unittest: the gate's toolchain container
+// ships a python3 without the unittest package (push gate of PR 2044, 2026-11-24).
+const hookFixturePrelude = `
+class _Patch:
+    def __init__(self, target, name, value):
+        self.target, self.name, self.value = target, name, value
+
+    def __enter__(self):
+        self.saved = getattr(self.target, self.name)
+        setattr(self.target, self.name, self.value)
+
+    def __exit__(self, *exc):
+        setattr(self.target, self.name, self.saved)
+        return False
+
+
+class patch:
+    @staticmethod
+    def object(target, name, value):
+        return _Patch(target, name, value)
+`
+
+// hookDeadlineFixture spends time in both admission and gate work, using only stand-in processes.
+const hookDeadlineFixture = `
+from pathlib import Path
+import subprocess
+import sys
+import checks
+
+calls = []
+
+def run(argv, *, timeout, **kwargs):
+    if argv[3:5] == ["gate", "deadline"]:
+        return b'{"timeout_seconds": 1}'
+    calls.append((argv[3:5], timeout))
+    if argv[3] == "gate":
+        return b""
+    child = "import time; time.sleep(0.65); time.sleep(0.65); time.sleep(0.65); print('gate complete')"
+    result = subprocess.run([sys.executable, "-B", "-c", child],
+                            timeout=timeout, capture_output=True, check=True)
+    assert result.stdout.strip() == b"gate complete", result.stdout
+    assert argv[argv.index("--wait") + 1] == "1.25s", argv
+    assert argv[argv.index("--timeout") + 1] == "1.25s", argv
+    return b""
+
+with patch.object(checks.sys, "platform", "linux"), \
+     patch.object(checks, "GATE_LAUNCH_MARGIN", 0.25), \
+     patch.object(checks, "run", run):
+    assert checks.run_full_gate(Path("."))
+assert calls == [(["admit", "--class"], 4), (["gate", "verify"], 1.25)], calls
+
+calls.clear()
+with patch.object(checks.sys, "platform", "win32"), patch.object(checks, "run", run):
+    assert checks.run_full_gate(Path("."))
+assert calls == [(["gate", "run"], 121), (["gate", "verify"], 121)], calls
+`
 
 // pipelineCall is what a stubbed gating pipeline was handed.
 type pipelineCall struct {

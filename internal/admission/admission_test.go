@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,7 +93,8 @@ func TestRemoteReadings_RequireMeasuredThresholds(t *testing.T) {
 	}
 }
 
-// TestMain lets the test binary re-run itself as a memory hog for the planted spike.
+// TestMain lets the test binary re-run itself as a memory hog for the planted spike and keeps the
+// host push slot off every test unless a case overrides PRAETOR_TEST_PUSH_SLOT_BASE.
 func TestMain(m *testing.M) {
 	if os.Getenv(hogEnv) == "1" {
 		hog := make([]byte, 1<<30)
@@ -101,7 +103,14 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	pushCleanup, err := IsolatePushSlotForTestProcess()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "isolate push slot: %v\n", err)
+		os.Exit(2)
+	}
+	code := m.Run()
+	pushCleanup()
+	os.Exit(code)
 }
 
 var policy = Policy{MinAvailableBytes: 12 * gib, MinSwapFreeBytes: 15 * gib, MaxLoad1: 40}
