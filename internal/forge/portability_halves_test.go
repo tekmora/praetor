@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/hiss"
 )
 
 // portabilityWorkflow is the engine's platform matrix, read from the repository root.
@@ -53,6 +54,7 @@ func findJobStep(job ghworkflow.Job, name string) (ghworkflow.Step, bool) {
 	return ghworkflow.Step{}, false
 }
 
+// stepHalvesProblem reports why a step's half regex is missing, invalid, or not paired with exactly one matching go test command per form, or returns an empty string when all checks pass.
 func stepHalvesProblem(step, pkg, half string) string {
 	m := regexp.MustCompile(regexp.QuoteMeta(half) + `='([^']+)'`).FindStringSubmatch(step)
 	if m == nil {
@@ -61,9 +63,26 @@ func stepHalvesProblem(step, pkg, half string) string {
 	if _, err := regexp.Compile(m[1]); err != nil {
 		return "the " + half + " pattern does not compile: " + err.Error()
 	}
-	for _, flag := range []string{"-run", "-skip"} {
-		want := `go test -json -timeout 30m ` + flag + ` "$` + half + `" "$` + pkg + `"`
-		if strings.Count(step, want) != 1 {
+	source, ok := hiss.WorkflowShellCommandSource(step, maxTimeoutWorkflowLines)
+	if !ok {
+		return "unreadable shell run script or shell reader bound"
+	}
+	for _, args := range []string{
+		`"${packages[@]##-*}"`,
+		`"${adopt##-*}"`,
+		`-run "$` + half + `" "${` + pkg + `##-*}"`,
+		`-skip "$` + half + `" "${` + pkg + `##-*}"`,
+	} {
+		want := `go test -json -timeout 30m ` + args
+		expected := strings.Fields(want)
+		count := 0
+		for _, command := range source.Commands {
+			words := command.Words
+			if halvesCommandHasPrefix(expected, len(words), func(i int) string { return words[i].Text }) {
+				count++
+			}
+		}
+		if count != 1 {
 			return "not exactly one " + want
 		}
 	}
@@ -71,6 +90,57 @@ func stepHalvesProblem(step, pkg, half string) string {
 		return "the main run does not leave out $" + pkg
 	}
 	return ""
+}
+
+// halvesCommandHasPrefix compares the expected words with the start of a command.
+func halvesCommandHasPrefix(expected []string, wordCount int, wordAt func(int) string) bool {
+	// Admit the literal command wrapper, not arbitrary prefixes or its options.
+	start := 0
+	if wordCount > 0 && wordAt(0) == "command" {
+		start = 1
+	}
+	if wordCount-start < len(expected) {
+		return false
+	}
+	for i, word := range expected {
+		if wordAt(start+i) != word {
+			return false
+		}
+	}
+	return true
+}
+
+// TestPortability_CommentCannotSupplyPackageSelection verifies that commented-out or echoed go test invocations are not counted as package-selecting commands by stepHalvesProblem.
+func TestPortability_CommentCannotSupplyPackageSelection(t *testing.T) {
+	const head = `go test -json -timeout 30m`
+	const main = head + ` "${packages[@]##-*}"`
+	const adopt = head + ` "${adopt##-*}"`
+	step := strings.Join([]string{
+		`cli_half='^TestA$'`,
+		`grep -v -e "$cli" input`,
+		main,
+		adopt,
+		head + ` -run "$cli_half" "${cli##-*}"`,
+		head + ` -skip "$cli_half" "${cli##-*}"`,
+	}, "\n")
+	if problem := stepHalvesProblem(step, "cli", "cli_half"); problem != "" {
+		t.Fatalf("valid step: %s", problem)
+	}
+	if problem := stepHalvesProblem(strings.Replace(step, main, "command "+main, 1), "cli", "cli_half"); problem != "" {
+		t.Errorf("command-prefixed main invocation: %s", problem)
+	}
+	for _, replacement := range []string{"# command " + main + "\n" + head, "echo command " + main} {
+		mutant := strings.Replace(step, main, replacement, 1)
+		if got, want := stepHalvesProblem(mutant, "cli", "cli_half"), "not exactly one "+main; got != want {
+			t.Errorf("replacement %q: got %q, want %q", replacement, got, want)
+		}
+	}
+	for _, command := range []string{main, adopt} {
+		mutant := strings.Replace(step, command, "# "+command+"\n"+head, 1)
+		if got, want := stepHalvesProblem(mutant, "cli", "cli_half"), "not exactly one "+command; got != want {
+			t.Errorf("comment-only %s: got %q, want %q", command, got, want)
+		}
+	}
 }
 
 func readPortability(t *testing.T) string {
@@ -151,5 +221,24 @@ func TestPortability_Boundary_HalvesAreBothNonEmpty(t *testing.T) {
 	}
 	if matched == 0 || other == 0 {
 		t.Fatalf("pattern %q splits cmd/standardsctl's tests %d / %d; both halves must hold tests", m[1], matched, other)
+	}
+}
+
+// TestPortability_PlantedPackageSelection requires the main and adopt command in each matrix job to select its package.
+func TestPortability_PlantedPackageSelection(t *testing.T) {
+	workflow := readPortability(t)
+	for _, operand := range []string{`"${packages[@]##-*}"`, `"${adopt##-*}"`} {
+		const prefix = `go test -json -timeout 30m `
+		command := prefix + operand
+		first, last := strings.Index(workflow, command), strings.LastIndex(workflow, command)
+		if first < 0 || last <= first {
+			t.Fatalf("expected %s in both test jobs", command)
+		}
+		for _, at := range []int{first, last} {
+			mutant := workflow[:at] + prefix + workflow[at+len(command):]
+			if problem := halvesProblem(mutant, "cli", "cli_half"); problem == "" {
+				t.Errorf("dropping %s at %d left package selection green", operand, at)
+			}
+		}
 	}
 }

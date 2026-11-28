@@ -187,18 +187,21 @@ func TestRenovateIgnoreNegativeCreatesNoConfiguration(t *testing.T) {
 // and left byte for byte, on the rerun too; with two files, only the one Renovate reads first
 // is edited.
 func TestRenovateIgnoreBoundaryReportsUneditableConfiguration(t *testing.T) {
-	for name, tc := range map[string]struct{ rel, content string }{
-		"json5":        {"renovate.json5", "{\n  // adopter comment\n  extends: ['config:recommended'],\n}\n"},
-		"jsonc":        {".github/renovate.json", "{\n  // adopter comment\n  \"extends\": [\"config:recommended\"]\n}\n"},
-		"package.json": {packageJSONFile, "{\"name\": \"widgets\", \"renovate\": {\"extends\": [\"config:recommended\"]}}\n"},
+	for index, tc := range []struct{ name, rel, content string }{
+		{"json5", "renovate.json5", "{\n  // adopter comment\n  extends: ['config:recommended'],\n}\n"},
+		{"jsonc", ".github/renovate.json", "{\n  // adopter comment\n  \"extends\": [\"config:recommended\"]\n}\n"},
+		{"package.json", packageJSONFile, "{\"name\": \"widgets\", \"renovate\": {\"extends\": [\"config:recommended\"]}}\n"},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
+			// The first fixture runs whole adoptions; the others run the renovate-ignore step
+			// alone on the prepared session (#1381).
+			whole := index == 0
 			repo := newTestRepo(t, "renovate-boundary")
 			path := filepath.Join(repo, filepath.FromSlash(tc.rel))
 			mustWrite(t, path, tc.content)
 			opts := AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repo, Facets: config.DefaultFacets()}
 			for run := 0; run < 2; run++ {
-				report, err := Adopt(t.Context(), opts)
+				report, err := adoptOrStep(t, opts, whole, reconcileRenovateIgnore)
 				if err != nil {
 					t.Fatalf("adopt %d: %v", run, err)
 				}

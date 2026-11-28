@@ -1,7 +1,6 @@
 package adopt
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +33,12 @@ func adoptedLefthookLanguages(languages hisscatalog.Language) hisscatalog.Langua
 // written before adoption, and returns the repository and the report.
 func adoptMarkedRepo(t *testing.T, name string, markers map[string]string, lefthook string) (string, *AdoptReport) {
 	t.Helper()
+	return adoptMarkedRepoOrStep(t, name, markers, lefthook, true)
+}
+
+// adoptMarkedRepoOrStep creates a test repository with markers and runs git-hooks adoption or step reconciliation.
+func adoptMarkedRepoOrStep(t *testing.T, name string, markers map[string]string, lefthook string, whole bool) (string, *AdoptReport) {
+	t.Helper()
 	repoPath := newTestRepo(t, name)
 	for rel, body := range markers {
 		mustWrite(t, filepath.Join(repoPath, filepath.FromSlash(rel)), body)
@@ -41,7 +46,7 @@ func adoptMarkedRepo(t *testing.T, name string, markers map[string]string, lefth
 	if lefthook != "" {
 		mustWrite(t, filepath.Join(repoPath, lefthookFile), lefthook)
 	}
-	rep, err := Adopt(context.Background(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath})
+	rep, err := adoptOrStep(t, AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath}, whole, reconcileGitHooks)
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}

@@ -3,10 +3,12 @@ package adopt
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,9 +28,15 @@ func personaFixtureDir(rel string) string {
 // adoptPersonaFixture adopts a fresh repository whose persona at rel holds existing.
 func adoptPersonaFixture(t *testing.T, rel, existing string, force bool) (string, *AdoptReport) {
 	t.Helper()
+	return adoptPersonaFixtureOrStep(t, rel, existing, force, true)
+}
+
+// adoptPersonaFixtureOrStep creates a test repository with persona content and executes agent definitions adoption.
+func adoptPersonaFixtureOrStep(t *testing.T, rel, existing string, force, whole bool) (string, *AdoptReport) {
+	t.Helper()
 	repoPath := newTestRepo(t, "persona")
 	mustWrite(t, filepath.Join(repoPath, filepath.FromSlash(rel)), existing)
-	rep, err := Adopt(context.Background(), AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Force: force})
+	rep, err := adoptOrStep(t, AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repoPath, Force: force}, whole, reconcileAgentDefinitions)
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
@@ -64,8 +72,13 @@ func TestPriorPersonaDigests_Boundary_CurrentTextsRecorded(t *testing.T) {
 // and reported as a refresh; the current text is verified, never refreshed.
 func TestAdopt_Positive_PriorPersonaRefreshedOnPlainRun(t *testing.T) {
 	for _, persona := range generatedPersonas() {
-		for name, data := range readFixtureDir(t, personaFixtureDir(persona.rel)) {
-			repoPath, rep := adoptPersonaFixture(t, persona.rel, string(data), false)
+		fixtures := readFixtureDir(t, personaFixtureDir(persona.rel))
+		names := slices.Sorted(maps.Keys(fixtures))
+		for index, name := range names {
+			data := fixtures[name]
+			// One fixture per persona runs a whole adoption; every other one runs the
+			// agent-definitions step alone on the prepared session (#1381).
+			repoPath, rep := adoptPersonaFixtureOrStep(t, persona.rel, string(data), false, index == 0)
 			want, detail := string(persona.content), "Refreshed the unedited earlier"
 			if string(data) == want {
 				detail = "verified present"

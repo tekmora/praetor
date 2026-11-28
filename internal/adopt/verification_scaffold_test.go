@@ -10,62 +10,84 @@ import (
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
+// TestVerificationLegacyMigrationAndCustomPreservation tests migration of legacy verification rules and preservation of custom targets.
 func TestVerificationLegacyMigrationAndCustomPreservation(t *testing.T) {
-	for name, existing := range map[string]string{
-		"old-stub":          legacyVerificationStub,
-		"old-stub-rendered": mustRead(t, filepath.Join("testdata", "legacy-echo.Makefile")),
-		"old-go":            legacyVerificationMakefile("go test -v -race ./...", "go build -v ./..."),
-		"old-meson":         legacyVerificationMakefile("meson test -C core/build --suite=fast", "meson compile -C core/build"),
-		"old-go-crlf":       strings.ReplaceAll(legacyVerificationMakefile("go test -v -race ./...", "go build -v ./..."), "\n", "\r\n"),
-		"custom-echo":       "verify-all:\n\t@echo claimed\n",
-		"edited-old-stub":   "# operator changes\n" + legacyVerificationStub,
-		"multi-target":      "verify-all other:\n\t@echo custom\n",
+	for _, tc := range []struct{ name, existing string }{
+		{"old-stub", legacyVerificationStub},
+		{"old-stub-rendered", mustRead(t, filepath.Join("testdata", "legacy-echo.Makefile"))},
+		{"old-go", legacyVerificationMakefile("go test -v -race ./...", "go build -v ./...")},
+		{"old-meson", legacyVerificationMakefile("meson test -C core/build --suite=fast", "meson compile -C core/build")},
+		{"old-go-crlf", strings.ReplaceAll(legacyVerificationMakefile("go test -v -race ./...", "go build -v ./..."), "\n", "\r\n")},
+		{"custom-echo", "verify-all:\n\t@echo claimed\n"},
+		{"edited-old-stub", "# operator changes\n" + legacyVerificationStub},
+		{"multi-target", "verify-all other:\n\t@echo custom\n"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			root := newTestRepo(t, name)
-			mustWrite(t, filepath.Join(root, "Cargo.toml"), "[package]\nname = 'fixture'\nversion = '0.1.0'\n")
-			mustWrite(t, filepath.Join(root, "Makefile"), existing)
-			opts := AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t), DryRun: true}
-			before := snapshotTree(t, root)
-			preview, err := Adopt(t.Context(), opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertTreeUnchanged(t, before, snapshotTree(t, root))
-			opts.DryRun = false
-			applied, err := Adopt(t.Context(), opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if preview.Verification.Status != applied.Verification.Status {
-				t.Fatal("preview/apply plan mismatch")
-			}
-			got := mustRead(t, filepath.Join(root, "Makefile"))
-			if strings.HasPrefix(name, "old-") {
-				if got == existing || strings.Contains(got, "Running verification") || !strings.Contains(got, "'cargo' 'test' '--locked'") {
-					t.Fatalf("known legacy template not migrated: %s", got)
-				}
-				if applied.Verification.Status != verificationDeclared {
-					t.Fatalf("known migrated plan mislabeled: %+v", applied.Verification)
-				}
-				if crlf := strings.HasSuffix(name, "-crlf"); crlf != strings.Contains(got, "\r\n") || (crlf && strings.Count(got, "\n") != strings.Count(got, "\r\n")) {
-					t.Fatalf("migrated Makefile changed its line-ending style: %q", got)
-				}
-			} else {
-				want, mergeErr := mergeDocumentationMakefile(existing, false)
-				if mergeErr != nil {
-					t.Fatal(mergeErr)
-				}
-				if got != want || applied.Verification.Status != verificationPreserved {
-					t.Fatalf("custom commands changed or certified: %+v %q", applied.Verification, got)
-				}
-			}
-			after := snapshotTree(t, root)
-			if _, err := Adopt(t.Context(), opts); err != nil {
-				t.Fatal(err)
-			}
-			assertTreeUnchanged(t, after, snapshotTree(t, root))
+		t.Run(tc.name, func(t *testing.T) {
+			// Exercise public Adopt for each preservation case and one representative migration.
+			// Keep the equivalent migration cases on the faster Makefile step (#1381).
+			preservesCustomRule := !strings.HasPrefix(tc.name, "old-")
+			assertLegacyOrCustomMakefileRow(t, tc.name, tc.existing, preservesCustomRule || tc.name == "old-stub")
 		})
+	}
+}
+
+// assertLegacyOrCustomMakefileRow tests dry-run preview and application consistency for legacy and custom Makefile fixtures.
+func assertLegacyOrCustomMakefileRow(t *testing.T, name, existing string, whole bool) {
+	t.Helper()
+	root := newTestRepo(t, name)
+	mustWrite(t, filepath.Join(root, "Cargo.toml"), "[package]\nname = 'fixture'\nversion = '0.1.0'\n")
+	mustWrite(t, filepath.Join(root, "Makefile"), existing)
+	opts := AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t), DryRun: true}
+	before := snapshotTree(t, root)
+	preview, err := adoptOrStep(t, opts, whole, reconcileMakefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTreeUnchanged(t, before, snapshotTree(t, root))
+	opts.DryRun = false
+	applied, err := adoptOrStep(t, opts, whole, reconcileMakefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Verification.Status != applied.Verification.Status {
+		t.Fatal("preview/apply plan mismatch")
+	}
+	assertVerificationMakefileResult(t, name, existing, mustRead(t, filepath.Join(root, "Makefile")), applied.Verification)
+	after := snapshotTree(t, root)
+	if _, err := adoptOrStep(t, opts, whole, reconcileMakefile); err != nil {
+		t.Fatal(err)
+	}
+	assertTreeUnchanged(t, after, snapshotTree(t, root))
+}
+
+// assertVerificationMakefileResult verifies the outcome of Makefile adoption for both legacy templates and custom rules.
+func assertVerificationMakefileResult(t *testing.T, name, existing, got string, plan *VerificationPlan) {
+	t.Helper()
+	if strings.HasPrefix(name, "old-") {
+		assertMigratedLegacyMakefile(t, name, existing, got, plan)
+		return
+	}
+	want, mergeErr := mergeDocumentationMakefile(existing, false)
+	if mergeErr != nil {
+		t.Fatal(mergeErr)
+	}
+	if got != want || plan.Status != verificationPreserved {
+		t.Fatalf("custom commands changed or certified: %+v %q", plan, got)
+	}
+}
+
+// assertMigratedLegacyMakefile asserts that legacy Makefile recipes are migrated to modern cargo test targets.
+func assertMigratedLegacyMakefile(t *testing.T, name, existing, got string, plan *VerificationPlan) {
+	t.Helper()
+	if got == existing || strings.Contains(got, "Running verification") || !strings.Contains(got, "'cargo' 'test' '--locked'") {
+		t.Fatalf("known legacy template not migrated: %s", got)
+	}
+	if plan.Status != verificationDeclared {
+		t.Fatalf("known migrated plan mislabeled: %+v", plan)
+	}
+	crlf := strings.HasSuffix(name, "-crlf")
+	if crlf != strings.Contains(got, "\r\n") || (crlf && strings.Count(got, "\n") != strings.Count(got, "\r\n")) {
+		t.Fatalf("migrated Makefile changed its line-ending style: %q", got)
 	}
 }
 

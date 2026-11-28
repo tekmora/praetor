@@ -36,7 +36,7 @@ func TestEngineMakefile_Positive_OwnMakefileMainEraAppendedBlockResolvesToPinned
 
 	verifyMakePraetorEnginePath(t, makePath, root, wantPath)
 
-	report2, err := Adopt(t.Context(), opts)
+	report2, err := makefileAdoptOrStep(t, opts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,8 @@ func TestEngineMakefile_Positive_AllAssignmentOverrideShapesDetectedAndReported(
 			}
 			mustWrite(t, filepath.Join(root, "Makefile"), content)
 
-			report, err := Adopt(t.Context(), AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t)})
+			opts := AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t)}
+			report, err := makefileAdoptOrStep(t, opts, true)
 			if err != nil {
 				t.Fatal(err)
 			}

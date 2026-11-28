@@ -14,7 +14,7 @@ import (
 func TestAuditTestTimeouts_CLI(t *testing.T) {
 	f := newAuditFixture(t)
 	writeFixtureFile(t, f.dir, ".github/workflows/portability.yml",
-		"on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps:\n      - run: go test -timeout 60m ./...\n")
+		"on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps:\n      - run: go test -timeout 60m ./...\n        shell: bash\n")
 	out, err := f.audit(t)
 	if err == nil || !strings.Contains(err.Error()+out, ".github/workflows/portability.yml:6 sets 60m") {
 		t.Fatalf("audit = %v\nOutput: %s\nwant the 60m timeout refused", err, out)

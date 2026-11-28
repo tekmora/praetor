@@ -545,11 +545,63 @@ fixture reads `passed: 12/12`. A reusable workflow's `-timeout=${{ inputs.<id> }
 that input's `workflow_call` default; an input without a literal default, or a default that is no
 duration, is an unreadable timeout and fails (`TestAuditTestTimeouts_Positive_InputDefaultWithinBound`,
 `TestAuditTestTimeouts_Negative_InputDefaultAboveBound` in `internal/forge/test_timeout_audit_test.go`).
-The Makefile read is bounded and also recognizes `$(GO_TEST)` recipes. Only `test-timeout` entries
-may name the root `Makefile`; other workflow-scoped exceptions still require a workflow path
-(`TestAuditTestTimeouts_Makefile` and `TestAuditTestTimeouts_RepositoryMakefile` in
-`internal/forge/test_timeout_audit_test.go`; `TestValidateExceptionsTestTimeoutMakefile` in
-`internal/config/exceptions_test.go`).
+The audit checks explicit Go test timeouts in these sources.
+
+- A workflow `run` step must resolve to `bash` or `sh`. The step's shell takes precedence,
+  followed by the job default, the workflow default and the runner default. Set `shell: bash`
+  on a Bash test step in a Windows or mixed-runner job.
+- The root `Makefile` may use literal tabbed or inline recipes, including continuations. A non-tab `.RECIPEPREFIX` makes candidate recipes unverifiable. An assignment to `.RECIPEPREFIX_OTHER` does not change recipe parsing.
+  A declaration of `.ONESHELL` makes candidate recipes unverifiable. A recipe can invoke a
+  named test command as `$(TEST_CMD)` or `${TEST_CMD}`. The gate reads its definition and
+  recipe arguments together if one unconditional root assignment with `:=`, `::=` or `=`
+  supplies the literal command. It also recognizes the repository's
+  `go run "$(CURDIR)/cmd/standardsctl" go test` wrapper. If an assignment contains test
+  tokens but its value is conditional, target-specific or ambiguous, its use is unverifiable.
+  This also applies to `define` bodies and assignments that refer to another test command.
+  `GO_TEST` always requires a provable definition. A test invocation in an immediately expanded Make function outside a recipe is unverifiable even at the timeout bound. This includes nested `shell` calls, `shell` calls that reference a named test command, and `call` expansions containing test tokens. Unused literal command text, unused deferred `shell` calls, escaped function text, and Make comments do not trigger this finding.
+- The program word must be spelled `go` or `go.exe` in the source. Before `test` it may
+  take `-C dir` with a separate literal directory. The standardsctl wrapper also accepts
+  that pair first among its test arguments. Separate control operators from invocation
+  words. The generated adoption Make recipe may start with `exec 'go' 'test'` and pass
+  individually quoted literal arguments. A trailing `> file` and a standalone trailing
+  `2>&1` are supported.
+
+| Test flag spellings | Accepted arguments | Additional accepted spellings |
+| --- | --- | --- |
+| `-json`, `-race`, `-short`, `-v` | Switch alone or with an attached Go boolean such as `=false`. Verbose mode also accepts `=test2json`. | `-test.short`, `-test.v` |
+| `-count`, `-coverprofile`, `-fuzz`, `-fuzztime`, `-run`, `-skip` | One value, separate or attached with `=`. | `-test.count`, `-test.coverprofile`, `-test.fuzz`, `-test.fuzztime`, `-test.run`, `-test.skip` |
+| `-covermode`, `-exec`, `-mod`, `-p`, `-tags`, `-vet` | One value, separate or attached with `=`. | |
+| `-timeout` | One duration, separate or attached with `=`. The effective deadline must be positive and no greater than 30 minutes. | `-test.timeout` |
+| `-update-harness-golden` | A switch in the final argument position when the first test argument is `./internal/adopt`. | |
+
+Each listed spelling also accepts two leading dashes. For example, `--timeout` and
+`--test.timeout` both take a duration. For workflow commands, the audit resolves `GOFLAGS` from the command-local assignment, step environment, values written to `GITHUB_ENV` by previous steps, job environment, and workflow environment in that order. A literal value, including an empty string, overrides lower scopes, but a command-local assignment does not affect later commands. Unrelated environment keys do not override `GOFLAGS`. If an earlier step makes an unverifiable write to `GITHUB_ENV` that affects `GOFLAGS`, the `GOFLAGS` inherited by the later test command is unverifiable unless a higher-precedence literal value overrides it. If the effective inherited `GOFLAGS` cannot be verified, the invocation is unverifiable even with a literal timeout on the command line. The audit reads timeout settings in the effective `GOFLAGS` before those on the command line. A timeout in inherited `GOFLAGS` must have an attached duration, and inherited and command-line timeout flags count toward the same reader bound. The last explicit setting wins, but malformed earlier values are still rejected. A final zero or negative duration disables the deadline and fails the gate; a final positive duration is bounded at 30 minutes. For example, `GOFLAGS='-timeout=45m' go test -timeout=10m ./...` has an effective deadline of 10 minutes. Dynamic command-local `GOFLAGS` is unverifiable and does not fall back to inherited `GOFLAGS`. The input default of a reusable workflow follows the same duration rules.
+
+In a workflow step, an earlier standalone assignment to `GOFLAGS`, export of `GOFLAGS`, or `unset GOFLAGS` makes inherited flags unverifiable, even with a literal command-line timeout. Comments, exports of unrelated variables, and exports after the test command do not affect that invocation. A literal command-local `GOFLAGS` override still works and does not affect later commands.
+
+In the root Makefile, `export GOFLAGS := ...`, a separate `export` directive naming `GOFLAGS` (even after the recipe), and `.EXPORT_ALL_VARIABLES` with a `GOFLAGS` assignment make inherited flags unverifiable. An unrelated export or an unexported `GOFLAGS` assignment does not. A recipe can override the Make export with command-local `GOFLAGS=` and an explicit timeout.
+
+A quoted shell scalar can fill a flag's value slot, as in `-run "$pattern"`. Go accepts flags
+before and after one contiguous package list, so a free-standing `"$word"` could be a flag in either position.
+Literal package paths, `"./$pkg"`, and a quoted parameter directly following its successful
+initial package assignment (`pkg=./internal/adopt && go test "$pkg"`) establish a package
+operand. For computed import paths the portability workflow uses `"${pkg##-*}"` and
+`"${packages[@]##-*}"`. Shell prefix removal leaves a package path intact and removes the
+whole value if it starts with a dash. The array form does this for each element in Bash.
+A whole Make variable can provide a literal package path or a package list produced by
+`$(shell go list ./...)`, including the root Makefile's check of `.SHELLSTATUS`. Unknown
+flags, unproven argument expansions and extra words outside this grammar are unverifiable.
+
+The gate checks raw test tokens against the commands and comments the reader located. It also
+checks Make references to known test-command assignments. Other steps and recipes skip shell
+parsing. An unreadable command and a measured violation elsewhere in the same step receive
+separate diagnostics. If a candidate remains unexplained, the
+shell is unreadable, or a read exceeds its bound, the finding says `unverifiable test invocation`
+and names the file, line and reason. A duration exception covers a measured, positive timeout
+above the bound. Only `test-timeout` entries may name the root `Makefile`.
+See `TestAuditTestTimeouts_UnverifiableInvocations`, `TestAuditTestTimeouts_UnrelatedMultilineExpression`
+and `TestAuditTestTimeouts_RepositoryMakefile` in `internal/forge/test_timeout_audit_test.go`
+and `TestValidateExceptionsTestTimeoutMakefile` in `internal/config/exceptions_test.go`.
 
 The job-timeout gate runs right beside it (`forge.AuditJobTimeouts`): every job that runs steps
 declares `timeout-minutes`. A reusable workflow call (`uses:` at job level) cannot carry it and

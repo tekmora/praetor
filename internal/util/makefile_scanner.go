@@ -72,6 +72,12 @@ type makefileBranch struct {
 // resolve (makefileMayBindRecipePrefix): which lines after it are recipe lines depends on the
 // value.
 func (s *makefileScanner) next(line string) int {
+	return s.nextWithDeferredDefinePrefix(line, false)
+}
+
+// nextWithDeferredDefinePrefix lets the recipe reader handle a possible prefix
+// binding at the end of a recognized define block instead of at its opener.
+func (s *makefileScanner) nextWithDeferredDefinePrefix(line string, deferDefinePrefix bool) int {
 	if s.depth > 0 {
 		s.body(line)
 		return makefileDefineLine
@@ -81,13 +87,14 @@ func (s *makefileScanner) next(line string) int {
 	if strings.HasPrefix(line, "\t") {
 		kind = s.tabLine(line, fields)
 	}
-	if kind != makefileRecipeLine && makefileMayBindRecipePrefix(line) {
+	opensDefine := kind == makefileSyntaxLine && makefileOpensDefine(fields)
+	if kind != makefileRecipeLine && (!deferDefinePrefix || !opensDefine) && makefileMayBindRecipePrefix(line) {
 		s.lost = true
 	}
 	if kind != makefileSyntaxLine {
 		return kind
 	}
-	if makefileOpensDefine(fields) {
+	if opensDefine {
 		s.depth = 1
 		s.set(makefileRecipeClosed)
 		return makefileDefineLine

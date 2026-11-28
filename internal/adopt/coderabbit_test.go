@@ -216,13 +216,13 @@ func TestAdoptCodeRabbitCreatesAndPreserves(t *testing.T) {
 		"existing": "# repository review policy\nlanguage: en-US # keep language\nreviews:\n  profile: assertive # keep profile\n  auto_review:\n    drafts: false # managed switch\n    base_branches: ['release/.*'] # keep branches\n  pre_merge_checks:\n    docstrings:\n      threshold: 85 # keep threshold\nchat:\n  auto_reply: false # keep chat\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			adoptCodeRabbitCase(t, name, initial)
+			adoptCodeRabbitCase(t, name, initial, true)
 		})
 	}
 }
 
 // adoptCodeRabbitCase checks a complete adoption and a byte-identical second adoption.
-func adoptCodeRabbitCase(t *testing.T, name, initial string) {
+func adoptCodeRabbitCase(t *testing.T, name, initial string, whole bool) {
 	t.Helper()
 	repo := newTestRepo(t, "coderabbit-"+name)
 	file := filepath.Join(repo, ".coderabbit.yaml")
@@ -230,7 +230,7 @@ func adoptCodeRabbitCase(t *testing.T, name, initial string) {
 		mustWrite(t, file, initial)
 	}
 	opts := AdoptOptions{Path: repo, LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true}
-	report, err := Adopt(t.Context(), opts)
+	report, err := adoptOrStep(t, opts, whole, reconcileCodeRabbit)
 	if err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
@@ -242,7 +242,7 @@ func adoptCodeRabbitCase(t *testing.T, name, initial string) {
 		t.Fatal("managed keys absent from adoption report")
 	}
 	before := snapshotTree(t, repo)
-	if _, err := Adopt(t.Context(), opts); err != nil {
+	if _, err := adoptOrStep(t, opts, whole, reconcileCodeRabbit); err != nil {
 		t.Fatalf("readopt: %v", err)
 	}
 	assertTreeUnchanged(t, before, snapshotTree(t, repo))
@@ -388,7 +388,7 @@ func TestCodeRabbitDryRun(t *testing.T) {
 	}
 }
 
-// TestAdoptCodeRabbitInstructionValidation checks apply and dry-run through the public entry point.
+// TestAdoptCodeRabbitInstructionValidation checks instruction validation through public Adopt and the isolated CodeRabbit step, including a completed outcome in the public dry-run report.
 func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
@@ -396,33 +396,40 @@ func TestAdoptCodeRabbitInstructionValidation(t *testing.T) {
 	}{{"apply", false}, {"dry-run", true}} {
 		t.Run(mode.name, func(t *testing.T) {
 			for _, tc := range []struct {
-				name, field, wantError string
+				name, field, wantError    string
+				publicApply, publicDryRun bool
 			}{
-				{"custom", "instructions: 'Keep our CI policy.'", ""},
-				{"empty", "instructions: ''", ""},
-				{"at limit", "instructions: '" + strings.Repeat("\u00e4", 20000) + "'", ""},
-				{"over limit", "instructions: '" + strings.Repeat("\u00e4", 20001) + "'", "instructions have 20001 characters; the CodeRabbit schema allows at most 20000"},
-				{"missing", "# no instructions key", "instructions must be a string"},
-				{"null", "instructions: null", "instructions must be a string"},
+				{"custom", "instructions: 'Keep our CI policy.'", "", true, true},
+				{"empty", "instructions: ''", "", false, false},
+				{"at limit", "instructions: '" + strings.Repeat("\u00e4", 20000) + "'", "", false, false},
+				{"over limit", "instructions: '" + strings.Repeat("\u00e4", 20001) + "'", "instructions have 20001 characters; the CodeRabbit schema allows at most 20000", false, true},
+				{"missing", "# no instructions key", "instructions must be a string", false, false},
+				{"null", "instructions: null", "instructions must be a string", true, false},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					assertAdoptCodeRabbitValidation(t, mode.dryRun, tc.field, tc.wantError)
+					whole := tc.publicApply && !mode.dryRun || tc.publicDryRun && mode.dryRun
+					assertAdoptCodeRabbitValidation(t, mode.dryRun, whole, tc.field, tc.wantError)
 				})
 			}
 		})
 	}
 }
 
+// runCodeRabbitStep runs the named reconciliation step so the report records its outcome.
+func runCodeRabbitStep(ctx context.Context, s *adoptSession) error {
+	return runOrSkipStep(ctx, s, namedStep{"coderabbit", reconcileCodeRabbit}, false)
+}
+
 // assertAdoptCodeRabbitValidation checks preserved bytes, reported failures and dry-run isolation.
-func assertAdoptCodeRabbitValidation(t *testing.T, dryRun bool, field, wantError string) {
+func assertAdoptCodeRabbitValidation(t *testing.T, dryRun, whole bool, field, wantError string) {
 	t.Helper()
 	repo := newTestRepo(t, "coderabbit-validation")
 	file := filepath.Join(repo, codeRabbitFile)
 	initial := codeRabbitUserPolicy(field)
 	mustWrite(t, file, initial)
 	before := snapshotTree(t, repo)
-	report, err := Adopt(t.Context(), AdoptOptions{Path: repo, DryRun: dryRun,
-		LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true})
+	report, err := adoptOrStep(t, AdoptOptions{Path: repo, DryRun: dryRun,
+		LockSourceRoot: newAdoptLockSource(t), SkipHookActivation: true}, whole, runCodeRabbitStep)
 	if wantError == "" {
 		if err != nil {
 			t.Fatalf("adopt valid instructions: %v", err)
@@ -431,18 +438,27 @@ func assertAdoptCodeRabbitValidation(t *testing.T, dryRun bool, field, wantError
 			t.Fatal("valid instructions not reported completed")
 		}
 	} else {
-		if err == nil || !strings.Contains(err.Error(), "manage .coderabbit.yaml: reviews.path_instructions entry 0: "+wantError) {
-			t.Fatalf("adopt error = %v, want entry-specific %q", err, wantError)
-		}
-		if len(report.Errors) == 0 || stepOutcome(t, report, "coderabbit").Status != StepFailed {
-			t.Fatal("invalid instructions not reported failed")
-		}
+		assertCodeRabbitValidationFailure(t, report, err, wantError, whole)
 	}
 	if got := mustRead(t, file); got != initial {
 		t.Fatal("adoption changed user-owned instructions")
 	}
 	if dryRun {
 		assertTreeUnchanged(t, before, snapshotTree(t, repo))
+	}
+}
+
+// assertCodeRabbitValidationFailure checks the step failure and the public adoption error report.
+func assertCodeRabbitValidationFailure(t *testing.T, report *AdoptReport, err error, wantError string, whole bool) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "manage .coderabbit.yaml: reviews.path_instructions entry 0: "+wantError) {
+		t.Fatalf("adopt error = %v, want entry-specific %q", err, wantError)
+	}
+	if stepOutcome(t, report, "coderabbit").Status != StepFailed {
+		t.Fatal("invalid instructions not reported failed")
+	}
+	if whole && !slices.Contains(report.Errors, err.Error()) {
+		t.Fatalf("Adopt report errors = %q, want %q", report.Errors, err)
 	}
 }
 

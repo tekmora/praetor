@@ -20,59 +20,80 @@ import (
 // every row. The editors step reads the adopted Makefile through the same reader, after the
 // Makefile step, so the editor files of every row offer the verify-all rule that now exists.
 func TestVerificationAssignmentIsNotAPreservedTarget(t *testing.T) {
-	for name, tc := range map[string]struct {
-		makefile  string
-		preserved bool
+	step := chainAdoptSteps(reconcileMakefile, reconcileEditors)
+	for index, tc := range []struct {
+		name, makefile string
+		preserved      bool
 	}{
-		"assignment":               {"verify-all := $(MAKE) -C build check\nall:\n\t@echo original\n", false},
-		"override-assignment":      {"override verify-all := $(MAKE) -C build check\nall:\n\t@echo original\n", false},
-		"posix-assignment":         {"verify-all ::= x\nall:\n\t@echo original\n", false},
-		"escaped-assignment":       {"verify-all :::= x\nall:\n\t@echo original\n", false},
-		"value-colon-assignment":   {"verify-all = docker run --rm ci:latest check\nall:\n\t@echo original\n", false},
-		"conditional-value-colon":  {"verify-all ?= a:b\nall:\n\t@echo original\n", false},
-		"appending-value-colon":    {"verify-all += x:y\nall:\n\t@echo original\n", false},
-		"target-specific-variable": {"verify-all: CFLAGS := -g\nall:\n\t@echo original\n", false},
-		"value-names-target":       {"HELP = verify-all: run every gate\nall:\n\t@echo original\n", false},
-		"rule":                     {"verify-all:\n\t@echo claimed\n", true},
-		"rule-with-help-comment":   {"verify-all: ## run gates (FAST=1)\n\t@echo claimed\n", true},
+		{"assignment", "verify-all := $(MAKE) -C build check\nall:\n\t@echo original\n", false},
+		{"override-assignment", "override verify-all := $(MAKE) -C build check\nall:\n\t@echo original\n", false},
+		{"posix-assignment", "verify-all ::= x\nall:\n\t@echo original\n", false},
+		{"escaped-assignment", "verify-all :::= x\nall:\n\t@echo original\n", false},
+		{"value-colon-assignment", "verify-all = docker run --rm ci:latest check\nall:\n\t@echo original\n", false},
+		{"conditional-value-colon", "verify-all ?= a:b\nall:\n\t@echo original\n", false},
+		{"appending-value-colon", "verify-all += x:y\nall:\n\t@echo original\n", false},
+		{"target-specific-variable", "verify-all: CFLAGS := -g\nall:\n\t@echo original\n", false},
+		{"value-names-target", "HELP = verify-all: run every gate\nall:\n\t@echo original\n", false},
+		{"rule", "verify-all:\n\t@echo claimed\n", true},
+		{"rule-with-help-comment", "verify-all: ## run gates (FAST=1)\n\t@echo claimed\n", true},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if shared := util.MakefileMayDefineTarget(tc.makefile, verificationTarget); shared != tc.preserved {
-				t.Fatalf("the shared Makefile reader finds an owned verify-all = %v, want %v", shared, tc.preserved)
-			}
-			root := newTestRepo(t, name)
-			mustWrite(t, filepath.Join(root, "go.mod"), "module fixture\n")
-			mustWrite(t, filepath.Join(root, "Makefile"), tc.makefile)
-			report, err := Adopt(t.Context(), AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := mustRead(t, filepath.Join(root, "Makefile"))
-			if tasks := mustRead(t, filepath.Join(root, ".vscode", "tasks.json")); !strings.Contains(tasks, `"make verify-all"`) {
-				t.Fatalf("the editor tasks do not offer the verify-all rule the adopted Makefile declares: %s", tasks)
-			}
-			if tc.preserved {
-				want, mergeErr := mergeDocumentationMakefile(tc.makefile, false)
-				if mergeErr != nil {
-					t.Fatal(mergeErr)
-				}
-				if report.Verification.Status != verificationPreserved || got != want {
-					t.Fatalf("custom rule not preserved: %+v %q", report.Verification, got)
-				}
-				return
-			}
-			if report.Verification.Status != verificationDeclared {
-				t.Fatalf("assignment certified as a custom gate: %+v", report.Verification)
-			}
-			if !strings.Contains(got, "\nverify-all:\n") || !strings.Contains(got, "@echo original") {
-				t.Fatalf("declared verify-all not appended beside the existing recipes: %q", got)
-			}
-			for _, command := range report.Verification.Test {
-				if strings.Join(command, " ") == "make verify-all" {
-					t.Fatalf("plan tests a preserved rule that does not exist: %+v", report.Verification)
-				}
-			}
+		t.Run(tc.name, func(t *testing.T) {
+			assertVerificationAssignmentRow(t, tc.name, tc.makefile, tc.preserved, index == 0, step)
 		})
+	}
+}
+
+// assertVerificationAssignmentRow tests Makefile verification target handling, editor task integration, and verification status.
+func assertVerificationAssignmentRow(t *testing.T, name, makefile string, preserved, whole bool, step adoptStep) {
+	t.Helper()
+	if shared := util.MakefileMayDefineTarget(makefile, verificationTarget); shared != preserved {
+		t.Fatalf("the shared Makefile reader finds an owned verify-all = %v, want %v", shared, preserved)
+	}
+	root := newTestRepo(t, name)
+	mustWrite(t, filepath.Join(root, "go.mod"), "module fixture\n")
+	mustWrite(t, filepath.Join(root, "Makefile"), makefile)
+	// The first fixture runs a whole adoption; the others run the makefile and editors steps
+	// on the prepared session (#1381).
+	report, err := adoptOrStep(t, AdoptOptions{Path: root, Profile: "framework", LockSourceRoot: newAdoptLockSource(t)}, whole, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := mustRead(t, filepath.Join(root, "Makefile"))
+	if tasks := mustRead(t, filepath.Join(root, ".vscode", "tasks.json")); !strings.Contains(tasks, `"make verify-all"`) {
+		t.Fatalf("the editor tasks do not offer the verify-all rule the adopted Makefile declares: %s", tasks)
+	}
+	if preserved {
+		assertPreservedVerificationRow(t, makefile, got, report.Verification)
+		return
+	}
+	assertDeclaredVerificationRow(t, got, report.Verification)
+}
+
+// assertPreservedVerificationRow asserts that custom verification targets in Makefile are preserved during adoption.
+func assertPreservedVerificationRow(t *testing.T, makefile, got string, plan *VerificationPlan) {
+	t.Helper()
+	want, mergeErr := mergeDocumentationMakefile(makefile, false)
+	if mergeErr != nil {
+		t.Fatal(mergeErr)
+	}
+	if plan.Status != verificationPreserved || got != want {
+		t.Fatalf("custom rule not preserved: %+v %q", plan, got)
+	}
+}
+
+// assertDeclaredVerificationRow asserts that declared verification targets are appended to Makefile and properly planned.
+func assertDeclaredVerificationRow(t *testing.T, got string, plan *VerificationPlan) {
+	t.Helper()
+	if plan.Status != verificationDeclared {
+		t.Fatalf("assignment certified as a custom gate: %+v", plan)
+	}
+	if !strings.Contains(got, "\nverify-all:\n") || !strings.Contains(got, "@echo original") {
+		t.Fatalf("declared verify-all not appended beside the existing recipes: %q", got)
+	}
+	for _, command := range plan.Test {
+		if strings.Join(command, " ") == "make verify-all" {
+			t.Fatalf("plan tests a preserved rule that does not exist: %+v", plan)
+		}
 	}
 }
 

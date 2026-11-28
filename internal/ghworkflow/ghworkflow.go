@@ -240,6 +240,73 @@ func EnvValue(name string, scopes ...*yaml.Node) (value string, set, known bool)
 	return "", false, true
 }
 
+// LiteralEnvValue reads a variable from innermost to outermost scope, like EnvValue,
+// but requires proof of a literal string. An absent variable has the same result as
+// an empty string. An opaque scope, ambiguous key, or nonliteral winning value
+// makes known false rather than falling through to a less specific scope.
+func LiteralEnvValue(name string, scopes ...*yaml.Node) (value string, known bool) {
+	value, _, known = LiteralRunnerEnvValue(name, "", scopes...)
+	return value, known
+}
+
+// LiteralRunnerEnvValue reads literal environment bindings in scope order. It matches keys
+// case-insensitively on OSWindows and exactly otherwise. When known is true, set distinguishes
+// an absent binding from a literal empty value. An ambiguous or nonliteral binding is unknown.
+func LiteralRunnerEnvValue(name, runnerOS string, scopes ...*yaml.Node) (value string, set, known bool) {
+	for _, scope := range scopes {
+		if scope == nil || scope.Kind == 0 || scope.Kind == yaml.ScalarNode && scope.ShortTag() == "!!null" {
+			continue
+		}
+		entry, known := literalEnvEntry(scope, name, runnerOS == OSWindows)
+		if !known {
+			return "", false, false
+		}
+		if entry == nil {
+			continue
+		}
+		if !isLiteralEnvString(entry) {
+			return "", true, false
+		}
+		return entry.Value, true, true
+	}
+	return "", false, true
+}
+
+// literalEnvEntry checks the mapping and all its keys before accepting a match.
+// It returns nil, true for a missing name and nil, false if the scope cannot
+// establish whether name has an unambiguous binding.
+func literalEnvEntry(scope *yaml.Node, name string, foldCase bool) (*yaml.Node, bool) {
+	if scope.Kind != yaml.MappingNode || scope.ShortTag() != "!!map" || len(scope.Content)%2 != 0 {
+		return nil, false
+	}
+	var entry *yaml.Node
+	for i := 0; i < len(scope.Content); i += 2 {
+		key := scope.Content[i]
+		if !isLiteralEnvString(key) || key.Value == "<<" {
+			return nil, false
+		}
+		if !literalEnvNameMatches(key.Value, name, foldCase) {
+			continue
+		}
+		if entry != nil || scope.Content[i+1] == nil {
+			return nil, false
+		}
+		entry = scope.Content[i+1]
+	}
+	return entry, true
+}
+
+// literalEnvNameMatches reports whether the names match exactly or with case folding enabled.
+func literalEnvNameMatches(key, name string, foldCase bool) bool {
+	return key == name || (foldCase && strings.EqualFold(key, name))
+}
+
+// isLiteralEnvString reports whether node is a YAML string scalar with no
+// GitHub Actions expression opener.
+func isLiteralEnvString(node *yaml.Node) bool {
+	return node != nil && node.Kind == yaml.ScalarNode && node.ShortTag() == "!!str" && !strings.Contains(node.Value, "${{")
+}
+
 // EnvNames returns every variable name scopes declare, in the order EnvValue reads them, each
 // name once. known is false when a scope is one expression, an env: whose variables the file
 // cannot show, so any other name may be set there.

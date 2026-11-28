@@ -54,8 +54,45 @@ const (
 	maxRunBlockBytes = 64 << 10
 )
 
-// workflowExpression is one ${{ ... }} expression, possibly spanning lines.
-var workflowExpression = regexp.MustCompile(`(?s)\$\{\{.*?\}\}`)
+// workflowExpressionSpans returns the byte spans of complete Actions expressions.
+// closed is false if an opener has no closing braces outside a string.
+func workflowExpressionSpans(script string) (spans [][2]int, closed bool) {
+	const opener = "${{"
+	for from := 0; from < len(script); {
+		offset := strings.Index(script[from:], opener)
+		if offset < 0 {
+			return spans, true
+		}
+		start := from + offset
+		end := workflowExpressionEnd(script, start+len(opener))
+		if end < 0 {
+			return spans, false
+		}
+		spans = append(spans, [2]int{start, end})
+		from = end
+	}
+	return spans, true
+}
+
+// workflowExpressionEnd returns the exclusive end of an expression, or -1.
+func workflowExpressionEnd(script string, start int) int {
+	quoted := false
+	for i := start; i < len(script); i++ {
+		switch script[i] {
+		case '\'':
+			if quoted && i+1 < len(script) && script[i+1] == '\'' {
+				i++
+				continue
+			}
+			quoted = !quoted
+		case '}':
+			if !quoted && i+1 < len(script) && script[i+1] == '}' {
+				return i + 2
+			}
+		}
+	}
+	return -1
+}
 
 // shellLabel matches a shell name fit to key the coverage record.
 var shellLabel = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]*$`)
@@ -115,34 +152,73 @@ func scanRunBlock(rel string, step *ghworkflow.Step, shell string, file *ScanRep
 	if !shellLanguages[shell] || len(step.Run) > maxRunBlockBytes || strings.IndexByte(step.Run, 0) >= 0 {
 		return false
 	}
+	blanked, closed := blankExpressions(step.Run)
+	if !closed {
+		return false
+	}
 	block := &ScanReport{}
-	script := sourceFile{rel: rel, data: []byte(blankExpressions(step.Run))}
+	script := sourceFile{rel: rel, data: []byte(blanked)}
 	if !scanShellLines(rel, script.lfLines(), shellInterp{known: true, bash: shell == "bash"}, block, opts) {
 		return false
 	}
 	for _, v := range block.Violations {
-		recordViolation(file, v.RuleID, v.FilePath, runBlockLine(step, v.LineNumber), v.Symbol, v.Message)
+		recordViolation(file, v.RuleID, v.FilePath, WorkflowRunLine(step, v.LineNumber), v.Symbol, v.Message)
 	}
 	return true
 }
 
-// blankExpressions replaces every ${{ ... }} expression with spaces, keeping its line breaks so
-// the script's lines still match the workflow's.
-func blankExpressions(script string) string {
-	return workflowExpression.ReplaceAllStringFunc(script, func(expression string) string {
-		return strings.Map(func(r rune) rune {
-			if r == '\n' {
-				return r
+// blankExpressions replaces complete expressions with spaces while preserving
+// byte offsets and line breaks. It declines scripts with an unclosed expression.
+func blankExpressions(script string) (string, bool) {
+	spans, closed := workflowExpressionSpans(script)
+	if !closed {
+		return "", false
+	}
+	if len(spans) == 0 {
+		return script, true
+	}
+	blanked := []byte(script)
+	for _, span := range spans {
+		for i := span[0]; i < span[1]; i++ {
+			if blanked[i] == '\n' || (blanked[i] == '\r' && i+1 < len(script) && script[i+1] == '\n') {
+				continue
 			}
-			return ' '
-		}, expression)
-	})
+			blanked[i] = ' '
+		}
+	}
+	return string(blanked), true
 }
 
-// runBlockLine maps line n of a step's script to the workflow line it sits on: in a literal
+// WorkflowShellCommandSource reads a decoded run script with expressions kept as opaque shell word
+// fragments. This retains the source spelling of timeout values without parsing expressions as shell.
+func WorkflowShellCommandSource(script string, maxLines int) (ShellCommandSource, bool) {
+	return workflowShellCommandSource(script, maxLines, false)
+}
+
+// WorkflowShellCommandSourceForShell reads a run script with opaque Actions expressions.
+// Only a resolved bash selects Bash heredoc semantics; all other values use the portable check.
+func WorkflowShellCommandSourceForShell(script string, maxLines int, shell string) (ShellCommandSource, bool) {
+	return workflowShellCommandSource(script, maxLines, shell != "bash")
+}
+
+// workflowShellCommandSource normalizes CRLF to LF, returns false if workflow expression spans are unclosed, and otherwise parses the script with those spans masked as literals.
+func workflowShellCommandSource(script string, maxLines int, portableHeredoc bool) (ShellCommandSource, bool) {
+	script = strings.ReplaceAll(script, "\r\n", "\n")
+	spans, closed := workflowExpressionSpans(script)
+	if !closed {
+		return ShellCommandSource{}, false
+	}
+	literals := make(map[int]int, len(spans))
+	for _, span := range spans {
+		literals[span[0]] = span[1]
+	}
+	return readShellCommandSource(script, maxLines, literals, portableHeredoc)
+}
+
+// WorkflowRunLine maps one-based line n of a step's script to the workflow line: in a literal
 // block the line after the indicator is line 1, and any other style is reported at the line its
 // value starts on.
-func runBlockLine(step *ghworkflow.Step, n int) int {
+func WorkflowRunLine(step *ghworkflow.Step, n int) int {
 	if step.RunLiteral {
 		return step.RunLine + n
 	}

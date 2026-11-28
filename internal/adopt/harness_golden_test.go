@@ -5,7 +5,6 @@
 package adopt
 
 import (
-	"context"
 	"flag"
 	"os"
 	"path/filepath"
@@ -32,6 +31,12 @@ type harnessProfile struct {
 // profile and returns the harness part of the AGENTS.md adoption wrote.
 func adoptedHarness(t *testing.T, profile string, markers map[string]string) string {
 	t.Helper()
+	return adoptedHarnessOrStep(t, profile, markers, true)
+}
+
+// adoptedHarnessOrStep adopts a repository with markers and returns the generated AGENTS.md harness.
+func adoptedHarnessOrStep(t *testing.T, profile string, markers map[string]string, whole bool) string {
+	t.Helper()
 	repo := newTestRepo(t, "widget")
 	tracked := make([]string, 0, len(markers))
 	for rel, body := range markers {
@@ -39,14 +44,15 @@ func adoptedHarness(t *testing.T, profile string, markers map[string]string) str
 		tracked = append(tracked, rel)
 	}
 	stageAdoptPaths(t, repo, tracked...)
-	adoptFrom(t, repo, profile, newAdoptLockSource(t))
+	adoptFromOrStep(t, repo, profile, newAdoptLockSource(t), whole)
 	return agentsHarness(t, repo)
 }
 
-// adoptFrom adopts repo under profile with the pinned catalog at lockSource.
-func adoptFrom(t *testing.T, repo, profile, lockSource string) *AdoptReport {
+// adoptFromOrStep executes adoption on a repository with the specified profile and lock source.
+func adoptFromOrStep(t *testing.T, repo, profile, lockSource string, whole bool) *AdoptReport {
 	t.Helper()
-	report, err := Adopt(context.Background(), AdoptOptions{LockSourceRoot: lockSource, Path: repo, Profile: profile, Facets: config.DefaultFacets()})
+	step := chainAdoptSteps(reconcileManifest, reconcileLockfile, reconcilePolicyCatalog, reconcileAgentHarness)
+	report, err := adoptOrStep(t, AdoptOptions{LockSourceRoot: lockSource, Path: repo, Profile: profile, Facets: config.DefaultFacets()}, whole, step)
 	if err != nil {
 		t.Fatalf("Adopt %s: %v", profile, err)
 	}
@@ -100,9 +106,9 @@ func TestAdoptedHarnessGolden(t *testing.T) {
 			absent: []string{"zero `goto`", "context.Context", "Go:", ".unwrap()", "Rust:", "`unsafe`"},
 		},
 	}
-	for _, p := range profiles {
+	for index, p := range profiles {
 		t.Run(p.name, func(t *testing.T) {
-			harness := adoptedHarness(t, p.profile, p.markers)
+			harness := adoptedHarnessOrStep(t, p.profile, p.markers, index == 0)
 			directives := directiveCells(t, harness)
 			for _, want := range p.present {
 				if !strings.Contains(directives, want) {

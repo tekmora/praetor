@@ -152,12 +152,18 @@ func makefileEscapeWidth(line string, i int) int {
 // Make stops reading the line -- at a comment or at the ";" that opens an inline recipe -- and at
 // MaxMakefileLineBytes (HISS-02).
 func makefileSplit(line string) (assign, colon, reference int) {
+	assign, colon, reference, _ = makefileSplitSyntax(line)
+	return assign, colon, reference
+}
+
+// makefileSplitSyntax locates operator tokens (assignment, rule colon, reference, end) within a Makefile line.
+func makefileSplitSyntax(line string) (assign, colon, reference, end int) {
 	assign, colon, reference = -1, -1, -1
 	for i := 0; i < len(line) && i < MaxMakefileLineBytes; {
 		kind, width := makefileOperatorAt(line, i)
 		switch {
 		case kind == makefileEndToken:
-			return assign, colon, reference
+			return assign, colon, reference, i
 		case kind == makefileAssignToken && assign < 0:
 			assign = i
 		case kind == makefileRuleToken && colon < 0:
@@ -167,7 +173,7 @@ func makefileSplit(line string) (assign, colon, reference int) {
 		}
 		i += width
 	}
-	return assign, colon, reference
+	return assign, colon, reference, -1
 }
 
 // makefileBindsVariable reports whether text binds a variable rather than opening a rule, decided
@@ -417,11 +423,16 @@ func makefileJoin(physical []string, start int) (string, int, bool) {
 // line binds "docs-lint " with its blank, so "$(X)foo:" declares docs-lint and foo: the blanks
 // decide the target names wherever a value is glued to text (makefileVariables).
 func makefileJoinText(parts []string) string {
-	if len(parts) == 1 {
-		return parts[0]
-	}
 	if strings.HasPrefix(parts[0], "\t") {
 		return strings.Join(parts, "\n")
+	}
+	return makefileJoinSyntax(parts)
+}
+
+// makefileJoinSyntax joins backslash-continued Makefile lines into a single normalized syntax string.
+func makefileJoinSyntax(parts []string) string {
+	if len(parts) == 1 {
+		return parts[0]
 	}
 	joined := make([]byte, 0, len(parts[0]))
 	for index, part := range parts {

@@ -173,12 +173,13 @@ func TestGeneratedPipelinesPredictGitHooks(t *testing.T) {
 		{name: "lefthook missing", binary: lefthookMissing, owned: true, hook: "fallback"},
 		{name: "activation skipped", skip: true, binary: lefthookRuns, owned: true, hook: "none"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) { replayHookPrediction(t, tc) })
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { replayHookPrediction(t, tc, index == 0) })
 	}
 }
 
-func replayHookPrediction(t *testing.T, tc hookPredictionCase) {
+// replayHookPrediction executes an adoption test case and verifies lefthook configuration ownership and harness claims.
+func replayHookPrediction(t *testing.T, tc hookPredictionCase, whole bool) {
 	t.Helper()
 	repo := newTestRepo(t, "pipelines")
 	useLefthook(t, tc.binary)
@@ -186,7 +187,9 @@ func replayHookPrediction(t *testing.T, tc hookPredictionCase) {
 		mustWrite(t, filepath.Join(repo, lefthookFile), tc.lefthook)
 	}
 	opts := AdoptOptions{LockSourceRoot: newAdoptLockSource(t), Path: repo, Force: tc.force, SkipHookActivation: tc.skip}
-	if _, err := Adopt(context.Background(), opts); err != nil {
+	// The first fixture runs a whole adoption; every other one runs the agent-harness and
+	// git-hooks steps on the prepared session (#1381).
+	if _, err := adoptOrStep(t, opts, whole, chainAdoptSteps(reconcileAgentHarness, reconcileGitHooks)); err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
 	harness := mustRead(t, filepath.Join(repo, agentsFile))

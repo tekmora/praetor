@@ -10,21 +10,26 @@ import (
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
+// TestAdoptionKeepsWorkingDirectoryPrivate verifies that gitignore reconciliation preserves operator rules and ensures working directory privacy.
 func TestAdoptionKeepsWorkingDirectoryPrivate(t *testing.T) {
-	for name, existing := range map[string]string{
-		"missing": "", "custom": "# retain exactly\nuser-output/",
-		"old-opt-in":   ".workingdir/*\n!.workingdir/STATE.md\n",
-		"pre-agy-rule": "bin/\n/.workingdir/\n",
+	fixtures := []struct {
+		name, existing string
+	}{
+		{"missing", ""},
+		{"custom", "# retain exactly\nuser-output/"},
+		{"old-opt-in", ".workingdir/*\n!.workingdir/STATE.md\n"},
+		{"pre-agy-rule", "bin/\n/.workingdir/\n"},
 		// The block as it rendered before the standards-mcp output cache joined it: the merge
 		// replaces it, so an already adopted repository gains the rule on the next run.
-		"pre-cache-block": "bin/\n\n" + gitIgnoreManagedBegin + "\n/.workingdir/\n/.workingdir2/\n/.standards/worktrees/\n/.agents/mcp_config.json\n" + gitIgnoreManagedEnd + "\n",
+		{"pre-cache-block", "bin/\n\n" + gitIgnoreManagedBegin + "\n/.workingdir/\n/.workingdir2/\n/.standards/worktrees/\n/.agents/mcp_config.json\n" + gitIgnoreManagedEnd + "\n"},
 		// The v3 block before client-local settings joined it: the merge replaces it with v4 (#1389).
-		"v3-block": "bin/\n\n" + gitIgnoreManagedBegin + "\n.workingdir/\n.workingdir2/\n/.standards/worktrees/\n/.agents/mcp_config.json\n/.standards/cache/\n" + gitIgnoreManagedEnd + "\n",
-	} {
+		{"v3-block", "bin/\n\n" + gitIgnoreManagedBegin + "\n.workingdir/\n.workingdir2/\n/.standards/worktrees/\n/.agents/mcp_config.json\n/.standards/cache/\n" + gitIgnoreManagedEnd + "\n"},
+	}
+	for _, fixture := range fixtures {
+		name, existing := fixture.name, fixture.existing
 		t.Run(name, func(t *testing.T) {
-			// One fixture runs whole adoptions, the others the git-ignore step alone
-			// (adoptOrStep, office-w19a-c1-adopt).
-			whole := name == "custom"
+			// Each repository's first pass runs a whole adoption; later passes on the same tree run the step alone (#1381).
+			whole := true
 			root := newTestRepo(t, name)
 			path := filepath.Join(root, ".gitignore")
 			if existing != "" {
@@ -87,7 +92,7 @@ func TestAdoptionKeepsWorkingDirectoryPrivate(t *testing.T) {
 			if _, err := util.RunGit(t.Context(), root, "check-ignore", "--no-index", "--", ".agents/plugins/praetor/plugin.json"); err == nil {
 				t.Fatal("tracked plugin projection became ignored")
 			}
-			if _, err := adoptOrStep(t, opts, whole, reconcileGitIgnore); err != nil {
+			if _, err := adoptOrStep(t, opts, false, reconcileGitIgnore); err != nil {
 				t.Fatal(err)
 			}
 			if repeated := mustRead(t, path); repeated != got {

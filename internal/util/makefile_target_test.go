@@ -3,6 +3,7 @@ package util_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -935,5 +936,230 @@ func TestMakefileTargetRecipe(t *testing.T) {
 				t.Fatalf("util.MakefileTargetRecipe = %q, %v; want %q, %v", got, found, tc.want, tc.found)
 			}
 		})
+	}
+}
+
+// The reader sees the original fixture. The GNU Make replay substitutes the
+// executable and adapts shell builtins without changing the Make expansions.
+type makefileRecipeRegressionRow struct {
+	source, args, flags                    string
+	globalExport, unresolved, graphRefused bool
+}
+
+const makefileRecipeProbeRule = "all:\n\t@go test ./...\n"
+const makefileRecipeDependentProbe = "all: prep\n\t@go test ./...\n"
+
+var makefileRecipeRegressionRows = map[string]makefileRecipeRegressionRow{
+	// These two rows document conservative static results, not native side effects.
+	"computed-export-to-unrelated-name": {
+		source: "N := OTHER\nOTHER := yes\nGOFLAGS := -timeout=45m\nexport $(N)\nall:\n\t@go test -timeout=30m ./...\n",
+		args:   "test -timeout=30m ./...", globalExport: true,
+	},
+	"computed-whole-name-unrelated-assignment": {
+		source: "N := APP_SRCS\n$(N) := a.c\nall:\n\t@go test -timeout=30m ./...\n",
+		args:   "test -timeout=30m ./...", unresolved: true,
+	},
+	"blanket-export-special-target": {
+		source: "GOFLAGS := -timeout=45m\n.EXPORT_ALL_VARIABLES: ; @echo unused\n" + makefileRecipeProbeRule,
+		args:   "test ./...", flags: "-timeout=45m", globalExport: true,
+	},
+	"blanket-export-name-in-value": {
+		source: "GOFLAGS := -timeout=45m\nNOTE := .EXPORT_ALL_VARIABLES\n" + makefileRecipeProbeRule,
+		args:   "test ./...",
+	},
+	"defined-recipe-prefix": {
+		source: "define .RECIPEPREFIX\n>\nendef\nall:\n>go test -timeout=45m ./...\n",
+		args:   "test -timeout=45m ./...", unresolved: true,
+	},
+	"defined-unrelated-variable": {
+		source: "define OTHER\n>\nendef\n" + makefileRecipeProbeRule,
+		args:   "test ./...",
+	},
+	"computed-export": {
+		source: "N := GOFLAGS\nGOFLAGS := -timeout=45m\nexport $(N)\n" + makefileRecipeProbeRule,
+		args:   "test ./...", flags: "-timeout=45m", globalExport: true,
+	},
+	"computed-export-splits-expanded-list": {
+		source: "N := first GOFLAGS last\nGOFLAGS := -timeout=45m\nexport pre$(N)post\n" + makefileRecipeProbeRule,
+		args:   "test ./...", flags: "-timeout=45m", globalExport: true,
+	},
+	"literal-unrelated-export": {
+		source: "GOFLAGS := -timeout=45m\nOTHER := yes\nexport OTHER\n" + makefileRecipeProbeRule,
+		args:   "test ./...",
+	},
+	"computed-recipe-prefix": {
+		source: "PREFIX_NAME := .RECIPEPREFIX\n$(PREFIX_NAME) := >\nall:\n>go test -timeout=45m ./...\n",
+		args:   "test -timeout=45m ./...", unresolved: true,
+	},
+	"computed-unrelated-assignment": {
+		source: "PKG := app\n$(PKG)_SRCS := a.c\n" + makefileRecipeProbeRule,
+		args:   "test ./...",
+	},
+	"tabbed-recipe-eval-export": {
+		source: "prep:\n\t@: $(eval export GOFLAGS := -timeout=45m)\n" + makefileRecipeDependentProbe,
+		args:   "test ./...", flags: "-timeout=45m", graphRefused: true,
+	},
+	"inline-recipe-eval-export": {
+		source: "prep: ; @: $(eval export GOFLAGS := -timeout=45m)\n" + makefileRecipeDependentProbe,
+		args:   "test ./...", flags: "-timeout=45m", graphRefused: true,
+	},
+	"indirect-recipe-eval-export": {
+		source: "PUBLISH = $(eval export GOFLAGS := -timeout=45m)\nprep:\n\t@: $(PUBLISH)\n" + makefileRecipeDependentProbe,
+		args:   "test ./...", flags: "-timeout=45m", graphRefused: true,
+	},
+	"shell-export-is-local": {
+		source: "prep: ; @export GOFLAGS=-timeout=45m\n" + makefileRecipeDependentProbe,
+		args:   "test ./...",
+	},
+	"escaped-eval-is-shell-text": {
+		source: "prep:\n\t@: '$$(eval export GOFLAGS := -timeout=45m)'\n" + makefileRecipeDependentProbe,
+		args:   "test ./...",
+	},
+	"unused-eval-definition": {
+		source: "PUBLISH = $(eval export GOFLAGS := -timeout=45m)\n" + makefileRecipeProbeRule,
+		args:   "test ./...",
+	},
+	"ordinary-recipe-reference": {
+		source: "VALUE := ok\nprep:\n\t@: $(VALUE)\n" + makefileRecipeDependentProbe,
+		args:   "test ./...",
+	},
+}
+
+// TestMakefileRecipeRegressions parses each makefileRecipeRegressionRows source and checks global GOFLAGS export, literal all target presence, and the probe recipe's unresolved and graph-refused status.
+func TestMakefileRecipeRegressions(t *testing.T) {
+	for name, tc := range makefileRecipeRegressionRows {
+		t.Run(name, func(t *testing.T) {
+			file, err := util.MakefileRecipes(tc.source, util.MaxMakefileLines)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if file.MayExportGOFLAGS != tc.globalExport {
+				t.Errorf("MayExportGOFLAGS = %v, want %v", file.MayExportGOFLAGS, tc.globalExport)
+			}
+			if file.Targets["all"] == tc.unresolved {
+				t.Errorf("literal target all present = %v, want %v", file.Targets["all"], !tc.unresolved)
+			}
+			command := "go " + tc.args
+			wantLine := strings.Count(tc.source, "\n") - 1
+			probe := requireMakefileRecipeProbe(t, file.Recipes, wantLine, command)
+			checkMakefileRecipeProbe(t, probe, command, tc.unresolved, tc.graphRefused)
+		})
+	}
+}
+
+// requireMakefileRecipeProbe finds the unique recipe containing command at wantLine.
+func requireMakefileRecipeProbe(t *testing.T, recipes []util.MakefileRecipe, wantLine int, command string) util.MakefileRecipe {
+	t.Helper()
+	var probes []util.MakefileRecipe
+	for _, recipe := range recipes {
+		if recipe.Line == wantLine && strings.Contains(recipe.Text, command) {
+			probes = append(probes, recipe)
+		}
+	}
+	if len(probes) != 1 {
+		t.Fatalf("found %d probes at line %d, want one; recipes: %+v", len(probes), wantLine+1, recipes)
+	}
+	return probes[0]
+}
+
+// checkMakefileRecipeProbe checks recipe preservation and inherited GOFLAGS diagnostics.
+func checkMakefileRecipeProbe(t *testing.T, probe util.MakefileRecipe, command string, unresolved, graphRefused bool) {
+	t.Helper()
+	if unresolved {
+		if !strings.Contains(probe.Unresolved, ".RECIPEPREFIX") {
+			t.Errorf("custom-prefix recipe was not preserved as unresolved: %+v", probe)
+		}
+	} else if probe.Unresolved != "" || probe.Text != command {
+		t.Errorf("normal recipe changed: %+v; want %q with no unresolved reason", probe, command)
+	}
+	if graphRefused {
+		if !strings.Contains(probe.GOFLAGSProblem, "cannot resolve target graph for inherited GOFLAGS") {
+			t.Errorf("dependent recipe lacks graph refusal: %+v", probe)
+		}
+	} else if probe.GOFLAGSProblem != "" {
+		t.Errorf("unexpected per-recipe GOFLAGS problem: %q", probe.GOFLAGSProblem)
+	}
+}
+
+// Fixture check:
+//
+//	go test ./internal/util -run '^TestMakefileRecipeRegressions(GNUReplay)?$' -count=1 -v
+//
+// Run the recipes, not make -n. The native test executable records what the
+// child actually receives, separately from any command that Make echoes.
+func TestMakefileRecipeRegressionsGNUReplay(t *testing.T) {
+	makePath := testsupport.GNUMake(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Even an empty imported GOFLAGS can make a later assignment auto-exported.
+	env := []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}
+	windows := filepath.Separator == '\\'
+	if windows {
+		for _, key := range []string{"ComSpec", "SystemRoot"} {
+			if value, ok := os.LookupEnv(key); ok {
+				env = append(env, key+"="+value)
+			}
+		}
+	}
+
+	for name, tc := range makefileRecipeRegressionRows {
+		t.Run(name, func(t *testing.T) {
+			replayMakefileRecipeWithGNU(t, makePath, probe, env, windows, tc.source, tc.args, tc.flags)
+		})
+	}
+}
+
+// replayMakefileRecipeWithGNU runs one fixture with the probe and checks its GOFLAGS and arguments.
+func replayMakefileRecipeWithGNU(t *testing.T, makePath string, probe []byte, env []string, windows bool, source, args, flags string) {
+	t.Helper()
+	root := t.TempDir()
+	oracle := strings.Replace(source, "go "+args, "./recipe-probe.exe "+makefileRecipeProbeRun+" -- "+args, 1)
+	// Keep the recipe-time expansions, but use a builtin both shells support.
+	oracle = strings.ReplaceAll(oracle, "@: ", "@echo ")
+	if windows {
+		// Like export in sh, set here affects only the prep shell.
+		oracle = strings.ReplaceAll(oracle, "@export GOFLAGS=", "@cmd.exe /d /c set GOFLAGS=")
+	}
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(oracle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission, go_file-permissions_rule-fileperm -- GNU Make executes this native probe directly, so the private copy needs owner execute permission on Unix.
+	if err := os.WriteFile(filepath.Join(root, "recipe-probe.exe"), probe, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), makePath, "--no-print-directory", "-rR", "-j1", "-f", "Makefile", "all")
+	cmd.Dir, cmd.Env = root, env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GNU Make failed: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "probe.log"))
+	if err != nil {
+		t.Fatalf("read GNU Make probe: %v\n%s", err, out)
+	}
+	want := fmt.Sprintf("GOFLAGS=%q (set=%t) argv=%q\n", flags, flags != "", strings.Fields(args))
+	if string(got) != want {
+		t.Fatalf("GNU Make probe = %q, want %q", got, want)
+	}
+}
+
+const makefileRecipeProbeRun = "-test.run=TestMakefileRecipeProbe"
+
+// TestMakefileRecipeProbe is a subprocess helper that writes GOFLAGS presence and argv to probe.log only when invoked with the probe run flag and the -- separator, and otherwise returns immediately.
+func TestMakefileRecipeProbe(t *testing.T) {
+	if len(os.Args) < 3 || os.Args[1] != makefileRecipeProbeRun || os.Args[2] != "--" {
+		return
+	}
+	flags, set := os.LookupEnv("GOFLAGS")
+	out := fmt.Sprintf("GOFLAGS=%q (set=%t) argv=%q\n", flags, set, os.Args[3:])
+	if err := os.WriteFile("probe.log", []byte(out), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

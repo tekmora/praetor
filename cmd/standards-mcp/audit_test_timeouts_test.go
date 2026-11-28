@@ -11,6 +11,6 @@ import "testing"
 func TestServerAuditTestTimeoutsLikeTheCLI(t *testing.T) {
 	srv, root := newFixtureServer(t)
 	writeFixtureFile(t, root, ".github/workflows/portability.yml",
-		"on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps:\n      - run: go test -timeout 60m ./...\n")
+		"on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps:\n      - run: go test -timeout 60m ./...\n        shell: bash\n")
 	expectError(t, "60m timeout", callTool(t, srv, "standards_audit", nil), ".github/workflows/portability.yml:6 sets 60m")
 }

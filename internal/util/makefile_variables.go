@@ -41,7 +41,7 @@ const MaxMakefileVariableDepth = 16
 
 // MaxMakefileComputedRuns bounds the literal runs (makefileLiteralRuns) the computed binding names
 // of one Makefile may hold while the reader still fixes variables (HISS-02). Each computed binding
-// name is split once, and makefileBindings.fixed compares a variable it may fix with every run, so
+// name is split once. The reader compares a variable it may fix with every run, so
 // the bound holds that work to MaxMakefileLines times this many comparisons. A file whose computed
 // binding names hold more resolves no computed name.
 const MaxMakefileComputedRuns = 256
@@ -85,28 +85,33 @@ type makefileBinding struct {
 // and how many literal runs they hold (runs); the bindings the reader may fix; whether a binding
 // of MAKEFLAGS may change values (flags); and whether a line makes Make parse text it computes or
 // reads, which may bind any variable (evaluates). steps counts the work: the bytes of every bound
-// name split into literal runs and the runs fixed compares a variable's name with.
+// name split into literal runs and the runs compared with a variable's name.
 type makefileBindings struct {
-	count     map[string]int
-	computed  []makefileName
-	runs      int
-	plain     []makefileBinding
-	flags     bool
-	evaluates bool
-	steps     int
+	observe    func(name, value string)
+	defineName string
+	count      map[string]int
+	computed   []makefileName
+	runs       int
+	plain      []makefileBinding
+	flags      bool
+	evaluates  bool
+	// Recipes run after rule names are fixed. An eval there or an incomplete read
+	// invalidates claims about values when a recipe runs.
+	recipeUnknown bool
+	steps         int
 }
 
 // makefileReadVariables returns the values the reader fixes for lines, the logical lines of a
 // Makefile, by the allow-list this file opens with.
 func makefileReadVariables(lines []string) makefileVariables {
-	bindings := makefileCollectBindings(lines)
+	bindings := makefileCollectBindings(lines, nil)
 	variables := makefileVariables{values: make(map[string]makefileValue)}
-	if bindings.flags || bindings.evaluates || bindings.runs > MaxMakefileComputedRuns {
+	if !bindings.readable() {
 		variables.steps = bindings.steps
 		return variables
 	}
 	for _, binding := range bindings.plain {
-		if !bindings.fixed(binding.name) {
+		if !bindings.boundExactly(binding.name, 1) {
 			continue
 		}
 		if value, ok := variables.bind(binding); ok {
@@ -117,20 +122,54 @@ func makefileReadVariables(lines []string) makefileVariables {
 	return variables
 }
 
+// readable reports whether the collected bindings exclude indirect redefinition.
+func (b *makefileBindings) readable() bool {
+	return !b.flags && !b.evaluates && b.runs <= MaxMakefileComputedRuns
+}
+
+// MakefileSimpleAssignments returns the raw right-hand sides of unique, unconditional root
+// assignments and whether builtin keeps its Make-provided value. Callers must validate
+// each right-hand side before treating it as expanded text. observe receives assignment
+// names and raw values even when conditional or ambiguous bindings prevent proving a value.
+func MakefileSimpleAssignments(data, builtin string, observe func(name, value string)) (map[string]string, bool) {
+	lines, whole := makefileLogicalLines(data)
+	if !whole {
+		return nil, false
+	}
+	bindings := makefileCollectBindings(lines, observe)
+	if !bindings.readable() || bindings.recipeUnknown {
+		return nil, false
+	}
+	values := make(map[string]string)
+	for _, binding := range bindings.plain {
+		switch binding.operator {
+		case "=", ":=", "::=":
+			if bindings.boundExactly(binding.name, 1) {
+				values[binding.name] = strings.Trim(binding.value, " \t")
+			}
+		}
+	}
+	return values, bindings.boundExactly(builtin, 0)
+}
+
 // makefileCollectBindings records every binding on a line Make parses as makefile syntax, an
 // unsure line included: the opening line of a define and every line makefileBindings.line reads.
 // Define bodies and recipe lines bind nothing, unless a body calls eval. The reading stops where
 // the scanner stops; a caller leaves such a file to Make before it resolves any name.
-func makefileCollectBindings(lines []string) makefileBindings {
-	bindings := makefileBindings{count: make(map[string]int)}
+func makefileCollectBindings(lines []string, observe func(name, value string)) makefileBindings {
+	bindings := makefileBindings{count: make(map[string]int), observe: observe}
 	var scanner makefileScanner
 	for index := 0; index < len(lines) && index < MaxMakefileLines; index++ {
 		opening := scanner.depth == 0
 		kind := scanner.next(lines[index])
 		switch {
 		case scanner.lost:
+			bindings.recipeUnknown = true
 			return bindings
 		case kind == makefileRecipeLine:
+			if makefileCallsEval(lines[index]) {
+				bindings.recipeUnknown = true
+			}
 		case kind == makefileDefineLine:
 			bindings.define(opening, strings.TrimSpace(lines[index]))
 		default:
@@ -161,6 +200,9 @@ func (b *makefileBindings) define(opening bool, line string) {
 	if opening {
 		name, _ := makefileBoundName(line)
 		b.add(name, false)
+		b.defineName = name
+	} else if b.observe != nil && b.defineName != "" {
+		b.observe(b.defineName, line)
 	}
 }
 
@@ -181,14 +223,20 @@ func (b *makefileBindings) line(index int, text string, top bool) {
 	_, width := makefileOperatorAt(text, assign)
 	binding := makefileBinding{operator: text[assign : assign+width], value: text[assign+width:], line: index}
 	harmless := makefileHarmlessFlagsValue(binding.operator, binding.value)
-	if colon >= 0 && colon < assign {
+	left := text[:assign]
+	targetSpecific := colon >= 0 && colon < assign
+	if targetSpecific {
 		_, after := makefileOperatorAt(text, colon)
-		b.addAll(makefileNameWords(text[colon+after:assign]), harmless)
-		return
+		left = text[colon+after : assign]
 	}
-	names := makefileNameWords(text[:assign])
-	b.addAll(names, harmless)
-	if top && len(names) == 1 && makefileDirectiveIndex(strings.Fields(text[:assign])) == 0 {
+	names := makefileNameWords(left)
+	for _, name := range names {
+		b.add(name, harmless)
+		if b.observe != nil {
+			b.observe(name, binding.value)
+		}
+	}
+	if !targetSpecific && top && len(names) == 1 && makefileDirectiveIndex(strings.Fields(left)) == 0 {
 		binding.name = names[0]
 		b.plain = append(b.plain, binding)
 	}
@@ -231,11 +279,10 @@ func (b *makefileBindings) add(name string, harmless bool) {
 	}
 }
 
-// fixed reports whether the file binds name exactly once, under a plain name, and no computed
-// binding name may be it. Each computed name was split when it was recorded, so the test compares
-// name with literal runs only, and counts each run it may compare in steps.
-func (b *makefileBindings) fixed(name string) bool {
-	if b.count[name] != 1 || !makefilePlainName(name) {
+// boundExactly checks the requested number of plain bindings and excludes computed names.
+// Each computed name was split when recorded, so steps counts only the literal runs compared.
+func (b *makefileBindings) boundExactly(name string, count int) bool {
+	if b.count[name] != count || !makefilePlainName(name) {
 		return false
 	}
 	return !slices.ContainsFunc(b.computed, func(computed makefileName) bool {
