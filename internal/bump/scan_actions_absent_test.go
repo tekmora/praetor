@@ -1,10 +1,21 @@
 package bump
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestScanWorkflowActionsCanceledMissingDirectory(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err := ScanWorkflowActions(ctx, t.TempDir())
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing workflow directory under cancellation: %v", err)
+	}
+}
 
 // TestScanWorkflowActionsDistinguishesAbsentFromMisplaced covers both sides of treating a
 // missing workflow directory as "no workflows". On Windows, reading a directory whose path is

@@ -7,12 +7,98 @@ package contextopt
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// TestOpenUnixLeafRetriesEINTR interrupts the first open and then opens the real
+// child using the descriptor and flags supplied by the native opener.
+func TestOpenUnixLeafRetriesEINTR(t *testing.T) {
+	const name = "sample.txt"
+	dir := contextFixture(t, map[string][]byte{name: []byte("original")})
+	parent, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := parent.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	calls := 0
+	openat := func(fd int, leaf string, flags int, mode uint32) (int, error) {
+		calls++
+		if calls == 1 {
+			return -1, unix.EINTR
+		}
+		return unix.Openat(fd, leaf, flags, mode)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	child, err := openUnixLeaf(ctx, parent.Fd(), dir, name, readLeafData, openat)
+	if err != nil {
+		t.Fatalf("open after interruption: %v", err)
+	}
+	info, statErr := child.Stat()
+	if err := child.Close(); err != nil {
+		t.Error(err)
+	}
+	if statErr != nil || info.Size() != int64(len("original")) || calls != 2 {
+		t.Fatalf("interrupted open: info=%v err=%v calls=%d", info, statErr, calls)
+	}
+}
+
+// TestOpenUnixLeafStopsOnError pins the attempt limit and preserves terminal errors.
+func TestOpenUnixLeafStopsOnError(t *testing.T) {
+	for _, tc := range [...]struct {
+		err   error
+		calls int
+	}{
+		{unix.EINTR, 8},
+		{unix.EACCES, 1},
+		{errors.Join(unix.EINTR, unix.EIO), 1},
+	} {
+		calls := 0
+		openat := func(int, string, int, uint32) (int, error) {
+			calls++
+			return -1, tc.err
+		}
+		_, err := openUnixLeaf(t.Context(), 0, ".", "child", listDirectory, openat)
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Path != "child" || !errors.Is(err, tc.err) || calls != tc.calls {
+			t.Errorf("openat returning %v: got %v after %d calls, want %d calls", tc.err, err, calls, tc.calls)
+		}
+	}
+}
+
+// TestOpenUnixLeafStopsOnCanceledEINTR requires the interrupted open to be the last call.
+func TestOpenUnixLeafStopsOnCanceledEINTR(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	calls := 0
+	openat := func(int, string, int, uint32) (int, error) {
+		calls++
+		cancel()
+		return -1, unix.EINTR
+	}
+	_, err := openUnixLeaf(ctx, 0, ".", "child", listDirectory, openat)
+	requireCanceledInterruption(t, calls, err)
+}
+
+// requireCanceledInterruption checks that cancellation preserves the first syscall's error.
+func requireCanceledInterruption(t *testing.T, calls int, err error) {
+	t.Helper()
+	if calls != 1 || !errors.Is(err, unix.EINTR) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled syscall: calls=%d err=%v", calls, err)
+	}
+}
 
 func TestNonblockingOpenRejectsFileReplacedByFIFO(t *testing.T) {
 	root := contextFixture(t, map[string][]byte{"policy.md": []byte("before")})
@@ -36,14 +122,16 @@ func TestNonblockingOpenRejectsFileReplacedByFIFO(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		file, err := openSource(pinned, "policy.md")
+		file, err := openSource(ctx, pinned, "policy.md")
 		if err != nil {
 			done <- err
 			return
 		}
-		_, readErr := stableRead(context.Background(), file, before)
+		_, readErr := stableRead(ctx, file, before)
 		if err := file.Close(); err != nil {
 			done <- err
 			return
@@ -57,5 +145,178 @@ func TestNonblockingOpenRejectsFileReplacedByFIFO(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("source open blocked on FIFO")
+	}
+}
+
+// TestOpenSourceRefusesReplacementSymlink checks the open itself when the relative link
+// points to the very inode already inspected. An identity comparison alone accepts it.
+func TestOpenSourceRefusesReplacementSymlink(t *testing.T) {
+	dir := contextFixture(t, map[string][]byte{"fixture.go": []byte("original")})
+	root := snapshotDirectory(t, dir)
+	const name = "fixture.go"
+	if _, err := root.Lstat(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Rename(name, "original.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Symlink("original.go", name); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	file, err := openSource(ctx, root, name)
+	if file != nil {
+		t.Errorf("opened a fixture through a replacement link")
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != name {
+		t.Fatalf("want the refused leaf's open error, got %v", err)
+	}
+}
+
+// listedTestBucket renames the original directory before the next no-follow acquisition.
+func listedTestBucket(t *testing.T) (*SnapshotDirectory, string) {
+	t.Helper()
+	dir := t.TempDir()
+	root := snapshotDirectory(t, dir)
+	if err := root.Mkdir("bucket", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Rename("bucket", "original"); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := OpenSnapshotDirectoryIn(t.Context(), dir, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := parent.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return parent, filepath.Join(dir, "bucket")
+}
+
+// openReplacedBucket attempts a fresh no-follow acquisition and releases any accepted handle.
+func openReplacedBucket(ctx context.Context, parent *SnapshotDirectory) error {
+	child, err := OpenChildDirectory(ctx, parent, "bucket")
+	if err != nil {
+		return err
+	}
+	return child.Close()
+}
+
+// TestListedDirectoryRefusesReplacementLink rejects a link back to the original directory.
+func TestListedDirectoryRefusesReplacementLink(t *testing.T) {
+	parent, path := listedTestBucket(t)
+	if err := os.Symlink("original", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := openReplacedBucket(t.Context(), parent); err == nil {
+		t.Fatal("opened the original directory through its replacement link")
+	}
+}
+
+// TestListedDirectoryRefusesReplacementFIFO requires the acquisition to finish while
+// the FIFO has no writer. A failing blocking opener is released during cleanup.
+func TestListedDirectoryRefusesReplacementFIFO(t *testing.T) {
+	parent, path := listedTestBucket(t)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- openReplacedBucket(ctx, parent) }()
+	select {
+	case err := <-done:
+		if err == nil || ctx.Err() != nil {
+			t.Fatalf("expected an open error before the deadline, got %v (context %v)", err, ctx.Err())
+		}
+	case <-ctx.Done():
+		releaseBlockedBucket(t, path, done)
+		t.Fatal("directory open blocked on a FIFO until the context expired")
+	}
+}
+
+// releaseBlockedBucket pairs with a blocked read open before the test closes its parent.
+func releaseBlockedBucket(t *testing.T, path string, done <-chan error) {
+	t.Helper()
+	writer, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := writer.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case err := <-done:
+		t.Logf("released directory opener returned %v", err)
+	case <-time.After(time.Second):
+		t.Error("directory opener still running after FIFO release")
+	}
+}
+
+// TestCanceledSuccessfulOpenClosesChild cancels after a real openat acquires a
+// descriptor. The next operation must see cancellation and the descriptor must be closed.
+func TestCanceledSuccessfulOpenClosesChild(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+	defer cancel()
+	parent := snapshotDirectory(t, t.TempDir())
+	file, err := parent.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	acquired := -1
+	child, err := openUnixLeaf(ctx, file.Fd(), file.Name(), ".", listDirectory, func(fd int, name string, flags int, mode uint32) (int, error) {
+		var openErr error
+		acquired, openErr = unix.Openat(fd, name, flags, mode)
+		cancel()
+		return acquired, openErr
+	})
+	if child != nil {
+		if closeErr := child.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+		t.Fatal("returned a child acquired after cancellation")
+	}
+	if acquired < 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("late open: fd=%d err=%v", acquired, err)
+	}
+	if err := unix.Fstat(acquired, &unix.Stat_t{}); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("late child descriptor still live: %v", err)
+	}
+}
+
+// TestFinalNativeAttemptCancellation preserves the exact last error whether
+// attempt eight is interrupted or returns a different terminal failure.
+func TestFinalNativeAttemptCancellation(t *testing.T) {
+	for _, final := range [...]error{unix.EINTR, unix.EIO} {
+		ctx, cancel := context.WithTimeout(t.Context(), MaxDuration)
+		calls := 0
+		last := fmt.Errorf("final native response: %w", final)
+		_, err := retryInterrupted(ctx, func() (int, error) {
+			calls++
+			if calls == 8 {
+				cancel()
+				return -1, last
+			}
+			return -1, unix.EINTR
+		})
+		cancel()
+		if calls != 8 || !errors.Is(err, last) || !errors.Is(err, context.Canceled) {
+			t.Errorf("attempt eight returning %v: calls=%d err=%v", final, calls, err)
+		}
 	}
 }

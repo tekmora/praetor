@@ -17,9 +17,11 @@ package hisscoverage
 import (
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
 )
 
@@ -96,6 +98,26 @@ type Coverage struct {
 	Mechanism string `yaml:"mechanism" json:"mechanism"`
 	// Rationale is the measurement that justifies the state, in one sentence.
 	Rationale string `yaml:"rationale" json:"rationale"`
+}
+
+// fixtureLanguage is the single directory component used for validation, capture and replay.
+func (c Coverage) fixtureLanguage() string { return path.Clean(c.Language) }
+
+// validateLanguage accepts slash paths that clean to one ordinary child of the rule.
+// Capture also compares open directory identities to catch aliases on the fixture volume.
+func (c Coverage) validateLanguage(ruleID string, langs map[string]struct{}) error {
+	language := c.fixtureLanguage()
+	if strings.ContainsAny(c.Language, `\:`) || strings.TrimSpace(language) == "" {
+		return fmt.Errorf("%w: rule %s language %q must name one directory component", ErrInvalidCatalog, ruleID, c.Language)
+	}
+	if err := contextopt.ValidateLeafName(language); err != nil {
+		return fmt.Errorf("%w: rule %s language %q: %w", ErrInvalidCatalog, ruleID, c.Language, err)
+	}
+	if _, dup := langs[language]; dup {
+		return fmt.Errorf("%w: rule %s declares %s twice", ErrInvalidCatalog, ruleID, language)
+	}
+	langs[language] = struct{}{}
+	return nil
 }
 
 // Rule is one invariant's declared evidence across languages. Its name is the HISS catalog's
@@ -206,13 +228,9 @@ func validateRule(rule *Rule, seen map[string]struct{}) error {
 // mechanism is refused: that combination is how a matrix cell comes to advertise a gate that
 // does not exist.
 func validateCoverage(ruleID string, cov *Coverage, langs map[string]struct{}) error {
-	if strings.TrimSpace(cov.Language) == "" {
-		return fmt.Errorf("%w: rule %s has coverage with no language", ErrInvalidCatalog, ruleID)
+	if err := cov.validateLanguage(ruleID, langs); err != nil {
+		return err
 	}
-	if _, dup := langs[cov.Language]; dup {
-		return fmt.Errorf("%w: rule %s declares %s twice", ErrInvalidCatalog, ruleID, cov.Language)
-	}
-	langs[cov.Language] = struct{}{}
 	if !cov.State.Valid() {
 		return fmt.Errorf("%w: rule %s language %s: %w %q",
 			ErrInvalidCatalog, ruleID, cov.Language, ErrUnknownState, cov.State)

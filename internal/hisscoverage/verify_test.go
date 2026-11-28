@@ -1,11 +1,15 @@
 package hisscoverage
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
 )
@@ -16,9 +20,18 @@ const recursiveGo = "package p\n\nfunc F(n int) int {\n\tif n <= 1 {\n\t\treturn
 // cleanGo is a Go source that no invariant reports.
 const cleanGo = "package p\n\nfunc F(n int) int { return n + 1 }\n"
 
-// corpusRoot builds a fixture root and returns the repository root containing it.
+// requireNativeReplay skips a test that needs the host's verified fixture reader.
+func requireNativeReplay(t *testing.T) {
+	t.Helper()
+	if err := FixtureReplayPlatform(runtime.GOOS); err != nil {
+		t.Skip(err)
+	}
+}
+
+// corpusRoot stages one fixture for a native replay test.
 func corpusRoot(t *testing.T, rule, lang, bucket, name, body string) string {
 	t.Helper()
+	requireNativeReplay(t)
 	root := t.TempDir()
 	writeCorpusFixture(t, root, rule, lang, bucket, name, body)
 	return root
@@ -30,6 +43,113 @@ func catalogFor(rule, lang string, state State) *Catalog {
 		ID:       rule,
 		Coverage: []Coverage{{Language: lang, State: state, Mechanism: "internal/hiss", Rationale: "measured"}},
 	}}}
+}
+
+// TestVerifyLanguageComponent replays equivalent spellings from the same positive bucket.
+func TestVerifyLanguageComponent(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	for _, language := range [...]string{"go", "./go", "go/", "other/../go"} {
+		catalog := catalogFor("HISS-01", language, StateEnforced)
+		report, err := Verify(t.Context(), root, catalog)
+		if err != nil || !report.Passed() || report.Claims != 1 || report.Fixtures != 1 {
+			t.Errorf("language %q: report=%+v err=%v", language, report, err)
+		}
+	}
+}
+
+// TestCatalogRefusesInvalidLanguageComponents checks confinement and canonical duplicates.
+func TestCatalogRefusesInvalidLanguageComponents(t *testing.T) {
+	for _, language := range [...]string{"", ".", "..", "../go", "/go", "a/go", "go\x00", `C:\go`, "C:/go", `..\go`} {
+		catalog := catalogFor("HISS-01", language, StateEnforced)
+		if err := catalog.Validate(); !errors.Is(err, ErrInvalidCatalog) {
+			t.Errorf("language %q: want invalid catalog, got %v", language, err)
+		}
+	}
+	catalog := catalogFor("HISS-01", "./go", StateEnforced)
+	rule := &catalog.Rules[0]
+	duplicate := rule.Coverage[0]
+	duplicate.Language = "go/"
+	rule.Coverage = append(rule.Coverage, duplicate)
+	if err := catalog.Validate(); !errors.Is(err, ErrInvalidCatalog) {
+		t.Errorf("duplicate language directory: want invalid catalog, got %v", err)
+	}
+}
+
+// casePairCatalog declares two spellings whose fixture directories may coincide.
+func casePairCatalog() *Catalog {
+	catalog := catalogFor("HISS-01", "go", StateEnforced)
+	rule := &catalog.Rules[0]
+	second := rule.Coverage[0]
+	second.Language = "GO"
+	rule.Coverage = append(rule.Coverage, second)
+	return catalog
+}
+
+// uppercaseLanguageExists checks how the fixture volume resolves GO after creating go.
+func uppercaseLanguageExists(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return true
+}
+
+// TestVerifyRefusesAliasedLanguageDirectory lets the volume resolve GO. On a
+// case-sensitive volume a rename makes the second open resolve to the same inode.
+func TestVerifyRefusesAliasedLanguageDirectory(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	ruleDir := filepath.Join(root, FixtureDir, "HISS-01")
+	upper := filepath.Join(ruleDir, "GO")
+	rename := !uppercaseLanguageExists(t, upper)
+	if rename && runtime.GOOS == "windows" {
+		t.Skip("renaming a directory with open children requires Unix")
+	}
+	listings := 0
+	ctx := withBucketReader(t.Context(), func(_ string, entries []os.DirEntry) []os.DirEntry {
+		listings++
+		if rename && listings == 1 {
+			if err := os.Rename(filepath.Join(ruleDir, "go"), upper); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return entries
+	})
+	report, err := Verify(ctx, root, casePairCatalog())
+	const duplicate = `language "GO" shares its fixture directory with "go"`
+	if report != nil || !errors.Is(err, ErrInvalidCatalog) || !strings.Contains(err.Error(), duplicate) {
+		t.Errorf("expected invalid catalog naming GO, got report %+v, err %v", report, err)
+	}
+	if listings != 1 {
+		t.Fatalf("listed the aliased positive bucket %d times, want once", listings)
+	}
+}
+
+// TestCaptureDistinctLanguageDirectories preserves separate buckets when the
+// fixture volume supports both names.
+func TestCaptureDistinctLanguageDirectories(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "first.go", recursiveGo)
+	if uppercaseLanguageExists(t, filepath.Join(root, FixtureDir, "HISS-01", "GO")) {
+		t.Skip("fixture volume aliases go and GO")
+	}
+	writeCorpusFixture(t, root, "HISS-01", "GO", bucketPositive, "second.go", recursiveGo)
+	var store fixtureStore
+	corpus, err := store.openCorpusSnapshot(t.Context(), root, casePairCatalog())
+	if closeErr := store.close(); closeErr != nil {
+		t.Error(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for lang, want := range map[string]string{"go": "first.go", "GO": "second.go"} {
+		files := corpus[fixtureStage{ruleID: "HISS-01", language: lang}][bucketPositive].files
+		if len(files) != 1 || files[0].name != want {
+			t.Errorf("%s: captured %+v, want %s", lang, files, want)
+		}
+	}
 }
 
 // TestVerifyAcceptsABackedClaim is the positive dimension: a claim of detection whose
@@ -46,6 +166,58 @@ func TestVerifyAcceptsABackedClaim(t *testing.T) {
 	}
 	if report.Claims != 1 || report.Fixtures != 1 {
 		t.Errorf("expected one claim over one fixture, got %d/%d", report.Claims, report.Fixtures)
+	}
+}
+
+// TestFixtureReplayPlatforms admits each native CI platform.
+func TestFixtureReplayPlatforms(t *testing.T) {
+	for _, goos := range [...]string{"linux", "darwin", "windows"} {
+		if err := FixtureReplayPlatform(goos); err != nil {
+			t.Errorf("%s: %v", goos, err)
+		}
+	}
+}
+
+// TestVerifyUnverifiedPlatform refuses even a backed claim before fixture capture. Both the
+// present bucket and every absent bucket of the local and delegated claims need findings.
+func TestVerifyUnverifiedPlatform(t *testing.T) {
+	root := t.TempDir()
+	writeCorpusFixture(t, root, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	catalog := catalogFor("HISS-01", "./go", StateEnforced)
+	delegated := delegatedCatalogFor("HISS-02", "go", "external")
+	catalog.Rules = append(catalog.Rules, delegated.Rules[0])
+	ctx := afterFixtureCapture(t.Context(), func() { t.Fatal("captured a corpus on an unverified platform") })
+	if FixtureReplayPlatform(runtime.GOOS) != nil {
+		report, err := Verify(ctx, root, catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requirePlatformRefusals(t, report, runtime.GOOS)
+	}
+	for _, goos := range [...]string{"android", "ios", "freebsd", "netbsd", "openbsd", "dragonfly", "aix", "solaris", "illumos", "wasip1", "future-os"} {
+		report, err := verifyForPlatform(ctx, root, catalog, goos)
+		if err != nil {
+			t.Fatalf("verify on %s: %v", goos, err)
+		}
+		requirePlatformRefusals(t, report, goos)
+	}
+}
+
+// requirePlatformRefusals checks the sorted report, including bucket identities and counts.
+func requirePlatformRefusals(t *testing.T, report *Report, goos string) {
+	t.Helper()
+	if report == nil || report.Passed() || report.Claims != 2 || report.Fixtures != 0 {
+		t.Fatalf("%s: expected two incomplete claims and zero replayed fixtures, got %+v", goos, report)
+	}
+	detail := "incomplete replay: " + goos + ": fixture replay is verified on linux, darwin and windows only (HISS-21)"
+	var want []Finding
+	for _, rule := range [...]string{"HISS-01", "HISS-02"} {
+		for _, bucket := range [...]string{"gap", "measured", "negative", "positive"} {
+			want = append(want, Finding{Rule: rule, Language: "go", Bucket: bucket, Detail: detail})
+		}
+	}
+	if !slices.Equal(report.Findings, want) {
+		t.Errorf("%s: got findings %v, want %v", goos, report.Findings, want)
 	}
 }
 
@@ -76,15 +248,14 @@ const workflowOrTrue = "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    s
 // YAML file, so a claim backed by it fails (negative): the staging, not the bytes, decides.
 func TestVerifyStagesWorkflowFixtures(t *testing.T) {
 	root := corpusRoot(t, "HISS-07", "github-actions", bucketPositive, "or-true.yml", workflowOrTrue)
-	report, err := Verify(t.Context(), root, catalogFor("HISS-07", "github-actions", StatePartial))
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if !report.Passed() || report.Fixtures != 1 {
-		t.Fatalf("a workflow fixture must be staged where its run: block is read: %+v", report.Findings)
+	for _, language := range [...]string{"github-actions", "./github-actions/"} {
+		report, err := Verify(t.Context(), root, catalogFor("HISS-07", language, StatePartial))
+		if err != nil || !report.Passed() || report.Fixtures != 1 {
+			t.Fatalf("workflow language %q must stage one scannable workflow: %+v, %v", language, report, err)
+		}
 	}
 	root = corpusRoot(t, "HISS-07", "shell", bucketPositive, "or-true.yml", workflowOrTrue)
-	report, err = Verify(t.Context(), root, catalogFor("HISS-07", "shell", StatePartial))
+	report, err := Verify(t.Context(), root, catalogFor("HISS-07", "shell", StatePartial))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -152,6 +323,7 @@ func TestVerifyRejectsUndeclaredCoverage(t *testing.T) {
 // undemonstrated: a claim with no fixture at all is not contradicted, but it is not
 // evidence either, so it is surfaced without failing the gate while the corpus is filled in.
 func TestVerifyReportsAnUnbackedClaim(t *testing.T) {
+	requireNativeReplay(t)
 	report, err := Verify(t.Context(), t.TempDir(), catalogFor("HISS-01", "go", StateEnforced))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
@@ -242,6 +414,7 @@ func TestLoadCatalogRejectsUnknownField(t *testing.T) {
 // repository's own catalog must load and every claim must survive its fixtures, which is
 // what makes the committed file evidence rather than documentation.
 func TestRepositoryCatalogVerifies(t *testing.T) {
+	requireNativeReplay(t)
 	root := filepath.Join("..", "..")
 	catalog, err := LoadCatalog(t.Context(), root)
 	if err != nil {
@@ -576,4 +749,96 @@ func TestVerifyIntentionalGapMarkerContract(t *testing.T) {
 	writeCorpusFixture(t, noReason, "HISS-01", "go", bucketGap, "no-reason.go", markedReasonlessGo)
 	requireFinding(t, "marker without reason", noReason, catalogFor("HISS-01", "go", StatePartial),
 		"no-reason.go", "reason")
+}
+
+// TestFindingStringEscapesControlCharacters verifies that terminal control sequences and
+// newlines in fixture names and details are escaped in Finding.String while raw fields stay
+// intact for JSON serialization.
+func TestFindingStringEscapesControlCharacters(t *testing.T) {
+	const rawName = "bad\x1b[31m\nnext.go"
+	var overflow Report
+	recordIncompleteBucket(&overflow, "HISS-01", "go", bucketPositive, rawName, maxFixturesPerBucket, "regular files")
+	assertEscapedFinding(t, overflow.Findings[0], rawName)
+
+	detailFinding := Finding{
+		Rule: "HISS-01", Language: "go", Bucket: bucketPositive, Fixture: rawName,
+		Detail: "entry " + rawName + " is not a regular fixture file; skipped without replay",
+	}
+	assertEscapedFinding(t, detailFinding, rawName)
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	// The snapshot reader refuses a fixture path with control characters, so Verify fails with an
+	// error; that error names the fixture escaped, never with the raw terminal controls.
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, rawName, cleanGo)
+	_, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateEnforced))
+	if err == nil {
+		t.Fatal("verify accepted a fixture path with control characters")
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\n") || !strings.Contains(err.Error(), escapeControl(rawName)) {
+		t.Fatalf("verify error %q must name the fixture escaped", err.Error())
+	}
+}
+
+// closedRootEntry looks up its metadata through a closed test root.
+type closedRootEntry struct {
+	os.DirEntry
+	root *os.Root
+}
+
+// Info returns the real filesystem error from the closed directory.
+func (e closedRootEntry) Info() (os.FileInfo, error) { return e.root.Lstat(e.Name()) }
+
+// TestClassifyBucketEntryEscapesStatError checks both copies of a listed name and the filesystem cause.
+func TestClassifyBucketEntryEscapesStatError(t *testing.T) {
+	const name = "bad\nname.go"
+	listing := fstest.MapFS{name: {}}
+	entries, err := listing.ReadDir(".")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("list fixture: entries=%v err=%v", entries, err)
+	}
+	// Closing the pinned parent forces a real Lstat error on every host.
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dir := "."
+	_, _, err = classifyBucketEntry(t.Context(), closedRootEntry{entries[0], root})
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != filepath.Join(dir, name) {
+		t.Fatalf("stat error must retain the original path error: %v", err)
+	}
+	if !errors.Is(err, pathErr.Err) {
+		t.Fatalf("stat error must retain the filesystem cause: %v", err)
+	}
+	if want := escapeControl("stat fixture " + name + ": " + pathErr.Error()); err.Error() != want {
+		t.Fatalf("stat error = %q, want %q", err.Error(), want)
+	}
+}
+
+// assertEscapedFinding checks that f.String escapes ESC and LF while JSON keeps f.Fixture raw.
+func assertEscapedFinding(t *testing.T, f Finding, wantRawFixture string) {
+	t.Helper()
+	rendered := f.String()
+	if strings.ContainsAny(rendered, "\x1b\n\r") {
+		t.Fatalf("Finding.String leaked raw control bytes: %q", rendered)
+	}
+	if !strings.Contains(rendered, `bad\x1b[31m\nnext.go`) {
+		t.Fatalf("Finding.String = %q, want escaped fixture name", rendered)
+	}
+	encoded, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("marshal finding: %v", err)
+	}
+	var roundTrip Finding
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatalf("unmarshal finding: %v", err)
+	}
+	if roundTrip.Fixture != wantRawFixture {
+		t.Fatalf("JSON round-trip Fixture = %q, want raw %q", roundTrip.Fixture, wantRawFixture)
+	}
 }

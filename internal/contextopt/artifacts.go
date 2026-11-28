@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // OpenDirectory pins a directory without following symlinks in any component.
@@ -23,7 +25,7 @@ func OpenDirectory(ctx context.Context, path string) (*os.Root, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := util.CheckedIO(ctx, func() (string, error) { return filepath.Abs(path) })
 	if err != nil {
 		return nil, err
 	}
@@ -33,13 +35,26 @@ func OpenDirectory(ctx context.Context, path string) (*os.Root, error) {
 // ReadRootSnapshot reads a bounded regular UTF-8 file from a pinned directory.
 // A flat name is required; symlinks and changes during the read are rejected.
 func ReadRootSnapshot(ctx context.Context, root *os.Root, name string) ([]byte, error) {
-	if ctx == nil || root == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
-		return nil, fmt.Errorf("context, directory and flat filename required")
-	}
-	if err := validatePath(name); err != nil {
+	if err := validateRootLeaf(ctx, root, name); err != nil {
 		return nil, err
 	}
 	return snapshotRoot(ctx, root, name)
+}
+
+// validateRootLeaf checks the arguments for a flat file or child directory in a pinned root.
+func validateRootLeaf(ctx context.Context, root *os.Root, name string) error {
+	if ctx == nil || root == nil {
+		return fmt.Errorf("context, directory and flat filename required")
+	}
+	return ValidateLeafName(name)
+}
+
+// ValidateLeafName permits one ordinary component below a pinned directory.
+func ValidateLeafName(name string) error {
+	if !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+		return fmt.Errorf("flat filename required: %w", os.ErrInvalid)
+	}
+	return validatePath(name)
 }
 
 // ReadSnapshot reads one immutable regular UTF-8 file using the same bounded,

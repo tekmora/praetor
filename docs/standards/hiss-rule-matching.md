@@ -743,8 +743,8 @@ and whose I/O deadlines are module arguments this scanner does not read
 
 ## HISS-20: claims are replayed
 
-Every enforcement claim in `.config/hiss/coverage.yaml` is replayed against the fixture corpus by
-`praetorctl hiss coverage --verify`, which runs inside `make verify-all`. The check runs in both
+On Linux, macOS and Windows, `praetorctl hiss coverage --verify` replays the fixture corpus for
+every claim in `.config/hiss/coverage.yaml` as part of `make verify-all`. The check runs in both
 directions: a claim of enforcement must report each of its positive fixtures, and a claim of absence
 must leave its gap fixtures undetected. A rule that silently *gains* coverage fails the gate exactly
 as one that silently loses it, so the catalog cannot drift in either direction. A `measured/`
@@ -768,3 +768,54 @@ A fixture whose rule reads more than one file is a single `*.txtar` file in the
 dependency tooling as one of the repository's own manifests; inside an archive it is not. An
 archive with no file, more than 16 files, a repeated name or a path that leaves the fixture root
 fails the replay (`TestParseArchive_*` in `internal/hisscoverage/archive_test.go`).
+
+On every other GOOS, the CLI refuses verification before loading the catalog. Given a
+catalog, `hisscoverage.Verify` skips the corpus and records an incomplete replay for each
+catalog bucket, including absent buckets and claims attributed to another runner. Each finding
+names the host GOOS and gives the reason `fixture replay is verified on linux, darwin and windows only (HISS-21)`.
+These findings fail verification. The Platform Neutrality workflow exercises the native readers
+in its Linux and macOS harness jobs and its Windows shard jobs. On macOS a directory on an
+`MNT_UNION` mount still receives an incomplete finding before enumeration.
+
+On a verified platform, Verify pins the fixture corpus directory, lists each present catalog
+bucket once and captures regular fixture bytes before replay. The verdict covers those bytes and the entries
+in those listings. The verifier counts names before looking up individual entries. A failed lookup
+produces an incomplete-replay finding naming the entry. After lookup, capture compares
+each regular file with the identity in the listing. On Linux and macOS, capture compares the device and inode.
+For a directory record with unknown kind, the first lookup supplies both the kind and the identity.
+On Windows, listing and capture each open the file relative to the pinned parent and call
+`GetFileInformationByHandleEx(FileIdInfo)` on that handle. Capture requires the same
+64-bit volume serial number and all 128 file ID bits from `FILE_ID_INFO`. Failure to read
+either identity produces an incomplete-replay finding naming the fixture. A change after
+capture shows on the next run.
+
+Across all buckets, the snapshot retains at most 1 MiB of fixture backing arrays between
+reads. Further fixture bytes go to a private temporary file. Capture handles one additional
+fixture of at most 1 MiB and uses up to 32 KiB of streaming copy scratch with the pinned
+Go toolchain. Replay loads and scans one fixture at a time. Each bucket's results are
+consumed before the next bucket. Results retain a canonical marker kind and a detached
+reason of at most 256 bytes. Unknown-class diagnostics likewise quote at most 256 bytes
+of fixture text. Directory metadata, transient parsing copies, scanner working memory and
+accumulated report strings are outside the captured-byte budget.
+
+Cancellation is cooperative. A local directory read and a spill-file read are
+non-interruptible operations. Verify checks cancellation before and after each read.
+If the context expires during a read, the filesystem call must return before Verify can
+finish and run its deferred cleanup, which closes and removes the spill file. Each spill read has its own
+per-fixture deadline. A read or write that succeeds after its fixture deadline fails verification
+even while the parent context remains live (`TestSpillReadChecksFixtureDeadline`,
+`TestSpillWriteChecksFixtureDeadline`).
+`TestBucketListingChecksCancellationBetweenReads` covers cancellation between directory
+reads. `TestBucketListingChecksCancellationAtEOF` and `TestSpillReadChecksCancellationOnReturn`
+cover cancellation on the final read. `TestVerifyRemovesSpill` covers cancellation
+between capture and replay.
+
+For each bucket (`positive/`, `negative/`, `gap/`, `measured/`), the verifier can certify a
+listing of at most 4,096 directory entries and replay up to 256 regular files. It reads one
+additional entry to detect overflow. A 4,097th entry or a 257th regular file produces an
+incomplete-replay finding naming the bucket (`internal/hisscoverage/verify.go`).
+Subdirectories count toward the listing limit. The verifier skips their contents, so they
+consume none of the regular-file allowance. Use `*.txtar` archives for multi-file fixtures.
+`TestVerifyBucketDirectoryEntryBoundary`, `TestVerifyBucketPast256RegularFilesIsIncomplete` and
+`TestVerifyBucketDirectoriesDoNotConsumeFixtureBound` cover these limits and the handling of
+subdirectories in `internal/hisscoverage/replay_bucket_test.go`.

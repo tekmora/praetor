@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/hiss"
-	"github.com/cordanaLLM/praetor/internal/util"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -27,12 +29,18 @@ const (
 	FixtureDir = ".config/hiss/testdata"
 	// maxCatalogBytes bounds the catalog read (HISS-02).
 	maxCatalogBytes = 256 * 1024
-	// maxFixturesPerBucket bounds one positive, negative, gap or measured directory (HISS-02).
+	// maxFixturesPerBucket bounds the regular files replayed in one positive, negative, gap or
+	// measured directory (HISS-02). A regular file past it makes the replay incomplete.
 	maxFixturesPerBucket = 256
 	// maxFixtureMarkerLines bounds the leading comment lines inspected for a hiss-fixture marker (HISS-02).
 	maxFixtureMarkerLines = 32
 	// fixtureMarkerPrefix introduces an intentional gap marker inside a leading fixture comment.
 	fixtureMarkerPrefix = "hiss-fixture:"
+	// maxMarkerTextBytes bounds each fixture-derived excerpt kept in a replay result.
+	maxMarkerTextBytes = 256
+	// maxBucketEntries is the largest bucket listing replay can certify (HISS-02).
+	// The reader requests one extra entry to detect overflow.
+	maxBucketEntries = 4096
 )
 
 // Bucket names within a fixture directory. A measured fixture holds a shape the scanner
@@ -116,9 +124,52 @@ type Finding struct {
 	Detail   string
 }
 
-// String renders a finding for a terminal report.
+// hexDigits formats invalid UTF-8 bytes as lowercase \xNN sequences in escapeControl.
+const hexDigits = "0123456789abcdef"
+
+// String renders a finding for a terminal report with control characters escaped.
 func (f Finding) String() string {
-	return fmt.Sprintf("%s/%s %s/%s: %s", f.Rule, f.Language, f.Bucket, f.Fixture, f.Detail)
+	return fmt.Sprintf("%s/%s %s/%s: %s",
+		escapeControl(f.Rule), escapeControl(f.Language), escapeControl(f.Bucket),
+		escapeControl(f.Fixture), escapeControl(f.Detail))
+}
+
+// escapeControl renders non-printable runes and invalid UTF-8 bytes with Go
+// backslash escapes while leaving printable text unchanged.
+func escapeControl(s string) string {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, isNonPrint) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	pos := 0
+	for step := 0; step < len(s) && pos < len(s); step++ {
+		r, width := utf8.DecodeRuneInString(s[pos:])
+		appendEscapedRune(&b, r, width, s[pos])
+		pos += width
+	}
+	return b.String()
+}
+
+// isNonPrint reports whether r is non-printable in terminal output.
+func isNonPrint(r rune) bool {
+	return !strconv.IsPrint(r)
+}
+
+// appendEscapedRune writes one decoded rune or invalid UTF-8 byte with controls escaped.
+func appendEscapedRune(b *strings.Builder, r rune, width int, raw byte) {
+	if r == utf8.RuneError && width == 1 {
+		b.WriteString(`\x`)
+		b.WriteByte(hexDigits[raw>>4])
+		b.WriteByte(hexDigits[raw&0x0f])
+		return
+	}
+	if !strconv.IsPrint(r) {
+		quoted := strconv.QuoteRune(r)
+		b.WriteString(quoted[1 : len(quoted)-1])
+		return
+	}
+	b.WriteRune(r)
 }
 
 // Report is the outcome of replaying the corpus against the catalog.
@@ -145,7 +196,9 @@ func (r *Report) Passed() bool {
 	return r != nil && len(r.Findings) == 0
 }
 
-// Verify replays the fixture corpus and reports every claim the corpus contradicts.
+// Verify replays the fixture corpus and reports every claim the corpus contradicts or leaves
+// incompletely replayed. Outside the verified platforms, every catalog bucket receives
+// an incomplete finding before any fixture directory is opened.
 //
 // The check runs in both directions. A state claiming detection must report each of its
 // positive fixtures, and a state claiming none must leave its gap fixtures undetected. The
@@ -153,18 +206,71 @@ func (r *Report) Passed() bool {
 // gains coverage, the gap fixture it was supposed to miss now fires and the catalog must be
 // updated to say so. An incomplete (unparsed or truncated) or zero-file fixture scan never
 // certifies a negative, gap, measured, positive or delegated claim.
+// Each bucket replays up to maxFixturesPerBucket (256) regular files;
+// nested directories are skipped without being entered or consuming that bound, non-regular
+// entries (such as symlinks or devices) are skipped and reported as findings, and a bucket
+// past the regular-file or directory-entry bound records an incomplete-replay finding so the
+// report fails. The verdict covers the bytes captured through one pinned corpus root before
+// replay. A later change to the fixture tree is outside this snapshot and shows on the next run.
+// Across all buckets the snapshot retains at most 1 MiB of fixture backing arrays.
+// Further bytes spill to a private file. Capture can hold one additional fixture of
+// up to 1 MiB and up to 32 KiB of copy scratch with the pinned Go version.
+// Replay scans one fixture at a time and consumes each bucket's results before the next
+// bucket. Each result owns its marker text. It keeps a canonical kind and copies at
+// most 256 bytes for the reason or unknown-class excerpt. Scanner allocations,
+// transient parsing copies, directory metadata and the report are separate.
+//
+// Cancellation is cooperative. A local directory read and a spill-file read are
+// non-interruptible operations. The context is checked before and after each read.
+// If cancellation occurs during a read, the call must finish before Verify can return
+// and run its deferred cleanup.
 func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, error) {
+	return verifyForPlatform(ctx, rootDir, catalog, runtime.GOOS)
+}
+
+// FixtureReplayPlatform returns the HISS-21 refusal for a GOOS without verified native replay.
+func FixtureReplayPlatform(goos string) error {
+	switch goos {
+	case "linux", "darwin", "windows":
+		return nil
+	default:
+		return fmt.Errorf("%s: fixture replay is verified on linux, darwin and windows only (HISS-21)", goos)
+	}
+}
+
+// verifyForPlatform refuses unverified readers before opening the corpus, even for absent buckets.
+func verifyForPlatform(ctx context.Context, rootDir string, catalog *Catalog, goos string) (_ *Report, err error) {
 	if ctx == nil {
 		return nil, errors.New("hisscoverage: verify requires a context")
 	}
 	if err := catalog.Validate(); err != nil {
 		return nil, err
 	}
+	if err := FixtureReplayPlatform(goos); err != nil {
+		return catalog.verifyClaims(ctx, nil, err)
+	}
+	var store fixtureStore
+	defer func() { err = errors.Join(err, store.close()) }()
+	corpus, err := store.openCorpusSnapshot(ctx, rootDir, catalog)
+	if err != nil {
+		return nil, err
+	}
+	if after, ok := ctx.Value(snapshotReadyKey{}).(func()); ok {
+		after()
+	}
+	return catalog.verifyClaims(ctx, corpus, nil)
+}
+
+// verifyClaims reports each validated claim against its snapshot or its platform refusal.
+func (catalog *Catalog) verifyClaims(ctx context.Context, corpus corpusSnapshot, platformErr error) (*Report, error) {
 	report := &Report{}
 	for i := 0; i < len(catalog.Rules); i++ {
 		rule := &catalog.Rules[i]
 		for j := 0; j < len(rule.Coverage); j++ {
-			if err := verifyClaim(ctx, rootDir, rule.ID, &rule.Coverage[j], report); err != nil {
+			cov := rule.Coverage[j]
+			cov.Language = cov.fixtureLanguage()
+			stage := fixtureStage{ruleID: rule.ID, language: cov.Language}
+			if err := stage.verifyClaim(ctx, corpus[stage], &cov, report, platformErr); err != nil {
 				return nil, err
 			}
 		}
@@ -175,28 +281,37 @@ func Verify(ctx context.Context, rootDir string, catalog *Catalog) (*Report, err
 	return report, nil
 }
 
-// verifyClaim replays one rule/language claim against its fixture buckets.
-func verifyClaim(ctx context.Context, rootDir, ruleID string, cov *Coverage, report *Report) error {
+// verifyClaim records each unavailable bucket or replays the claim against its captured fixtures.
+func (stage fixtureStage) verifyClaim(ctx context.Context, claim claimSnapshot, cov *Coverage, report *Report, platformErr error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	report.Claims++
-	base := filepath.Join(rootDir, filepath.FromSlash(FixtureDir), ruleID, cov.Language)
-	if err := verifyMeasured(ctx, base, ruleID, cov, report); err != nil {
+	if platformErr != nil {
+		for _, bucket := range fixtureBuckets {
+			stage.recordFixtureError(report, bucket, "", platformErr)
+		}
+		return nil
+	}
+	ruleID := stage.ruleID
+	if err := verifyMeasured(ctx, claim, ruleID, cov, report); err != nil {
 		return err
 	}
 	if !cov.ReplayedHere() {
-		return verifyDelegatedClaim(ctx, base, ruleID, cov, report)
+		return verifyDelegatedClaim(ctx, claim, ruleID, cov, report)
 	}
-	if err := verifyPositiveBucket(ctx, base, ruleID, cov, report); err != nil {
+	if err := verifyPositiveBucket(ctx, claim, ruleID, cov, report); err != nil {
 		return err
 	}
-	if err := verifyNegativeBucket(ctx, base, ruleID, cov, report); err != nil {
+	if err := verifyNegativeBucket(ctx, claim, ruleID, cov, report); err != nil {
 		return err
 	}
-	return verifyGapBucket(ctx, base, ruleID, cov, report)
+	return verifyGapBucket(ctx, claim, ruleID, cov, report)
 }
 
 // verifyPositiveBucket replays the positive bucket of a HISS-replayed claim.
-func verifyPositiveBucket(ctx context.Context, base, ruleID string, cov *Coverage, report *Report) error {
-	positives, err := replayBucket(ctx, base, bucketPositive, ruleID, report)
+func verifyPositiveBucket(ctx context.Context, claim claimSnapshot, ruleID string, cov *Coverage, report *Report) error {
+	positives, err := replayBucket(ctx, claim[bucketPositive], report)
 	if err != nil {
 		return err
 	}
@@ -217,8 +332,8 @@ func verifyPositiveBucket(ctx context.Context, base, ruleID string, cov *Coverag
 
 // verifyNegativeBucket replays the negative bucket of a HISS-replayed claim: every fixture must
 // be completely scanned in the claim's language and yield neither a violation nor a measurement.
-func verifyNegativeBucket(ctx context.Context, base, ruleID string, cov *Coverage, report *Report) error {
-	negatives, err := replayBucket(ctx, base, bucketNegative, ruleID, report)
+func verifyNegativeBucket(ctx context.Context, claim claimSnapshot, ruleID string, cov *Coverage, report *Report) error {
+	negatives, err := replayBucket(ctx, claim[bucketNegative], report)
 	if err != nil {
 		return err
 	}
@@ -233,8 +348,8 @@ func verifyNegativeBucket(ctx context.Context, base, ruleID string, cov *Coverag
 // verifyGapBucket replays the gap bucket of a HISS-replayed claim: every unmarked fixture must
 // be completely scanned in the claim's language and go undetected, while a fixture explicitly
 // marked unparsed or unexamined must still exhibit that non-analysed state.
-func verifyGapBucket(ctx context.Context, base, ruleID string, cov *Coverage, report *Report) error {
-	gaps, err := replayBucket(ctx, base, bucketGap, ruleID, report)
+func verifyGapBucket(ctx context.Context, claim claimSnapshot, ruleID string, cov *Coverage, report *Report) error {
+	gaps, err := replayBucket(ctx, claim[bucketGap], report)
 	if err != nil {
 		return err
 	}
@@ -248,8 +363,8 @@ func verifyGapBucket(ctx context.Context, base, ruleID string, cov *Coverage, re
 // completely scanned in the claim's language, yield a measurement for the rule, and yield no
 // violation. Together with the negative bucket, whose fixtures sit exactly at the limits and
 // must yield no measurement, this pins the limits from both sides.
-func verifyMeasured(ctx context.Context, base, ruleID string, cov *Coverage, report *Report) error {
-	results, err := replayBucket(ctx, base, bucketMeasured, ruleID, report)
+func verifyMeasured(ctx context.Context, claim claimSnapshot, ruleID string, cov *Coverage, report *Report) error {
+	results, err := replayBucket(ctx, claim[bucketMeasured], report)
 	if err != nil {
 		return err
 	}
@@ -273,7 +388,7 @@ func verifyMeasured(ctx context.Context, base, ruleID string, cov *Coverage, rep
 // The delegation itself is recorded so a reader can see which claims this gate proves and
 // which it only attributes. An unreplayed claim that passes silently would be indistinguishable
 // from a verified one, which is the state this whole mechanism replaced.
-func verifyDelegatedClaim(ctx context.Context, base, ruleID string, cov *Coverage, report *Report) error {
+func verifyDelegatedClaim(ctx context.Context, claim claimSnapshot, ruleID string, cov *Coverage, report *Report) error {
 	note := fmt.Sprintf("%s/%s is decided by %s, not replayed here", ruleID, cov.Language, cov.Runner)
 	if !scannerLanguages[cov.Language] {
 		note += fmt.Sprintf(" (no HISS scanner reads %s)", cov.Language)
@@ -281,7 +396,7 @@ func verifyDelegatedClaim(ctx context.Context, base, ruleID string, cov *Coverag
 	report.Delegated = append(report.Delegated, note)
 	buckets := [...]string{bucketPositive, bucketNegative, bucketGap}
 	for i := 0; i < len(buckets); i++ {
-		results, err := replayBucket(ctx, base, buckets[i], ruleID, report)
+		results, err := replayBucket(ctx, claim[buckets[i]], report)
 		if err != nil {
 			return err
 		}
@@ -391,7 +506,9 @@ func appendUncertified(report *Report, ruleID, lang, bucket, runner string, resu
 		}
 		if r.marked != intentionalNone {
 			report.Unexamined = append(report.Unexamined,
-				fmt.Sprintf("%s/%s %s/%s: intentionally %s (%s)", ruleID, lang, bucket, r.name, r.marked, r.markedReason))
+				fmt.Sprintf("%s/%s %s/%s: intentionally %s (%s)",
+					escapeControl(ruleID), escapeControl(lang), escapeControl(bucket),
+					escapeControl(r.name), escapeControl(string(r.marked)), escapeControl(r.markedReason)))
 		}
 	}
 }
@@ -456,33 +573,80 @@ func markedGapDetail(r fixtureResult, lang string) string {
 	return ""
 }
 
-// replayBucket scans every fixture in one bucket and reports whether the rule fired on it.
-// An absent bucket is not an error: a claim may legitimately have no negative or gap case.
-// base is the claim's directory, <FixtureDir>/<rule>/<language>, so its name is the language
-// the fixtures are staged as (hiss.FixturePath).
-func replayBucket(ctx context.Context, base, bucket, ruleID string, report *Report) ([]fixtureResult, error) {
-	dir := filepath.Join(base, bucket)
-	staged := fixtureStage{ruleID: ruleID, language: filepath.Base(base)}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if util.DirectoryAbsent(dir, err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read fixtures %s: %w", dir, err)
+// replayBucket stages and scans the regular fixture bytes captured in one bucket snapshot.
+// Findings about its listing and the replayed bytes come from the same capture. Changes to
+// the fixture tree after capture are visible on the next Verify run.
+func replayBucket(ctx context.Context, bucket bucketSnapshot, report *Report) ([]fixtureResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	results := make([]fixtureResult, 0, len(entries))
-	for i := 0; i < len(entries) && i < maxFixturesPerBucket; i++ {
-		if entries[i].IsDir() {
-			continue
+	report.Findings = append(report.Findings, bucket.findings...)
+	results := make([]fixtureResult, 0, len(bucket.files))
+	for i := 0; i < len(bucket.files); i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		result, err := staged.reported(ctx, dir, entries[i].Name())
+		file := bucket.files[i]
+		data, err := bucket.store.load(ctx, file)
 		if err != nil {
 			return nil, err
 		}
-		report.Fixtures++
+		result, err := bucket.stage.reported(ctx, file.name, data)
+		if err != nil {
+			return nil, err
+		}
 		results = append(results, result)
+		report.Fixtures++
 	}
 	return results, nil
+}
+
+// escapedError renders the full diagnostic safely while retaining its error chain.
+type escapedError struct{ cause error }
+
+// Error escapes control characters in both the fixture context and the underlying error.
+func (e escapedError) Error() string { return escapeControl(e.cause.Error()) }
+
+// Unwrap exposes the original diagnostic for errors.Is and errors.As.
+func (e escapedError) Unwrap() error { return e.cause }
+
+// recordIncompleteBucket records a non-certifying finding when a fixture bucket exceeds its
+// regular-file or directory-entry bound before every entry has been replayed.
+func recordIncompleteBucket(report *Report, ruleID, lang, bucket, fixture string, bound int, kind string) {
+	report.Findings = append(report.Findings, Finding{
+		Rule:     ruleID,
+		Language: lang,
+		Bucket:   bucket,
+		Fixture:  fixture,
+		Detail: fmt.Sprintf(
+			"incomplete replay: bucket %s/%s/%s exceeds %d %s; report is non-certifying",
+			ruleID, lang, bucket, bound, kind),
+	})
+}
+
+// recordChangedBucket names a listed regular file that disappeared or changed kind before capture.
+func recordChangedBucket(report *Report, ruleID, lang, bucket, fixture string) {
+	report.Findings = append(report.Findings, Finding{
+		Rule:     ruleID,
+		Language: lang,
+		Bucket:   bucket,
+		Fixture:  fixture,
+		Detail: fmt.Sprintf(
+			"incomplete replay: bucket %s/%s/%s changed during verification; report is non-certifying",
+			ruleID, lang, bucket),
+	})
+}
+
+// recordNonRegularEntry records a finding for a bucket entry that is neither a directory
+// nor a regular fixture file, such as a symbolic link or device node.
+func recordNonRegularEntry(report *Report, ruleID, lang, bucket, fixture string) {
+	report.Findings = append(report.Findings, Finding{
+		Rule:     ruleID,
+		Language: lang,
+		Bucket:   bucket,
+		Fixture:  fixture,
+		Detail:   fmt.Sprintf("entry %s is not a regular fixture file; skipped without replay", fixture),
+	})
 }
 
 // fixtureStage is the rule a bucket's fixtures are replayed for and the language they are
@@ -500,12 +664,8 @@ type fixtureStage struct {
 // rest of its bucket. It is staged where the scan reads its language (hiss.FixturePath): a
 // GitHub Actions workflow in .github/workflows, any other fixture at the root. An archive
 // fixture (archive.go) is staged as the files it holds, each at its own path.
-func (stage fixtureStage) reported(ctx context.Context, dir, name string) (result fixtureResult, err error) {
+func (stage fixtureStage) reported(ctx context.Context, name string, data []byte) (result fixtureResult, err error) {
 	result.name = name
-	data, err := contextopt.ReadSnapshot(ctx, filepath.Join(dir, name))
-	if err != nil {
-		return result, fmt.Errorf("read fixture %s: %w", name, err)
-	}
 	result.marked, result.markedReason, result.markerErr = parseFixtureMarker(data)
 	tmp, err := os.MkdirTemp("", "hiss-fixture-")
 	if err != nil {
@@ -597,13 +757,12 @@ func examinedLanguage(cov *hiss.ScanCoverage, language string) bool {
 // parseFixtureMarker reads an optional `hiss-fixture: <unparsed|unexamined>: <reason>` header
 // from the leading comment lines of a fixture, returning (kind, reason, errDetail).
 func parseFixtureMarker(data []byte) (intentionalKind, string, string) {
-	text := string(data)
 	var kind intentionalKind
 	var reason string
-	for i := 0; i < maxFixtureMarkerLines && text != ""; i++ {
-		var line string
-		line, text, _ = strings.Cut(text, "\n")
-		body, stop := nextHeaderComment(line)
+	for i := 0; i < maxFixtureMarkerLines && len(data) > 0; i++ {
+		var line []byte
+		line, data, _ = bytes.Cut(data, []byte("\n"))
+		body, stop := nextHeaderComment(string(line))
 		if stop {
 			break
 		}
@@ -648,15 +807,34 @@ func trimFixtureComment(line string) (string, bool) {
 // parseMarkerSpec validates the `<unparsed|unexamined>: <reason>` payload after `hiss-fixture:`.
 func parseMarkerSpec(spec string) (intentionalKind, string, string) {
 	rawKind, rawReason, hasColon := strings.Cut(strings.TrimSpace(spec), ":")
-	kind := intentionalKind(strings.TrimSpace(rawKind))
-	if kind != intentionalUnparsed && kind != intentionalUnexamined {
-		return intentionalNone, "", fmt.Sprintf("unknown hiss-fixture class %q (want unparsed or unexamined)", strings.TrimSpace(rawKind))
+	rawKind = strings.TrimSpace(rawKind)
+	var kind intentionalKind
+	switch rawKind {
+	case string(intentionalUnparsed):
+		kind = intentionalUnparsed
+	case string(intentionalUnexamined):
+		kind = intentionalUnexamined
+	default:
+		return intentionalNone, "", fmt.Sprintf("unknown hiss-fixture class %q (want unparsed or unexamined)", markerExcerpt(rawKind))
 	}
 	reason := strings.TrimSpace(rawReason)
 	if !hasColon || reason == "" {
 		return intentionalNone, "", fmt.Sprintf("hiss-fixture %s marker requires a non-empty ': <reason>'", kind)
 	}
-	return kind, reason, ""
+	return kind, markerExcerpt(reason), ""
+}
+
+// markerExcerpt detaches a diagnostic from its source and marks truncation at a rune boundary.
+func markerExcerpt(text string) string {
+	if len(text) <= maxMarkerTextBytes {
+		return strings.Clone(text)
+	}
+	const suffix = "..."
+	end := maxMarkerTextBytes - len(suffix)
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return text[:end] + suffix
 }
 
 // stage writes one fixture's bytes below root: an archive as the files it holds, any other

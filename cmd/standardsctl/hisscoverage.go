@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/hisscoverage"
@@ -18,6 +19,11 @@ const maxCoverageFindingsPrinted = 40
 // fixture corpus that backs it. With --sync-titles it rewrites the coverage file's stale rule
 // titles instead (syncCoverageTitles).
 func runHissCoverage(args []string) error {
+	return runHissCoverageForPlatform(args, runtime.GOOS)
+}
+
+// runHissCoverageForPlatform checks replay support before accessing the repository.
+func runHissCoverageForPlatform(args []string, goos string) error {
 	fs := flag.NewFlagSet("hiss coverage", flag.ContinueOnError)
 	root := fs.String("path", ".", "Repository root to inspect")
 	verify := fs.Bool("verify", false, "Replay the fixture corpus and fail when a claim is not supported")
@@ -27,7 +33,7 @@ func runHissCoverage(args []string) error {
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if err := checkCoverageModes(*verify, *syncTitles, *write); err != nil {
+	if err := checkCoverageModes(*verify, *syncTitles, *write, goos); err != nil {
 		return err
 	}
 
@@ -55,14 +61,16 @@ func runHissCoverage(args []string) error {
 	return verifyCoverage(ctx, *root, catalog)
 }
 
-// checkCoverageModes refuses a flag combination naming two runs: --write belongs to
-// --sync-titles, and a title sync is not a verification.
-func checkCoverageModes(verify, syncTitles, write bool) error {
+// checkCoverageModes validates flag combinations and the platform required for replay.
+func checkCoverageModes(verify, syncTitles, write bool, goos string) error {
 	if write && !syncTitles {
 		return errors.New("hiss coverage: --write applies only with --sync-titles")
 	}
 	if verify && syncTitles {
 		return errors.New("hiss coverage: --sync-titles and --verify are separate runs; sync the titles first")
+	}
+	if verify {
+		return hisscoverage.FixtureReplayPlatform(goos)
 	}
 	return nil
 }
@@ -154,8 +162,8 @@ func verifyCoverage(ctx context.Context, root string, catalog *hisscoverage.Cata
 	if !report.Passed() {
 		return failContradictedCoverage(report)
 	}
-	fmt.Printf("\n[PASS] %d claim(s) checked against %d fixture(s) (%d replayed here, %d attributed elsewhere); every claim holds.\n",
-		report.Claims, report.Fixtures, report.Claims-len(report.Delegated), len(report.Delegated))
+	fmt.Printf("\n[PASS] %s (%d claim(s) replayed here, %d attributed elsewhere); every claim holds.\n",
+		coverageVerificationSummary(report), report.Claims-len(report.Delegated), len(report.Delegated))
 	return nil
 }
 
@@ -173,17 +181,26 @@ func printCoverageNotices(report *hisscoverage.Report) {
 	}
 }
 
-// failContradictedCoverage prints contradicted findings and returns the ErrClaimUnsupported error.
+// coverageVerificationSummary counts each rule and language once across all findings.
+func coverageVerificationSummary(report *hisscoverage.Report) string {
+	affected := make(map[[2]string]struct{})
+	for _, finding := range report.Findings {
+		affected[[2]string{finding.Rule, finding.Language}] = struct{}{}
+	}
+	return fmt.Sprintf("%d finding(s), %d of %d claim(s) affected, %d fixture(s) checked",
+		len(report.Findings), len(affected), report.Claims, report.Fixtures)
+}
+
+// failContradictedCoverage prints bounded detail and summarizes all findings.
 func failContradictedCoverage(report *hisscoverage.Report) error {
-	fmt.Printf("\n=== Coverage claims contradicted by their fixtures ===\n")
+	fmt.Printf("\n=== Coverage verification findings ===\n")
 	for i := 0; i < len(report.Findings) && i < maxCoverageFindingsPrinted; i++ {
 		fmt.Printf("  [FAIL] %s\n", report.Findings[i])
 	}
 	if len(report.Findings) > maxCoverageFindingsPrinted {
 		fmt.Printf("  ... and %d more\n", len(report.Findings)-maxCoverageFindingsPrinted)
 	}
-	return fmt.Errorf("%w: %d of %d claim(s) contradicted across %d fixture(s)",
-		hisscoverage.ErrClaimUnsupported, len(report.Findings), report.Claims, report.Fixtures)
+	return fmt.Errorf("%w: %s", hisscoverage.ErrClaimUnsupported, coverageVerificationSummary(report))
 }
 
 // printHissUsage answers a bare or help-token `hiss` invocation.

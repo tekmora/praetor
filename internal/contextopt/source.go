@@ -104,23 +104,33 @@ func openDirectory(ctx context.Context, absolute string) (*os.Root, error) {
 	parent, leaf := filepath.Dir(absolute), filepath.Base(absolute)
 	if parent == absolute {
 		// The filesystem root has no ancestry to resolve and no leaf to check.
-		return os.OpenRoot(absolute)
+		return openCheckedRoot(ctx, absolute)
 	}
-	resolvedParent, err := filepath.EvalSymlinks(parent)
+	resolvedParent, err := util.CheckedIO(ctx, func() (string, error) { return filepath.EvalSymlinks(parent) })
 	if err != nil {
 		return nil, err
 	}
 	if err := validatePath(resolvedParent); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(filepath.Join(resolvedParent, leaf))
+	resolved := filepath.Join(resolvedParent, leaf)
+	info, err := util.CheckedIO(ctx, func() (os.FileInfo, error) { return os.Lstat(resolved) })
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("confinement root must be a directory, never a symlink: %s", absolute)
 	}
-	return os.OpenRoot(filepath.Join(resolvedParent, leaf))
+	return openCheckedRoot(ctx, resolved)
+}
+
+// openCheckedRoot releases the confinement root if its acquisition finishes late.
+func openCheckedRoot(ctx context.Context, path string) (*os.Root, error) {
+	root, err := util.CheckedIO(ctx, func() (*os.Root, error) { return os.OpenRoot(path) })
+	if err != nil && root != nil {
+		return nil, errors.Join(err, root.Close())
+	}
+	return root, err
 }
 
 // OpenDirectoryIn pins root/rel, with root as the confinement boundary.
@@ -150,7 +160,7 @@ func OpenDirectoryIn(ctx context.Context, root, rel string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	return walkComponents(ctx, current, parts)
+	return walkComponents(ctx, current, parts, childDirectory)
 }
 
 // relativeComponents splits a root-relative path into the components to walk.
@@ -169,15 +179,20 @@ func relativeComponents(rel string) ([]string, error) {
 	return parts, nil
 }
 
-// walkComponents descends each component strictly, closing whichever root it does not return.
-func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *os.Root, err error) {
+// directoryHandle covers the two owned directory handles used in component walks.
+type directoryHandle interface {
+	*os.Root | *SnapshotDirectory
+	Close() error
+}
+
+// walkComponents descends each component strictly, closing whichever handle it does not return.
+func walkComponents[D directoryHandle](ctx context.Context, current D, parts []string, open func(context.Context, D, string) (D, error)) (D, error) {
 	for i := 0; i < len(parts) && i < MaxPathDepth; i++ {
 		if parts[i] == "" || parts[i] == "." {
 			continue
 		}
-		next, openErr := childDirectory(ctx, current, parts[i])
-		err = errors.Join(openErr, current.Close())
-		if err != nil {
+		next, openErr := open(ctx, current, parts[i])
+		if err := errors.Join(openErr, current.Close()); err != nil {
 			if next != nil {
 				err = errors.Join(err, next.Close())
 			}
@@ -262,6 +277,9 @@ func snapshotRootBytes(ctx context.Context, root *os.Root, name string) ([]byte,
 	return buffer.Bytes(), nil
 }
 
+// ErrSourceNotRegular identifies a source whose link or opened file is not regular.
+var ErrSourceNotRegular = errors.New("source must be regular")
+
 // snapshotRootCopy streams one regular file of at most limit bytes from a pinned
 // directory into dst, rejecting symlinks, non-regular files and any change to the
 // file's identity, size or modification time during the copy. dst may hold a partial
@@ -274,13 +292,7 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 	if err != nil {
 		return 0, err
 	}
-	if !before.Mode().IsRegular() {
-		return 0, fmt.Errorf("source must be regular")
-	}
-	if before.Size() > limit {
-		return 0, fmt.Errorf("source exceeds %d bytes: %w", limit, util.ErrFileTooLarge)
-	}
-	file, err := openSource(root, name)
+	file, err := openListedSource(ctx, root, name, before, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -296,6 +308,56 @@ func snapshotRootCopy(ctx context.Context, root *os.Root, name string, dst io.Wr
 	return size, nil
 }
 
+// openSource opens a regular-file candidate relative to the pinned root.
+func openSource(ctx context.Context, root *os.Root, name string) (*os.File, error) {
+	if err := ValidateLeafName(name); err != nil {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
+	}
+	parent, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	file, openErr := openLeafAt(ctx, parent, name, readLeafData)
+	if err := parent.Close(); err != nil {
+		if file != nil {
+			err = errors.Join(err, file.Close())
+		}
+		return nil, errors.Join(openErr, err)
+	}
+	return file, openErr
+}
+
+// openListedSource enforces the listed type and size before opening the leaf without following links.
+func openListedSource(ctx context.Context, root *os.Root, name string, listed os.FileInfo, limit int64) (*os.File, error) {
+	if err := checkListedSource(listed, limit); err != nil {
+		return nil, err
+	}
+	file, err := openSource(ctx, root, name)
+	if err != nil {
+		// A refused replacement link or device has platform-specific open errors.
+		current, statErr := root.Lstat(name)
+		if statErr == nil && !current.Mode().IsRegular() {
+			return nil, errors.Join(ErrSourceNotRegular, err)
+		}
+		return nil, errors.Join(err, statErr)
+	}
+	return file, nil
+}
+
+// checkListedSource verifies the listed type and the byte bound before opening a leaf.
+func checkListedSource(listed os.FileInfo, limit int64) error {
+	if listed == nil || !listed.Mode().IsRegular() {
+		return ErrSourceNotRegular
+	}
+	if listed.Size() < 0 {
+		return fmt.Errorf("negative source size: %w", os.ErrInvalid)
+	}
+	if listed.Size() > limit {
+		return fmt.Errorf("source exceeds %d bytes: %w", limit, util.ErrFileTooLarge)
+	}
+	return nil
+}
+
 func validateText(data []byte) error {
 	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
 		return fmt.Errorf("source must be UTF-8 text without NUL bytes")
@@ -303,42 +365,56 @@ func validateText(data []byte) error {
 	return nil
 }
 
+// contextReader applies the capture deadline to each synchronous byte read.
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
 }
 
+// Read preserves the byte count and both causes when a read finishes late.
 func (r contextReader) Read(buffer []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(buffer)
+	return util.CheckedIO(r.ctx, func() (int, error) { return r.reader.Read(buffer) })
 }
 
+// stableRead allocates only the observed payload size. A growing file cannot enlarge
+// the capture buffer before stableCopy detects that the observation has changed.
 func stableRead(ctx context.Context, file *os.File, before os.FileInfo) ([]byte, error) {
-	var buffer bytes.Buffer
-	if _, err := stableCopy(ctx, &buffer, file, before, MaxSourceBytes); err != nil {
+	if err := checkListedSource(before, MaxSourceBytes); err != nil {
 		return nil, err
 	}
-	return buffer.Bytes(), nil
+	data := make([]byte, before.Size())
+	dst := snapshotDestination(data)
+	if _, err := stableCopy(ctx, &dst, file, before, MaxSourceBytes); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// snapshotDestination fills a single pre-sized fixture array during the stable copy.
+type snapshotDestination []byte
+
+// Write rejects bytes beyond the observed size without allocating another backing array.
+func (dst *snapshotDestination) Write(p []byte) (int, error) {
+	n := copy(*dst, p)
+	*dst = (*dst)[n:]
+	if n != len(p) {
+		return n, fmt.Errorf("source grew during snapshot: %w", io.ErrShortWrite)
+	}
+	return n, nil
 }
 
 // stableCopy copies at most limit bytes of an opened file into dst and fails unless
 // exactly the size observed before opening was read and the file kept its identity,
 // size and modification time throughout.
 func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.FileInfo, limit int64) (int64, error) {
-	opened, err := file.Stat()
-	if err != nil {
+	if err := checkOpenedSource(ctx, before, file); err != nil {
 		return 0, err
-	}
-	if !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
-		return 0, fmt.Errorf("source changed while opening")
 	}
 	count, err := io.Copy(dst, io.LimitReader(contextReader{ctx, file}, limit+1))
 	if err != nil {
 		return 0, err
 	}
-	after, err := file.Stat()
+	after, err := statCopySource(ctx, file, before)
 	if err != nil {
 		return 0, err
 	}
@@ -349,4 +425,44 @@ func stableCopy(ctx context.Context, dst io.Writer, file *os.File, before os.Fil
 		return 0, fmt.Errorf("source changed during snapshot")
 	}
 	return count, ctx.Err()
+}
+
+// pinnedListing selects descriptor-relative identity checks for a SnapshotDirectory listing.
+type pinnedListing struct{ os.FileInfo }
+
+// ErrSourceIdentityUnavailable identifies a listing or open without the required file identity.
+var ErrSourceIdentityUnavailable = errors.New("source identity unavailable")
+
+// errSourceChangedWhileOpening identifies a mismatch between listing and copy handles.
+var errSourceChangedWhileOpening = errors.New("source changed while opening")
+
+// statCopySource preserves standard Go metadata for the os.Root snapshot identity check.
+func statCopySource(ctx context.Context, file *os.File, listed os.FileInfo) (os.FileInfo, error) {
+	if _, ok := listed.(pinnedListing); ok {
+		return statDescriptor(ctx, file)
+	}
+	return util.CheckedIO(ctx, file.Stat)
+}
+
+// checkOpenedSource checks the open handle against the observation supplied by its caller.
+func checkOpenedSource(ctx context.Context, listed os.FileInfo, file *os.File) error {
+	opened, err := statCopySource(ctx, file, listed)
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() {
+		return ErrSourceNotRegular
+	}
+	if pinned, ok := listed.(pinnedListing); ok {
+		return pinned.checkIdentity(ctx, file, opened)
+	}
+	return checkStatIdentity(listed, opened)
+}
+
+// checkStatIdentity compares the standard Go stat records used by the os.Root snapshot APIs.
+func checkStatIdentity(listed, opened os.FileInfo) error {
+	if !os.SameFile(listed, opened) {
+		return errSourceChangedWhileOpening
+	}
+	return nil
 }

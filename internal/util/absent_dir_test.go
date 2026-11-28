@@ -5,12 +5,15 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 // readDirError returns the error the host itself produces reading dir, so every case below
@@ -81,4 +84,72 @@ func TestDirectoryAbsent_Boundary_ExistingDirectoryAndWrappedError(t *testing.T)
 	if !DirectoryAbsent(missing, wrapped) {
 		t.Fatal("a wrapped not-exist error for a missing directory with a trailing separator was not reported absent")
 	}
+}
+
+// TestDirectoryAbsent_Negative_BlockedStat checks that a stat waiting on the
+// caller's deadline has exited when the walk reports the timeout.
+func TestDirectoryAbsent_Negative_BlockedStat(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = MaxIODuration / 2
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
+		defer cancel()
+		done := make(chan struct{})
+		absent, err := directoryAbsentContext(ctx, "missing", fs.ErrNotExist, func(string) (os.FileInfo, error) {
+			defer close(done)
+			<-ctx.Done()
+			synctest.Wait() // Let cancellation reach the walk's child context.
+			return nil, fs.ErrPermission
+		})
+		if elapsed := time.Since(start); absent || !errors.Is(err, context.DeadlineExceeded) || elapsed != timeout {
+			t.Fatalf("blocked stat: absent=%v err=%v elapsed=%v, want false and deadline exceeded at %v", absent, err, elapsed, timeout)
+		}
+		select {
+		case <-done:
+		default:
+			t.Fatal("walk returned while stat was still blocked")
+		}
+	})
+}
+
+// TestSoleCause checks wrapped and singleton joins as well as the depth limit.
+// A distinct close cause anywhere in the chain must prevent abbreviation.
+func TestSoleCause(t *testing.T) {
+	change := errors.New("changed entry")
+	closeErr := errors.New("close failed")
+	single := fmt.Errorf("stat: %w", errors.Join(change))
+	if !errors.Is(SoleCause(single), change) || SoleCause(nil) != nil {
+		t.Fatalf("wrong single-cause classification: %v", single)
+	}
+	if SoleCause(fmt.Errorf("stat: %w", errors.Join(single, closeErr))) != nil {
+		t.Fatal("compound failure classified as an isolated change")
+	}
+	deep := change
+	for range 63 {
+		deep = errors.Join(deep)
+	}
+	if !errors.Is(SoleCause(deep), change) || SoleCause(errors.Join(deep)) != nil {
+		t.Fatal("expected a single leaf within 64 inspected errors only")
+	}
+}
+
+// TestMissingDirectoryWalkHasSharedDeadline spends most of the budget at the
+// leaf, then expires it at the parent. The third stat must never start.
+func TestMissingDirectoryWalkHasSharedDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		missing := fmt.Errorf("open corpus: %w", fs.ErrNotExist)
+		last := fmt.Errorf("stat parent: %w", fs.ErrNotExist)
+		calls := 0
+		absent, err := directoryAbsentContext(t.Context(), "missing/parent/leaf", missing, func(string) (os.FileInfo, error) {
+			calls++
+			time.Sleep(MaxIODuration/2 + time.Second)
+			return nil, last
+		})
+		if absent || calls != 2 || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ancestor walk: absent=%v calls=%d err=%v", absent, calls, err)
+		}
+		if !errors.Is(err, missing) || !errors.Is(err, last) || t.Context().Err() != nil {
+			t.Fatalf("ancestor walk lost a cause or canceled its parent: %v", err)
+		}
+	})
 }

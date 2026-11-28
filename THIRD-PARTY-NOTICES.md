@@ -92,6 +92,7 @@ The binaries link every module `go.mod` requires.
 | `github.com/pelletier/go-toml/v2` | v2.4.3 | MIT | `Copyright (c) 2021 - 2023 Thomas Pelletier` |
 | `github.com/santhosh-tekuri/jsonschema/v6` | v6.0.3 | Apache-2.0 | none stated in the upstream `LICENSE` |
 | `go.yaml.in/yaml/v3` | v3.0.5 | MIT AND Apache-2.0 | `Copyright (c) 2006-2010 Kirill Simonov`, `Copyright (c) 2006-2011 Kirill Simonov`, `Copyright (c) 2011-2019 Canonical Ltd` |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | `Copyright 2009 The Go Authors` |
 | `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `Copyright 2009 The Go Authors` |
 
 <!-- REUSE-IgnoreEnd -->

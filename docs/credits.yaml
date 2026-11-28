@@ -259,11 +259,24 @@ entries:
     notice: >-
       MIT for the files ported from libyaml, © 2006–2011 Kirill Simonov; Apache-2.0 for the rest, © 2011–2019
       Canonical Ltd
-    use: "YAML decoding and encoding; the only Go module the binaries link"
+    use: "YAML decoding and encoding"
     paths:
       - "go.mod"
     packages:
       - "go:go.yaml.in/yaml/v3"
+  - name: "Go x/sys"
+    url: "https://github.com/golang/sys"
+    detail: "(`golang.org/x/sys` v0.50.0)"
+    section: "shipped"
+    kind: "dependency"
+    relation: "shipped"
+    license: "BSD-3-Clause"
+    notice: "© 2009 The Go Authors"
+    use: "openat with O_NOFOLLOW for the HISS coverage fixture snapshot (internal/contextopt)"
+    paths:
+      - "go.mod"
+    packages:
+      - "go:golang.org/x/sys"
   - name: "SchemaStore Claude Code settings schema"
     url: "https://github.com/SchemaStore/schemastore"
     detail: "(`claude-code-settings.json` at commit `ce64da2`)"
