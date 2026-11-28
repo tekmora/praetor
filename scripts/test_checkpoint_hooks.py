@@ -1196,6 +1196,11 @@ class NativeLefthook(unittest.TestCase):
         record = self.root / ".git/praetor-checkpoint/sessions" / (ADAPTER.session_hash_for("owned-session") + ".json")
         self.assertEqual(json.loads(record.read_text()), [str(own.resolve())])
         self.assertNotIn("owned-session", record.read_text())
+        aged = time.time() - PLANNER.WORKTREE_ACTIVITY_WINDOW - 1
+        os.utime(record, (aged, aged))
+        for session, command in (("owned-session", str(own)), ("other-session", "pwd")):
+            activity = self.engine_checkpoint("post-tool", session, {"command": command})
+            self.assertEqual(activity.returncode, 0, activity.stdout + activity.stderr)
         result = self.engine_checkpoint("stop", "owned-session")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn(str(own.resolve()), result.stderr)  # resolved: Windows temp paths come back in 8.3 short form
@@ -1224,7 +1229,8 @@ class NativeLefthook(unittest.TestCase):
         self.assertIn(str((other / ".standards/worktrees").resolve()), result.stderr)  # resolved, as above
 
     @unittest.skipUnless(Path("/proc/self/cmdline").is_file(), "live gate identity requires Linux /proc")
-    def test_live_gate_worktrees_skip_here_and_under_other_linked_checkout(self):
+    def test_counterfeit_gate_worktrees_block_here_and_under_other_linked_checkout(self):
+        """Verify untrusted gate executables do not exempt dirty gate scratch worktrees."""
         scratch = self.root / ".workingdir/gate-process"
         scratch.mkdir(parents=True)
         executable = scratch / "praetorctl"
@@ -1246,12 +1252,16 @@ class NativeLefthook(unittest.TestCase):
                     break
                 time.sleep(0.01)
             pid = int((scratch / "pid").read_text())
+            created = time.time_ns()
             other = self.linked_worktree(self.root / ".claude/worktrees/other", "checkpoint/other")
             for index, parent in enumerate((self.root, other)):
-                gate = self.linked_worktree(parent / f".standards/worktrees/gate-{pid}-1", f"checkpoint/live-{index}")
+                gate = self.linked_worktree(parent / f".standards/worktrees/gate-{pid}-{created}", f"checkpoint/live-{index}")
+                with mock.patch.object(PLANNER, "_trusted_gate_executable", return_value=True):
+                    self.assertTrue(PLANNER._is_gate_scratch(gate, {parent.resolve()}))
                 (gate / "README.md").write_text("live gate dirty\n")
             result = self.engine_checkpoint("stop", "live-session")
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn(f"gate owner pid {pid} is not a live praetorctl gate run", result.stderr)
         finally:
             (scratch / "done").write_text("done\n")
             runner.join(timeout=5)
@@ -1266,7 +1276,7 @@ class NativeLefthook(unittest.TestCase):
         _write_session_record(sessions, record, {"/existing"})
         previous = record.read_bytes()
         with (
-            mock.patch("common.MAX_RECORD_BYTES", 16),
+            mock.patch("checkpoint_session.MAX_RECORD_BYTES", 16),
             self.assertRaisesRegex(ValueError, "exceeds byte bound"),
         ):
             _write_session_record(sessions, record, {"/" + "a" * 16})
@@ -1274,6 +1284,7 @@ class NativeLefthook(unittest.TestCase):
         self.assertEqual(sorted(sessions.iterdir()), [record])
 
     def test_adapter_record_bounds_max_worktrees(self):
+        """Verify session records exceeding MAX_WORKTREES write null for unknown ownership."""
         session_id = "test-session-bound"
         session_hash = ADAPTER.session_hash_for(session_id)
         sessions_dir = self.root / ".git" / "praetor-checkpoint" / "sessions"
@@ -1281,9 +1292,7 @@ class NativeLefthook(unittest.TestCase):
         many_paths = {f"/path/to/worktree-{i:04d}" for i in range(ADAPTER.MAX_WORKTREES + 50)}
         ADAPTER._write_session_record(sessions_dir, record_file, many_paths)
         data = json.loads(record_file.read_text())
-        self.assertLessEqual(len(data), ADAPTER.MAX_WORKTREES)
-        self.assertEqual(len(data), ADAPTER.MAX_WORKTREES)
-        self.assertEqual(data, sorted(data))
+        self.assertIsNone(data)  # Overflow must never look like complete ownership.
 
 
 if __name__ == "__main__":

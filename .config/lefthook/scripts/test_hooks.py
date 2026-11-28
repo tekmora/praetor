@@ -19,21 +19,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import checkpoint_session
 import checks
 import common
-from checks import (
-    Command,
-    HOOK_LINT_BIN_ENV,
-    HOOK_LINT_SUITE,
-    hook_lint_cache_root,
-    hook_lint_digest,
-    hook_sources_changed,
-    load_hook_lint,
-    parallel,
-    provision_hook_lint,
-    require_hook_lint_tools,
-    venv_bin,
-)
 import hooks
 import sandbox
 import toolchain
@@ -41,8 +29,11 @@ from checks import (
     FIXTURE_DIRECTORY,
     GATE_LAUNCH_MARGIN,
     GATE_QUERY_TIMEOUT,
+    HOOK_LINT_BIN_ENV,
+    HOOK_LINT_SUITE,
     SEMGREP_LANGUAGE_EXTENSIONS,
     SEMGREP_SUFFIXES,
+    Command,
     audit_scope,
     checkpoint_checks,
     context_changed,
@@ -52,14 +43,22 @@ from checks import (
     gofmt_check,
     golangci_lint_command,
     governance_commands,
+    hook_lint_cache_root,
+    hook_lint_digest,
+    hook_sources_changed,
     is_chart_template,
     is_fixture,
     lint_commands,
+    load_hook_lint,
     local_package_patterns,
+    parallel,
+    provision_hook_lint,
+    require_hook_lint_tools,
     run_full_gate,
     self_test_commands,
     semgrep_commands,
     source_checks,
+    venv_bin,
 )
 from common import (
     MANAGED_PROCESS_ENV,
@@ -810,13 +809,13 @@ class GitHooks(unittest.TestCase):
         command(self.repo, "git", "config", "user.email", "hook@example.test")
         for path in (".config/lefthook", ".config/agent/hooks"):
             shutil.copytree(ROOT / path, self.repo / path)
-        shutil.copy(ROOT / "lefthook.yml", self.repo / "lefthook.yml")
-        # Fixture policy self-tests are data, not another recursive full suite.
+        for path in ("lefthook.yml", "internal/agenthook/testdata/pre-tool/cases.json",
+                     "internal/agenthook/testdata/privilege-wrappers.json"):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / path, self.repo / path)
         for self_test in ("test_hooks.py", "test_checkpoint.py", "test_security_scope.py", "test_race_packages.py"):
-            (self.repo / f".config/lefthook/scripts/{self_test}").write_text(
-                'print("fixture hook self-tests passed")\n', newline="\n")
-        (self.repo / "README.md").write_text("# Fixture\n", newline="\n")
-        for name, content in initial_files:
+            self.write(f".config/lefthook/scripts/{self_test}", 'print("fixture hook self-tests passed")\n', stage=False)
+        for name, content in (("README.md", "# Fixture\n"), *initial_files):
             self.write(name, content, stage=False)
         command(self.repo, "git", "add", ".")
         command(self.repo, "git", "commit", "-q", "-s", "-m", "chore: initialize fixture")
@@ -3124,10 +3123,10 @@ class SnapshotRefs(unittest.TestCase):
                 run(["git", "init", "--quiet", str(repo)], env=clean_env())
             budget = common.HookBudget(10)
             with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
-                for reader in (common._git_common_dir, common._listed_worktrees):
+                for reader in (checkpoint_session._git_common_dir, checkpoint_session._listed_worktrees):
                     with self.subTest(reader=reader.__name__):
                         result = reader(root, budget)
-                        if reader == common._git_common_dir:
+                        if reader == checkpoint_session._git_common_dir:
                             self.assertEqual(result, (root / ".git").resolve())
                         else:
                             self.assertEqual(
@@ -3996,22 +3995,17 @@ class ScopeAndGuard(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertLess(elapsed, GUARD_TIMING_BOUND)
 
-    def test_guard_privilege_prefilter_skips_regex_without_a_literal(self):
-        """Guard prefilter avoids regex execution when privilege literals are absent."""
+    def test_guard_privilege_rule_does_not_prefilter_escaped_executables(self):
+        """Verify the privilege rule runs without a literal prefilter so escaped names match."""
         guard = self.guard_module()
         pattern = guard.BLOCKED_PATTERNS[-1]
-        with mock.patch.object(guard.re, "search", side_effect=AssertionError("regex ran")):
-            self.assertFalse(guard.search(pattern, "x" * guard.MAX_SCAN_CHARS))
-        for name in ("sudo", "doas", "pkexec", "run0", "su"):
-            with (
-                self.subTest(name=name),
-                mock.patch.object(guard.re, "search", return_value=True) as search,
-            ):
-                self.assertTrue(guard.search(pattern, "echo " + name))
-                search.assert_called_once_with(pattern, "echo " + name)
-        with mock.patch.object(guard.re, "search", return_value=True) as search:
-            self.assertTrue(guard.search("custom", "x"))
-            search.assert_called_once_with("custom", "x")
+        self.assertNotIn(pattern, guard.RULE_PREFILTERS)
+        # codespell:ignore-next-line udo
+        for text in ("x", r's\udo "praetorctl" adopt /home/adopter/dev'):
+            with self.subTest(text=text), mock.patch.object(
+                    guard.re, "search", return_value=True) as search:
+                self.assertTrue(guard.search(pattern, text))
+                search.assert_called_once_with(pattern, text)
 
     def test_guard_search_answers_like_re_search(self):
         """search() answers re.search for every rule, the option-run rule walked once (#1283)."""
@@ -4556,6 +4550,7 @@ class ScopeAndGuard(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", POSIX_STUB)
     def test_prepush_two_tool_modules_scan_one_target_each(self):
+        """Verify Trivy scans each tool module individually and fails on findings."""
         # Order: engine-1629-landing-failed-20261027-0914. Real trivy fs takes one target; the stub
         # refuses more than one the same way, and a finding in either module refuses the push.
         with tempfile.TemporaryDirectory(prefix="praetor-trivy-two-") as temp:
@@ -4575,9 +4570,11 @@ class ScopeAndGuard(unittest.TestCase):
                 'exit 0\n',
             )
             shadowed = os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])
-            with mock.patch.dict(os.environ, {"PATH": shadowed}):
-                with self.assertRaises(HookError) as cm:
-                    source_checks(root, ["tools/lefthook/go.mod", "tools/lint/go.mod"])
+            with (
+                mock.patch.dict(os.environ, {'PATH': shadowed}),
+                self.assertRaises(HookError) as cm,
+            ):
+                source_checks(root, ["tools/lefthook/go.mod", "tools/lint/go.mod"])
             error_msg = str(cm.exception)
             self.assertIn("tools/lint", error_msg)
             self.assertIn("CVE-2026-78669", error_msg)
@@ -4586,6 +4583,7 @@ class ScopeAndGuard(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", POSIX_STUB)
     def test_prepush_tool_module_trivy_finding_fails(self):
+        """Verify a Trivy vulnerability finding in a tool module fails source_checks."""
         # Order: engine-prepush-trivy-tool-modules-20261027.
         with tempfile.TemporaryDirectory(prefix="praetor-trivy-fail-") as temp:
             root = Path(temp)
@@ -4598,9 +4596,11 @@ class ScopeAndGuard(unittest.TestCase):
                 'echo "CVE-2026-78669 HIGH in golang.org/x/net" >&2\nexit 1\n',
             )
             shadowed = os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])
-            with mock.patch.dict(os.environ, {"PATH": shadowed}):
-                with self.assertRaises(HookError) as cm:
-                    source_checks(root, ["tools/lefthook/go.mod"])
+            with (
+                mock.patch.dict(os.environ, {'PATH': shadowed}),
+                self.assertRaises(HookError) as cm,
+            ):
+                source_checks(root, ["tools/lefthook/go.mod"])
             error_msg = str(cm.exception)
             self.assertIn("tools/lefthook", error_msg)
             self.assertIn("CVE-2026-78669", error_msg)
@@ -4679,6 +4679,7 @@ class ScopeAndGuard(unittest.TestCase):
         self.assertFalse(hook_sources_changed(["docs/guides/git-hooks.md"]))
 
     def test_prepush_require_hook_lint_tools_fails_closed_when_mismatched_or_absent(self):
+        """Verify require_hook_lint_tools fails closed when a pinned linter is mismatched."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             # When suite is absent (e.g. adopted repository), require_hook_lint_tools returns None
@@ -4690,8 +4691,8 @@ class ScopeAndGuard(unittest.TestCase):
         mock_module.GO_PINNED_TOOLS = ("gofumpt", "shfmt")
         mock_module.toolchain_pins.return_value = {"black": "26.10.1", "flake8": "7.4.1"}
         mock_module.resolve_tool.side_effect = lambda tool, pins, environ=None: (
-            (None, f"{tool} 7.4.1 is pinned but /bin/{tool} reports 7.5.0; install it with: "
-                   "python3 -m pip install --require-hashes -r .config/hook-lint/requirements.txt",
+            (None, (f"{tool} 7.4.1 is pinned but /bin/{tool} reports 7.5.0; install it with: "
+                   "python3 -m pip install --require-hashes -r .config/hook-lint/requirements.txt"),
              False) if tool == "flake8" else (f"/bin/{tool}", None, False)
         )
         with mock.patch("checks.load_hook_lint", return_value=mock_module):
@@ -5858,6 +5859,16 @@ class HookInterpreter(unittest.TestCase):
             broken = subprocess.run([shell, str(bare)], input=b"", capture_output=True,
                                     timeout=60, check=False)
             self.assertNotEqual(broken.returncode, 0, broken.stdout + broken.stderr)
+
+    def test_hook_suites_include_session_ownership_and_command_policy(self):
+        """The policy snapshot and the Make target both schedule the PR's regression suites."""
+        commands = self_test_commands(ROOT)
+        makefile = (ROOT / "Makefile").read_text()
+        target = makefile.split("\nhooks-test:\n", 1)[1].split("\n\n", 1)[0]
+        for suite in (".config/lefthook/scripts/test_checkpoint_session.py",
+                      ".config/agent/hooks/test_block_evasion.py"):
+            self.assertIn([sys.executable, "-B", suite], commands)
+            self.assertIn(f"\tpython3 -B {suite}", target.splitlines())
 
     def test_self_tests_run_under_the_interpreter_running_the_hook(self):
         with tempfile.TemporaryDirectory() as directory:

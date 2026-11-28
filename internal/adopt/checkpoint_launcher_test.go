@@ -25,8 +25,13 @@ func TestCheckpointLauncher_Positive_InstalledWithTheBundle(t *testing.T) {
 	if got := mustRead(t, installed); got != checkpointFixtureTexts[checkpointLauncher] {
 		t.Fatalf("installed launcher = %q, want the source's", got)
 	}
-	if !checkpointFilesPresent(session.repoPath) {
+	if !checkpointFilesPresent(t.Context(), session.repoPath) {
 		t.Fatal("a complete bundle is not reported present")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if checkpointFilesPresent(ctx, session.repoPath) {
+		t.Fatal("a canceled bundle check enabled checkpoint hooks")
 	}
 	mustWrite(t, installed, crlfText(checkpointFixtureTexts[checkpointLauncher]))
 	if ready, err := reconcileCheckpointBundle(context.Background(), session, false); err != nil || !ready {
@@ -35,7 +40,7 @@ func TestCheckpointLauncher_Positive_InstalledWithTheBundle(t *testing.T) {
 	if err := os.Remove(installed); err != nil {
 		t.Fatal(err)
 	}
-	if checkpointFilesPresent(session.repoPath) {
+	if checkpointFilesPresent(t.Context(), session.repoPath) {
 		t.Fatal("a bundle without its launcher is reported present, so jobs that call it would be activated")
 	}
 }

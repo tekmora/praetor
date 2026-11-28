@@ -125,8 +125,8 @@ var (
 const (
 	inPlaceEditTail    = `[^\n]*\s(-[A-Za-z]*i|--in-place)[^\n]*` + hooksDir
 	findTail           = `[^\n]*` + hooksDir + `[^\n]*\s-(delete|exec|execdir|ok)\b`
-	adminFlag          = `(?:\s|[\x22\x27])--admin(?:\s|$|[;&|\x22\x27]|=true\b)`
-	ghMergeAdminTail   = `[^\n]*(?:\bpr\s+merge\b[^\n]*` + adminFlag + `|` + adminFlag + `[^\n]*\bpr\s+merge\b|\bpr\s+--admin(?:\s|$|[;&|\x22\x27]|=true\b)[^\n]*\bmerge\b)`
+	adminFlag          = `(?:\s|[\x22\x27])--admin(?:\s|$|[;&|\x22\x27]|=(?i:t(?:rue)?|1)\b)`
+	ghMergeAdminTail   = `[^\n]*(?:\bpr\s+merge\b[^\n]*` + adminFlag + `|` + adminFlag + `[^\n]*\bpr\s+merge\b|\bpr\s+--admin(?:\s|$|[;&|\x22\x27]|=(?i:t(?:rue)?|1)\b)[^\n]*\bmerge\b)`
 	pullsMergeEndpoint = `\bpulls/[0-9]+/merge/?(?:\?|\s|$|[;&|\x22\x27])`
 	ghAPIPullsTail     = `[^\n]*\bapi\b[^\n]*` + pullsMergeEndpoint
 	ghGraphQLTail      = `[^\n]*\bapi\s+graphql\b[^\n]*\bmergePullRequest\b`
@@ -206,7 +206,7 @@ func lineThroughFirstWord(words ...string) string {
 //     `\bfind\b` at any word did, and Python's re no longer retries them at every such word,
 //     which cost cubic time in the line length (#829).
 //   - Pull request merge bypasses (cordanaLLM/praetor#1300): gh pr merge with --admin (or
-//     --admin=true) in any position, gh api calls whose path ends in pulls/<n>/merge, gh api
+//     --admin=1, --admin=t or case-insensitive --admin=true) in any position, gh api calls whose path ends in pulls/<n>/merge, gh api
 //     graphql calls whose query holds mergePullRequest, and curl or wget against an
 //     api.github.com .../pulls/<n>/merge URL are refused so agent sessions cannot use the
 //     operator's ruleset bypass. Each rule is anchored via lineThroughFirstWord and keeps at
@@ -876,10 +876,19 @@ func (r denyRule) matchesCommand(text string, segments []shellSpan) bool {
 	return false
 }
 
+// devRootLeaf names the protected component with either optional trailing separator.
+const devRootLeaf = `dev[/\\]?`
+
+// devRootOperand consumes complete preceding words and matches one literal path operand.
+const devRootOperand = `(?:` + privilegeWord + shellBlank + `)*(?:` +
+	`(?:[^ \t\n;&|()\x60\x22\x27]*[/\\])?` + devRootLeaf + `|` +
+	`\x22(?:[^\x22\n]*[/\\])?` + devRootLeaf + `\x22|` +
+	`\x27(?:[^\x27\n]*[/\\])?` + devRootLeaf + `\x27)`
+
 // builtinDevRoot is the generic half of the topology rule: it names no organisation. The dev
 // root ends in either path separator, so a Windows path is refused like a POSIX one (#200).
 // Organisation containers are operator data and arrive through the operator deny list.
-const builtinDevRoot = `(?i)(standardsctl|praetorctl)\s+(adopt|conform|bootstrap|needs\s+(scan|report|migrate|epic))\b.*\bdev[/\\]?(\s|$)`
+const builtinDevRoot = `(?i)(standardsctl|praetorctl)\s+(adopt|conform|bootstrap|needs\s+(scan|report|migrate|epic))\s+` + devRootOperand + `(\s|$)`
 
 // BuiltinRule is one built-in command rule as source text: the Python-compatible pattern
 // the policy compiles and the invariant a match reports. A ReadOnlyExempt rule judges the
@@ -911,9 +920,6 @@ func BuiltinRules() []BuiltinRule {
 	rules := make([]BuiltinRule, 0, len(builtinEvasion)+1)
 	for _, source := range builtinEvasion {
 		rule := BuiltinRule{Source: source, Invariant: "HISS", ReadOnlyExempt: slices.Contains(readOnlyExemptRules, source)}
-		if source == privilegeCommandSource {
-			rule.RequiredAny = slices.Clone(privilegeNames)
-		}
 		rules = append(rules, rule)
 	}
 	return append(rules, BuiltinRule{Source: builtinDevRoot, Invariant: "DEV-01"})

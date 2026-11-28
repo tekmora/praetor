@@ -7,15 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 const (
-	checkpointScript = ".config/lefthook/scripts/checkpoint.py"
-	checkpointCommon = ".config/lefthook/scripts/common.py"
+	checkpointScript        = ".config/lefthook/scripts/checkpoint.py"
+	checkpointCommon        = ".config/lefthook/scripts/common.py"
+	checkpointSessionModule = ".config/lefthook/scripts/checkpoint_session.py"
 	// checkpointLauncher starts the interpreter of the checkpoint jobs. It is the canonical
 	// policy's launcher: it tries a fixed list of candidates and runs the first that answers a
 	// version probe as Python 3 (#339). The generated lefthook.yml calls it by this path
@@ -26,7 +26,14 @@ const (
 
 // checkpointBundle lists the files adoption copies from the verified source root, in the
 // order it installs them.
-var checkpointBundle = []string{checkpointScript, checkpointCommon, checkpointLauncher}
+var checkpointBundle = []string{checkpointScript, checkpointCommon, checkpointLauncher, checkpointSessionModule}
+
+// These three recorded texts identify the last bundle without checkpoint_session.py (e21247536).
+const (
+	legacyScriptDigest   = "f83bd89938ab00581becbc160d59c1df866f2bcf01f7ab4b8103a6dba05746a2"
+	legacyCommonDigest   = "c1c74e9d3ecfc87e3afb9b6db19500a961c8e8235a1d38540a4a54b04f1cd278"
+	legacyLauncherDigest = "577b85ce8fa4eb90aae8fa84b251ed828315baf5a20f5f249e346b74f49df622"
+)
 
 var checkpointBranchPrefixes = []string{"checkpoint/", "audit/", "fix/", "feat/", "chore/", "docs/", "refactor/", "test/", "ci/"}
 
@@ -43,8 +50,14 @@ type checkpointSource struct {
 // TestPriorCheckpointDigests_Boundary_CurrentSourcesRecorded fails until a changed script is
 // recorded here (checkpoint_prior_test.go).
 var priorCheckpointDigests = map[string]map[string]string{
+	checkpointSessionModule: {
+		"e519ca648d56ee0eed4198d5f33c8a31e4c0e31580163e6b6b1a521b1163bf3a": "checkpoint review round 4",
+		"baa2adf4ca00c0771cd4cc19c91adfc4436931f9cf6fa02d2602483e8e33c331": "checkpoint review round 3",
+		"5e0d37675b11c3d5bc1deccc7773adb021f072a8126112ba225e1ec6065b0b0f": "reviewed hook findings",
+		"1971c67fe13b8fc7e8a7beb6cd4ad400db189995836c3439b5bddd2bb4c1bfcb": "reviewed checkpoint session fixes",
+	},
 	checkpointScript: {
-		"f83bd89938ab00581becbc160d59c1df866f2bcf01f7ab4b8103a6dba05746a2": "checkpoint remote mismatch names the organization move repair",
+		"d911ce46224dc4909df74713090c77a12e83270100725540029c1a9e3ea4382d": "checkpoint review round 3",
 		"6d22fbcab1cdd08efcb0975ad0c09cfc46107346365e16a05e06b2ce9b565691": "complete emitted docstrings and explained empty handlers",
 		"54130726f2c6830a763a2485b849293d4c014e34c308596cc3e28d5330e6fc3f": "stop checkpoint retries PR listing and collapses failure",
 		"6295b09a4077a3c3bc6819ecf69b3eb18fe4c3a23d4473d99c880fc3184ce3b5": "stop checkpoint judges landed worktrees by their merged pull request",
@@ -61,9 +74,12 @@ var priorCheckpointDigests = map[string]map[string]string{
 		"2c08cd616a4a2d53bcbdc2a4e3bb8a4fc235a718dd0913c53d95f9943b53eb6c": "stop checkpoint finds recent unnamed worktrees",
 		"d3b85026905c9006b1ddd063550d673db0fd0e46639a499943f8934b79b89192": "checkpoint evaluator passes ruff PLR rules",
 		"80a0a2da3dc2222e12b5c70ab7bc442fae586f1d06d5bdcb0516df3c20a144ca": "stop checkpoint counts session-owned worktrees and ignores gate scratch",
+		"12370d2f30d08f56e907a53559df4f6957c8e0a8bc8f624f118a2b8cefdf8b38": "reviewed hook findings",
+		"c013f644842c2b404f74e346fbb6b5e9aaca13972ecfe52f2cff03ca004732a9": "hook findings ported onto main",
+
+		legacyScriptDigest: "checkpoint remote mismatch names the organization move repair",
 	},
 	checkpointCommon: {
-		"c1c74e9d3ecfc87e3afb9b6db19500a961c8e8235a1d38540a4a54b04f1cd278": "checkpoint timeouts name bounded command and limit (#1983)",
 		"a8d89c11f41cb3a5ca6497e84ec5dd66e38cb83c9916b56f0985f9fd8a9d854f": "missing hook tools name their restore command",
 		"385b25fdbb89d0d8a4d1e6ee2a3dbf570e2a058c8c308a2363aaf77b0871b7b1": "complete emitted docstrings and explained empty handlers",
 		"12ef141c8cf1857650c9f4653653472278caf24c226371927021618743ca94b5": "pre-push commit message check skips published commits",
@@ -82,11 +98,16 @@ var priorCheckpointDigests = map[string]map[string]string{
 		"f5e11ef5e868e8799d47d9cf845dbcd5ad7f36f51d2dc34f759993a1dc0c07b2": "clean import order under adopter ruff",
 		"b42948bf8e9281d0e93f69aa3590e974929c9bc3dcfa73c83996f65423b59606": "process signal bound above 1",
 		"dfe0975c01017ee575fdd57ecd28cb8963e253e4ccc698f83e63f3b1b3375a07": "snapshots of killed hooks swept after three hours",
+		"2a1135c9440a05f77ad3865e1dfc8eddd89d641be2d46eaf82707f2066667f3c": "reviewed hook findings",
+		"a1714e7cbc94cff501830d65722d679a58931977130c21347a54e67ef93aae35": "hook findings ported onto main",
+
+		legacyCommonDigest: "checkpoint timeouts name bounded command and limit (#1983)",
 	},
 	checkpointLauncher: {
 		"8b6266ea16912a362c2e26d9a936887ca955ecf68f69744c935f2259d1a2c8dc": "proven interpreter candidates (#339)",
 		"28f19d46625ce26a3eeafd16d88abbc7fda68f46c677bcb6566cf8dc6c70f8fd": "drop Git repository selection before starting interpreter",
-		"577b85ce8fa4eb90aae8fa84b251ed828315baf5a20f5f249e346b74f49df622": "guards aligned as shfmt -i 2 -ci writes them",
+
+		legacyLauncherDigest: "guards aligned as shfmt -i 2 -ci writes them",
 	},
 }
 
@@ -246,12 +267,35 @@ func readCheckpointSources(ctx context.Context, root string) (result []checkpoin
 	result = make([]checkpointSource, 0, len(checkpointBundle))
 	for _, name := range checkpointBundle {
 		source, readErr := readCheckpointSource(ctx, root, name)
+		if name == checkpointSessionModule && errors.Is(readErr, os.ErrNotExist) && legacyCheckpointSources(result) {
+			break
+		}
 		if readErr != nil {
 			return nil, readErr
 		}
 		result = append(result, source)
 	}
 	return result, nil
+}
+
+// legacyCheckpointSources identifies the complete pre-module release, including CRLF checkouts.
+func legacyCheckpointSources(sources []checkpointSource) bool {
+	expected := map[string]string{
+		checkpointScript:   legacyScriptDigest,
+		checkpointCommon:   legacyCommonDigest,
+		checkpointLauncher: legacyLauncherDigest,
+	}
+	if len(sources) != len(expected) {
+		return false
+	}
+	for i := 0; i < len(sources) && i < maxCheckpointSources; i++ {
+		source := sources[i]
+		digest, _ := util.CheckoutTextDigest(source.data)
+		if expected[source.path] != digest {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCheckpointSourceRoot(root string) error {
@@ -312,12 +356,13 @@ func checkpointPolicyJSON(ctx context.Context, s *adoptSession) ([]byte, error) 
 	return json.MarshalIndent(policy, "", "  ")
 }
 
-func checkpointFilesPresent(root string) bool {
-	for _, name := range slices.Concat(checkpointBundle, []string{checkpointPolicy}) {
-		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(name)))
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return false
-		}
+// checkpointFilesPresent checks the installed evaluator using the same bundle rules as adoption.
+func checkpointFilesPresent(ctx context.Context, root string) bool {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
+	if _, err := readCheckpointSources(ctx, root); err != nil {
+		return false
 	}
-	return true
+	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(checkpointPolicy)))
+	return err == nil && info.Mode().IsRegular()
 }

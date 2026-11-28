@@ -49,9 +49,10 @@ func TestAuditCheckpointBundle_Negative_PriorScriptWarns(t *testing.T) {
 	prior := firstPriorCheckpointText(t, checkpointScript)
 	for style, text := range map[string]string{"lf": prior, "crlf": crlfText(prior)} {
 		root := checkpointAuditRepo(t, map[string]string{
-			checkpointScript:   text,
-			checkpointCommon:   shippedCheckpointText(t, checkpointCommon),
-			checkpointLauncher: shippedCheckpointText(t, checkpointLauncher),
+			checkpointScript:        text,
+			checkpointCommon:        shippedCheckpointText(t, checkpointCommon),
+			checkpointLauncher:      shippedCheckpointText(t, checkpointLauncher),
+			checkpointSessionModule: shippedCheckpointText(t, checkpointSessionModule),
 		})
 		lines := auditCheckpointLines(t, root)
 		if len(lines) != 1 {
@@ -72,9 +73,10 @@ func TestAuditCheckpointBundle_Positive_QuietCases(t *testing.T) {
 	prior := firstPriorCheckpointText(t, checkpointScript)
 	cases := map[string]map[string]string{
 		"current": {
-			checkpointScript:   shippedCheckpointText(t, checkpointScript),
-			checkpointCommon:   shippedCheckpointText(t, checkpointCommon),
-			checkpointLauncher: shippedCheckpointText(t, checkpointLauncher),
+			checkpointScript:        shippedCheckpointText(t, checkpointScript),
+			checkpointCommon:        shippedCheckpointText(t, checkpointCommon),
+			checkpointLauncher:      shippedCheckpointText(t, checkpointLauncher),
+			checkpointSessionModule: shippedCheckpointText(t, checkpointSessionModule),
 		},
 		"edited":  {checkpointScript: prior + "# local edit\n"},
 		"missing": {},
@@ -97,14 +99,13 @@ func TestAuditCheckpointBundle_Positive_QuietCases(t *testing.T) {
 // The source bundle selected for adoption can differ from the installed audit binary.
 func TestAuditCheckpointBundle_AfterAdoptFromSelectedSource(t *testing.T) {
 	source := newAdoptLockSource(t)
-	for _, rel := range checkpointBundle {
-		text := firstPriorCheckpointText(t, rel)
-		if rel == checkpointLauncher {
-			text = mustRead(t, filepath.Join(checkpointFixtureDir(rel), "proven-339.python.sh"))
-		}
-		if text == "" {
-			t.Fatalf("missing prior fixture for %s", rel)
-		}
+	// The selected release predates the session module. Use its actual three texts.
+	for rel, fixture := range map[string]string{
+		checkpointScript:   "org-move-2023.checkpoint.py.txt",
+		checkpointCommon:   "checkpoint-timeout-1983.common.py.txt",
+		checkpointLauncher: "shfmt-aligned.python.sh",
+	} {
+		text := mustRead(t, filepath.Join(checkpointFixtureDir(rel), fixture))
 		mustWrite(t, filepath.Join(source, filepath.FromSlash(rel)), text)
 	}
 	repo := newTestRepo(t, "checkpoint-source-audit")
@@ -113,12 +114,13 @@ func TestAuditCheckpointBundle_AfterAdoptFromSelectedSource(t *testing.T) {
 	if err != nil || len(lines) != 0 {
 		t.Fatalf("freshly adopted source bundle warned: %q / %v", lines, err)
 	}
-	if lines := auditCheckpointLines(t, repo); len(lines) != len(checkpointBundle) {
+	if !checkpointFilesPresent(t.Context(), repo) {
+		t.Fatal("installed three-file release is missing a required checkpoint file")
+	}
+	if lines := auditCheckpointLines(t, repo); len(lines) != 2 {
 		t.Fatalf("running-release comparison lost stale warnings: %q", lines)
 	}
-	if err := os.Remove(filepath.Join(source, filepath.FromSlash(checkpointCommon))); err != nil {
-		t.Fatal(err)
-	}
+	mustWrite(t, filepath.Join(source, filepath.FromSlash(checkpointCommon)), shippedCheckpointText(t, checkpointCommon))
 	if _, err := AuditCheckpointBundleWithSource(t.Context(), repo, source); err == nil {
 		t.Fatal("incomplete selected source was silently accepted")
 	}
@@ -141,11 +143,13 @@ func TestCurrentCheckpointDigests_Boundary_MatchShippedBundle(t *testing.T) {
 	}
 }
 
+// TestAuditCheckpointBundle_SourceRemedy verifies that checkpoint bundle audit remedies name the selected source root or release checkout.
 func TestAuditCheckpointBundle_SourceRemedy(t *testing.T) {
 	source := checkpointAuditRepo(t, map[string]string{
-		checkpointScript:   shippedCheckpointText(t, checkpointScript),
-		checkpointCommon:   shippedCheckpointText(t, checkpointCommon),
-		checkpointLauncher: shippedCheckpointText(t, checkpointLauncher),
+		checkpointScript:        shippedCheckpointText(t, checkpointScript),
+		checkpointCommon:        shippedCheckpointText(t, checkpointCommon),
+		checkpointLauncher:      shippedCheckpointText(t, checkpointLauncher),
+		checkpointSessionModule: shippedCheckpointText(t, checkpointSessionModule),
 	})
 	edited := shippedCheckpointText(t, checkpointCommon) + "# local edit\n"
 	commonLF, _ := util.NormalizeLineEndings(shippedCheckpointText(t, checkpointCommon))

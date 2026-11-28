@@ -115,6 +115,7 @@ RENDERED = "internal/adopt/testdata/emitted"
 # adoption renders from a template.
 EMITTED_CONSTANTS = (
     ("internal/adopt/checkpoint.go", "checkpointScript", ""),
+    ("internal/adopt/checkpoint.go", "checkpointSessionModule", ""),
     ("internal/adopt/checkpoint.go", "checkpointCommon", ""),
     ("internal/adopt/checkpoint.go", "checkpointLauncher", ""),
     ("internal/adopt/lefthook_identity.go", "canonicalLefthookPolicy", ""),
@@ -707,6 +708,8 @@ class ResolutionTest(unittest.TestCase):
 
     def test_emitted_sources_come_from_go_constants(self):
         sources = emitted_sources()
+        session = go_constant("internal/adopt/checkpoint.go", "checkpointSessionModule")
+        self.assertEqual(sources.get(session), session)
         self.assertEqual(len(sources), len(EMITTED_CONSTANTS))
         for source in sources.values():
             self.assertTrue((ROOT / source).is_file(), source)

@@ -20,9 +20,10 @@ import (
 // an earlier release left behind. TestCurrentCheckpointDigests_Boundary_MatchShippedBundle
 // fails until a changed script is recorded in both.
 var currentCheckpointDigests = map[string]string{
-	checkpointScript:   "f83bd89938ab00581becbc160d59c1df866f2bcf01f7ab4b8103a6dba05746a2",
-	checkpointCommon:   "c1c74e9d3ecfc87e3afb9b6db19500a961c8e8235a1d38540a4a54b04f1cd278",
-	checkpointLauncher: "577b85ce8fa4eb90aae8fa84b251ed828315baf5a20f5f249e346b74f49df622",
+	checkpointSessionModule: "e519ca648d56ee0eed4198d5f33c8a31e4c0e31580163e6b6b1a521b1163bf3a",
+	checkpointScript:        "d911ce46224dc4909df74713090c77a12e83270100725540029c1a9e3ea4382d",
+	checkpointCommon:        "a1714e7cbc94cff501830d65722d679a58931977130c21347a54e67ef93aae35",
+	checkpointLauncher:      legacyLauncherDigest,
 }
 
 // AuditCheckpointBundle returns one warning line per checkpoint bundle file of the repository
@@ -80,7 +81,7 @@ func checkpointWarningLines(digests, current map[string]string, sourceRoot, reme
 	}
 	for i := 0; i < len(checkpointBundle) && i < maxCheckpointSources; i++ {
 		rel := checkpointBundle[i]
-		if release, ok := priorCheckpointDigests[rel][digests[rel]]; ok && digests[rel] != current[rel] {
+		if release, ok := priorCheckpointDigests[rel][digests[rel]]; ok && current[rel] != "" && digests[rel] != current[rel] {
 			lines = append(lines, fmt.Sprintf("[WARN] %s holds the checkpoint evaluator Praetor shipped with %s, not %s; %s",
 				rel, release, reference, remedy))
 		}
@@ -134,7 +135,7 @@ func editedCheckpointFile(digests, current map[string]string) string {
 	for i := 0; i < len(checkpointBundle) && i < maxCheckpointSources; i++ {
 		rel := checkpointBundle[i]
 		digest, exists := digests[rel]
-		if !exists || digest == current[rel] {
+		if !exists || current[rel] == "" || digest == current[rel] {
 			continue
 		}
 		if _, prior := priorCheckpointDigests[rel][digest]; !prior {
