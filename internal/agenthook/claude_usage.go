@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/cordanaLLM/praetor/internal/contextopt"
 	"github.com/cordanaLLM/praetor/internal/router"
 	"github.com/cordanaLLM/praetor/internal/strictjson"
 	"github.com/cordanaLLM/praetor/internal/util"
@@ -56,15 +57,27 @@ func sumClaudeUsage(ctx context.Context, data []byte) (int64, error) {
 	return total, nil
 }
 
-// forEachClaudeTranscriptLine hands every line of a bounded subagent transcript to visit, in order,
+// visitClaudeMainTranscript reads a bounded regular JSONL snapshot under the Stop deadline.
+func visitClaudeMainTranscript(ctx context.Context, path string, visit func([]byte) error) error {
+	if !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" {
+		return errors.New("expected an absolute Claude transcript_path ending in .jsonl")
+	}
+	var data bytes.Buffer
+	if _, _, err := contextopt.DigestBinarySnapshotTo(ctx, path, maxClaudeTranscriptBytes, &data); err != nil {
+		return fmt.Errorf("read Claude transcript: %w", err)
+	}
+	return forEachClaudeTranscriptLine(ctx, data.Bytes(), visit)
+}
+
+// forEachClaudeTranscriptLine hands every line of a bounded Claude transcript to visit, in order,
 // and stops at the first error or a cancelled context. Usage totals and claimed-run checks share it.
 func forEachClaudeTranscriptLine(ctx context.Context, data []byte, visit func([]byte) error) error {
 	if len(data) > maxClaudeTranscriptBytes || bytes.Count(data, []byte{'\n'}) > maxClaudeTranscriptLines {
-		return errors.New("claude subagent transcript exceeds read bounds")
+		return errors.New("claude transcript exceeds read bounds")
 	}
 	lines := bytes.Split(bytes.TrimSuffix(data, []byte{'\n'}), []byte{'\n'})
 	if len(lines) > maxClaudeTranscriptLines {
-		return errors.New("claude subagent transcript exceeds line bound")
+		return errors.New("claude transcript exceeds line bound")
 	}
 	for index := 0; index < len(lines) && index < maxClaudeTranscriptLines; index++ {
 		if err := ctx.Err(); err != nil {

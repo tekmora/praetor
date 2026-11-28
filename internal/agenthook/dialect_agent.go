@@ -227,14 +227,17 @@ func finalMessageKey(client string) string {
 	return "last_assistant_message"
 }
 
-// fillMainStop reads the final message and stop_hook_active of a main-agent stop. Both are
-// optional and read leniently: a member of the wrong type is an absent one, because a decode
-// failure would deny the stop on a payload this check only reads for a prose question.
+// fillMainStop reads optional Stop fields leniently so each check can report missing input.
 func fillMainStop(client string, canonical *Canonical, object map[string]json.RawMessage) {
 	if message, err := optionalString(object, finalMessageKey(client)); err == nil {
 		canonical.Return = message
 	}
 	canonical.StopActive = continuedStop(EventStop, object)
+	if client == "claude" {
+		if path, err := optionalString(object, "transcript_path"); err == nil {
+			canonical.TranscriptPath = path
+		}
+	}
 }
 
 func agentToolInput(client string, object map[string]json.RawMessage) (string, map[string]json.RawMessage, error) {
