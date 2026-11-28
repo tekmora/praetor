@@ -132,8 +132,14 @@ func TestBuiltinRules(t *testing.T) {
 	}
 }
 
+// TestNewPolicyOperatorDenyList retains raw operator matching even inside proven message data.
 func TestNewPolicyOperatorDenyList(t *testing.T) {
 	compiled := policy(t, `\bterraform\s+destroy\b`, organisationContainerPattern)
+	for _, command := range []string{"git commit -m 'terraform destroy'", "git commit -F - <<'EOF'\nterraform destroy\nEOF"} {
+		if verdict := compiled.Command(command); verdict.Outcome != Deny {
+			t.Errorf("operator data text ignored: %+v", verdict)
+		}
+	}
 	if verdict := compiled.Command("terraform destroy -auto-approve"); verdict.Outcome != Deny ||
 		!strings.HasPrefix(verdict.Reason, "[BLOCKED BY operator] ") {
 		t.Errorf("operator pattern ignored: %+v", verdict)
@@ -264,5 +270,122 @@ func TestEnvironmentRefusals(t *testing.T) {
 	}
 	if verdict := Environment(func(key string) string { return map[string]string{"LEFTHOOK": "False"}[key] }); verdict.Outcome != Allow {
 		t.Errorf("LEFTHOOK=False does not disable Lefthook: %+v", verdict)
+	}
+}
+
+// TestPolicyDelimiterBraceRegression refuses ambiguous delimiter and argument words.
+func TestPolicyDelimiterBraceRegression(t *testing.T) {
+	builtin := policy(t)
+	for _, tc := range delimiterBraceCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := builtin.Command(tc.command); (got.Outcome == Allow) != (tc.want == 0) {
+				t.Errorf("verdict: %+v, want rc=%d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPolicyEvasionHeredocFeed checks shell-fed code and data-fed controls.
+func TestPolicyEvasionHeredocFeed(t *testing.T) {
+	builtin := policy(t)
+	for _, tc := range heredocFeedCases(t) {
+		t.Run(tc.Name, func(t *testing.T) {
+			got := builtin.Command(tc.Command)
+			rc := 0
+			if got.Outcome != Allow {
+				rc = 2
+			}
+			t.Logf("policy rc=%d want=%d", rc, tc.Want)
+			if rc != tc.Want {
+				t.Errorf("policy rc=%d want=%d: %s", rc, tc.Want, got.Reason)
+			}
+		})
+	}
+}
+
+// TestPolicyEvasionHeredocConsumerMutants proves each Go ownership barrier changes a verdict.
+func TestPolicyEvasionHeredocConsumerMutants(t *testing.T) {
+	original := heredocConsumers
+	t.Cleanup(func() { heredocConsumers = original })
+	for _, tc := range []struct {
+		name    string
+		table   map[string]string
+		command string
+		want    int
+	}{
+		{"empty", map[string]string{}, "bash <<'EOF'\ngit commit -n -m x\nEOF", 2},
+		{"data as shells", map[string]string{"*": "shell"}, "git commit -F - <<'EOF'\ngit commit -n -m x\nEOF", 2},
+		{"unknown as data", map[string]string{"*": "data"}, "python3 - <<'EOF'\ngit commit -n -m x\nEOF", 2},
+		{"shell named as data", map[string]string{"bash": "data"}, "bash <<'EOF'\ngit commit -n -m x\nEOF", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			heredocConsumers = tc.table
+			got := policy(t).Command(tc.command)
+			rc := 0
+			if got.Outcome != Allow {
+				rc = 2
+			}
+			t.Logf("mutant rc=%d want=%d", rc, tc.want)
+			if rc != tc.want {
+				t.Errorf("mutant rc=%d want=%d: %s", rc, tc.want, got.Reason)
+			}
+		})
+	}
+}
+
+// TestDescriptorStyleRedirectTarget classifies pipeline descriptors separately from plain files.
+func TestDescriptorStyleRedirectTarget(t *testing.T) {
+	for _, tc := range []struct {
+		target string
+		want   bool
+	}{
+		{"/proc/self/fd/1", true},
+		{"/dev/stdout", true},
+		{"/dev/fd/2", true},
+		{"/dev/stderr", true},
+		{"/proc/1234/fd", true},
+		{"notes.txt", false},
+		{"out/notes.txt", false},
+		{"/tmp/evil/proc/self/fd/1", false},
+		{"/proc/thread-self/fd/1", true},
+		{"/dev/tty", true},
+		{"//dev//stdout", true},
+		{"'/dev/stdout'", true},
+		{"/dev/null", false},
+		{"/devices/out.txt", false},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			if got := isDescriptorStyleRedirectTarget(tc.target); got != tc.want {
+				t.Errorf("isDescriptorStyleRedirectTarget(%q)=%v want=%v", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPolicyR8B1DescriptorRedirectRows checks descriptor redirects refuse and plain files allow.
+func TestPolicyR8B1DescriptorRedirectRows(t *testing.T) {
+	builtin := policy(t)
+	for _, tc := range []struct {
+		name    string
+		command string
+		allow   bool
+	}{
+		{
+			"deny-proc-self-fd1",
+			"cat <<'EOF' > /proc/self/fd/1 | sh\ngit commit -n -m x\nEOF",
+			false,
+		},
+		{
+			"allow-notes-txt",
+			"cat <<'EOF' > notes.txt\ngit commit -n -m x\nEOF",
+			true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := builtin.Command(tc.command)
+			if (got.Outcome == Allow) != tc.allow {
+				t.Errorf("verdict: %+v, want allow=%v", got, tc.allow)
+			}
+		})
 	}
 }

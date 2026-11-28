@@ -1,0 +1,3 @@
+type: fixed
+title: Rename unused push-frame stages unpack to _stages; keep prior rendering for adopters to refresh
+breaking: false
