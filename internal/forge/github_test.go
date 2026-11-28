@@ -111,7 +111,11 @@ func (rs *rulesetServer) serve(w http.ResponseWriter, method, path string, body 
 
 func (rs *rulesetServer) serveRead(w http.ResponseWriter, id int) {
 	if id == 0 {
-		writeRulesetJSON(w, http.StatusOK, rs.existing)
+		entries := rs.existing
+		if entries == nil {
+			entries = []map[string]any{}
+		}
+		writeRulesetJSON(w, http.StatusOK, entries)
 		return
 	}
 	if doc, found := rs.stored[id]; found {
@@ -160,6 +164,7 @@ func rulesetRuleTypes(body map[string]any) []string {
 	return types
 }
 
+// TestReconcileProtection_Positive_CreateThenUpdate creates the managed ruleset once and updates the same id on the next run.
 func TestReconcileProtection_Positive_CreateThenUpdate(t *testing.T) {
 	ctx := context.Background()
 	policy := &config.BranchProtectionPolicy{EnforceLinearHistory: true, RequireSignedCommits: false, RequiredApprovingReviewers: 2, DismissStaleReviews: true}
@@ -190,7 +195,7 @@ func TestReconcileProtection_Positive_CreateThenUpdate(t *testing.T) {
 	}
 
 	// An existing ruleset of the same name is updated in place, never duplicated.
-	rs2 := newRulesetServer(t, []map[string]any{{"id": 7, "name": "main-branch-protection"}, {"id": 8, "name": "other"}}, 0)
+	rs2 := newRulesetServer(t, []map[string]any{{"id": 7, "name": "main-branch-protection", "source_type": "Repository", "source": "acme/widgets"}, {"id": 8, "name": "other"}}, 0)
 	gh2 := NewGitHubDriver("ghp_real", rs2.srv.URL)
 	gh2.SetRepository("acme", "widgets")
 	signed := *policy

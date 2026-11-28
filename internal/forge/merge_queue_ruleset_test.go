@@ -117,6 +117,7 @@ func TestGitHubDriver_ReconcileMergeQueue_Negative_NilPolicy(t *testing.T) {
 // operator's own parameter, and the live read reports it. A repository without one reads nil.
 func TestGitHubDriver_ReconcileMergeQueue_Boundary_LiveWildcardSurvivesTheMerge(t *testing.T) {
 	live := map[string]any{"id": 5, "name": MergeQueueRulesetName, "target": "branch", "enforcement": "active",
+		"source_type": "Repository", "source": "acme/widgets",
 		"conditions": map[string]any{"ref_name": map[string]any{"include": []any{"refs/heads/main", "refs/heads/lts-*"}, "exclude": []any{}}},
 		"rules":      []any{map[string]any{"type": MergeQueueRule, "parameters": map[string]any{"merge_method": "MERGE"}}}}
 	gh, fake := rulesetForge(t, &rulesetServer{existing: []map[string]any{live}})
@@ -127,7 +128,12 @@ func TestGitHubDriver_ReconcileMergeQueue_Boundary_LiveWildcardSurvivesTheMerge(
 		!strings.Contains(put.Raw, `"merge_method":"MERGE"`) {
 		t.Fatalf("the union merge dropped the live include or parameter: %s %s", put.Method, put.Raw)
 	}
-	queue, err := gh.readQueueRuleset(context.Background(), map[int]string{5: MergeQueueRulesetName}, map[int]string{5: "active"})
+	const listPath = "/repos/acme/widgets/rulesets"
+	list, err := gh.readRulesetListing(t.Context(), listPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := gh.readQueueRuleset(t.Context(), listPath, list)
 	if err != nil || queue == nil || !slices.Equal(queue.Wildcards(), []string{"refs/heads/lts-*"}) {
 		t.Fatalf("live read = %+v (%v), want the lts-* wildcard", queue, err)
 	}
@@ -135,7 +141,7 @@ func TestGitHubDriver_ReconcileMergeQueue_Boundary_LiveWildcardSurvivesTheMerge(
 
 func TestGitHubDriver_ReadQueueRuleset_Boundary_NoneReadsNil(t *testing.T) {
 	gh, _ := rulesetForge(t, &rulesetServer{})
-	if none, err := gh.readQueueRuleset(context.Background(), map[int]string{3: RepositoryRulesetName}, nil); err != nil || none != nil {
+	if none, err := gh.readQueueRuleset(t.Context(), "/repos/acme/widgets/rulesets", rulesetListing{}); err != nil || none != nil {
 		t.Fatalf("a repository without a queue ruleset read %+v (%v)", none, err)
 	}
 }

@@ -32,6 +32,8 @@ const (
 	maxMilestonePages = 50
 	// maxRulesetPages bounds ruleset pagination (HISS-02): at most 1000 rulesets.
 	maxRulesetPages = 10
+	// maxListedRulesets bounds iteration over a completed ruleset listing.
+	maxListedRulesets = maxRulesetPages * issuesPerPage
 	// MaxLabelsLimit bounds a label taxonomy (ParseLabelTaxonomy) and so a single label
 	// reconciliation batch (HISS-02): one bound, so a taxonomy that validates can be written.
 	MaxLabelsLimit = 1000
@@ -181,10 +183,20 @@ func marshalPayload(payload any) (io.Reader, error) {
 	return bytes.NewReader(data), nil
 }
 
-// sendRequest handles authenticated HTTP communication with GitHub REST API.
+// sendRequest handles authenticated GitHub REST requests. Each GET carries an explicit
+// deadline through the body read, including when the supplied client has no timeout.
 func (g *GitHubDriver) sendRequest(ctx context.Context, method, path string, payload any) (respBody []byte, statusCode int, err error) {
 	if err := g.Authenticate(ctx); err != nil {
 		return nil, 0, err
+	}
+	if method == http.MethodGet {
+		timeout := defaultHTTPTimeout
+		if g.HTTPClient != nil && g.HTTPClient.Timeout > 0 {
+			timeout = g.HTTPClient.Timeout
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	return g.readRequest(ctx, method, path, payload)
 }
@@ -257,8 +269,10 @@ func (g *GitHubDriver) rulesetName(branch string) string {
 }
 
 type ghRulesetRaw struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	SourceType string `json:"source_type"`
+	Source     string `json:"source"`
 	// Enforcement is active, evaluate or disabled; GitHub applies the rules of an active
 	// ruleset only.
 	Enforcement string `json:"enforcement"`
@@ -294,42 +308,83 @@ func (g *GitHubDriver) walkPages(ctx context.Context, base, query, what string, 
 	return fmt.Errorf("%w: %s beyond %d pages of %d entries", errPageCeiling, what, maxPages, issuesPerPage)
 }
 
-// walkRulesets visits every entry of the repository ruleset listing at listPath, page by page,
-// until visit reports it is done (walkPages bounds the pages).
-func (g *GitHubDriver) walkRulesets(ctx context.Context, listPath string, visit func(ghRulesetRaw) (done bool)) error {
-	return g.walkPages(ctx, listPath, "", "repository rulesets", maxRulesetPages, func(body []byte) (int, bool, error) {
-		var rulesets []ghRulesetRaw
-		if err := json.Unmarshal(body, &rulesets); err != nil {
-			return 0, false, fmt.Errorf("failed parsing repository rulesets (raw: %q): %w", util.BodyPreview(body), err)
-		}
-		if len(rulesets) > issuesPerPage {
-			return 0, false, fmt.Errorf("ruleset response exceeds %d entries", issuesPerPage)
-		}
-		for i := 0; i < len(rulesets); i++ {
-			if visit(rulesets[i]) {
-				return len(rulesets), true, nil
-			}
-		}
-		return len(rulesets), false, nil
-	})
+// rulesetListing retains ownership and listing order across all pages of one repository.
+type rulesetListing struct {
+	repository string
+	entries    []ghRulesetRaw
 }
 
-// findRulesetID returns the id of the repository ruleset named name, or 0 when absent. It
-// reads every page of the listing: a ruleset past the first page must be updated in place,
-// never duplicated by a second POST.
-func (g *GitHubDriver) findRulesetID(ctx context.Context, listPath, name string) (int, error) {
-	id := 0
-	err := g.walkRulesets(ctx, listPath, func(ruleset ghRulesetRaw) bool {
-		if ruleset.Name == name {
-			id = ruleset.ID
-			return true
+// readRulesetListing reads the complete, bounded listing before resolving any name.
+func (g *GitHubDriver) readRulesetListing(ctx context.Context, listPath string) (rulesetListing, error) {
+	repository, err := g.TargetRepository()
+	if err != nil {
+		return rulesetListing{}, err
+	}
+	list := rulesetListing{repository: repository}
+	err = g.walkPages(ctx, listPath, "", "repository rulesets", maxRulesetPages, func(body []byte) (int, bool, error) {
+		var page []ghRulesetRaw
+		if err := json.Unmarshal(body, &page); err != nil {
+			return 0, false, fmt.Errorf("failed parsing repository rulesets (raw: %q): %w", util.BodyPreview(body), err)
 		}
-		return false
+		if page == nil {
+			return 0, false, errors.New("unread repository rulesets: expected a listing array, got null")
+		}
+		if len(page) > issuesPerPage {
+			return 0, false, fmt.Errorf("ruleset response exceeds %d entries", issuesPerPage)
+		}
+		list.entries = append(list.entries, page...)
+		return len(page), false, nil
 	})
+	if err != nil {
+		return rulesetListing{}, err
+	}
+	return list, nil
+}
+
+// ownedRuleset resolves name to its repository-owned entry. A zero entry means absence.
+// Unread scope, a nonpositive owned ID, or duplicate owned names prevent resolution.
+func (list rulesetListing) ownedRuleset(name string) (ghRulesetRaw, error) {
+	var match ghRulesetRaw
+	for i := 0; i < len(list.entries) && i < maxListedRulesets; i++ {
+		entry := list.entries[i]
+		if entry.Name != name {
+			continue
+		}
+		owned, err := entry.repositoryOwned(list.repository)
+		if err != nil {
+			return ghRulesetRaw{}, err
+		}
+		if !owned {
+			continue
+		}
+		if entry.ID <= 0 {
+			return ghRulesetRaw{}, fmt.Errorf("repository %s ruleset %q has unread id: expected a positive id, got %d", list.repository, name, entry.ID)
+		}
+		if match.ID != 0 {
+			return ghRulesetRaw{}, fmt.Errorf("repository %s has duplicate ruleset %q: ids %d and %d", list.repository, name, match.ID, entry.ID)
+		}
+		match = entry
+	}
+	return match, nil
+}
+
+// findRulesetID returns the id of the repository-owned ruleset named name, or 0 when absent.
+func (g *GitHubDriver) findRulesetID(ctx context.Context, listPath, name string) (int, error) {
+	list, err := g.readRulesetListing(ctx, listPath)
 	if err != nil {
 		return 0, err
 	}
-	return id, nil
+	entry, err := list.ownedRuleset(name)
+	return entry.ID, err
+}
+
+// repositoryOwned verifies ownership from the listing without narrowing aggregate protection
+// reads. GitHub's repository rulesets API includes inherited rulesets by default.
+func (r ghRulesetRaw) repositoryOwned(repository string) (bool, error) {
+	if r.SourceType == "" || r.Source == "" {
+		return false, fmt.Errorf("ruleset %q id %d has unread scope (source_type=%q, source=%q)", r.Name, r.ID, r.SourceType, r.Source)
+	}
+	return r.SourceType == "Repository" && strings.EqualFold(r.Source, repository), nil
 }
 
 // protectedRefs returns the ref patterns the ruleset for branch must include.

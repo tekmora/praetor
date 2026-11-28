@@ -229,3 +229,27 @@ func TestPlanRemote_PreviewsWhatSyncWritesForTheQueueRuleset(t *testing.T) {
 	_, err = runSyncCmd(t, wildArgs...)
 	mustErrContain(t, err, "Merge queue ruleset refs")
 }
+
+// TestPlan_FailOnDrift_OwnedQueueRefs keeps the inherited active queue on main while
+// checking wildcard refs on the repository queue, which applies only to lts-*.
+func TestPlan_FailOnDrift_OwnedQueueRefs(t *testing.T) {
+	stub, args := syncedPlanFixture(t, func(t *testing.T, stub *forgeStub) (*auditFixture, string) {
+		srv := httptest.NewServer(stub.handler())
+		t.Cleanup(srv.Close)
+		return queueRemoteFixture(t, true), srv.URL
+	})
+	stub.mu.Lock()
+	main := stub.rulesets[1]
+	main["id"] = 3
+	stub.rulesets[3] = main
+	parent := liveQueueRuleset("refs/heads/main")
+	parent["id"], parent["source_type"], parent["source"] = 1, "Organization", "acme"
+	stub.rulesets[1] = parent
+	stub.rulesets[2] = liveQueueRuleset("refs/heads/lts-*")
+	stub.mu.Unlock()
+
+	assertPlanModes(t, args, true, []string{
+		`[OK] Merge queue: declared required, live required by ruleset "` + forge.MergeQueueRulesetName + `" #1 of organization acme`,
+		"[DRIFT] Merge queue ruleset refs", "wildcard refs/heads/lts-*",
+	}, []string{"[OK] Merge queue ruleset refs", "[DRIFT] Bypass actors"})
+}

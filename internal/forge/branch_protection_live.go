@@ -101,6 +101,8 @@ type LiveBranchProtection struct {
 	// evaluate or disabled. GitHub lists no rule of a ruleset that is not active, so this tells a
 	// ruleset that exists and does not apply from one that does not exist.
 	RulesetEnforcement map[int]string
+	// managedID identifies the repository-owned protection ruleset in the listing.
+	managedID int
 	// Legacy is the legacy protection object, or nil when GitHub reports the branch has none.
 	Legacy *LegacyBranchProtection
 	// QueueRuleset is the merge queue ruleset (MergeQueueRulesetName) when the repository has
@@ -128,16 +130,9 @@ func (l *LiveBranchProtection) RulesetLabel(rule LiveBranchRule) string {
 	return label
 }
 
-// managedRuleset returns the id and the enforcement of the ruleset praetor writes
-// (RepositoryRulesetName) as the listing reports them, and whether the listing has it. Of two
-// rulesets of that name, such as the repository's and its organisation's, the lowest id is taken.
+// managedRuleset returns the resolved repository-owned protection ruleset and its enforcement.
 func (l *LiveBranchProtection) managedRuleset() (id int, enforcement string, found bool) {
-	for rulesetID, name := range l.RulesetNames {
-		if name == RepositoryRulesetName && (!found || rulesetID < id) {
-			id, found = rulesetID, true
-		}
-	}
-	return id, l.RulesetEnforcement[id], found
+	return l.managedID, l.RulesetEnforcement[l.managedID], l.managedID != 0
 }
 
 // Mechanisms names every mechanism that protects the branch: each ruleset with an active rule
@@ -173,11 +168,19 @@ func (g *GitHubDriver) ReadBranchProtection(ctx context.Context, branch string) 
 	if err != nil {
 		return nil, fmt.Errorf("read the active rules of %s: %w", branch, err)
 	}
-	names, enforcement, err := g.rulesetListing(ctx)
+	listPath, err := g.repoPath("rulesets")
+	if err != nil {
+		return nil, err
+	}
+	list, err := g.readRulesetListing(ctx, listPath)
 	if err != nil {
 		return nil, fmt.Errorf("name the rulesets of %s: %w", branch, err)
 	}
-	queue, err := g.readQueueRuleset(ctx, names, enforcement)
+	managed, err := list.ownedRuleset(RepositoryRulesetName)
+	if err != nil {
+		return nil, err
+	}
+	queue, err := g.readQueueRuleset(ctx, listPath, list)
 	if err != nil {
 		return nil, fmt.Errorf("read the merge queue ruleset for %s: %w", branch, err)
 	}
@@ -185,8 +188,9 @@ func (g *GitHubDriver) ReadBranchProtection(ctx context.Context, branch string) 
 	if err != nil {
 		return nil, fmt.Errorf("read the legacy branch protection of %s: %w", branch, err)
 	}
+	names, enforcement := list.labels()
 	return &LiveBranchProtection{
-		Branch: branch, Rules: rules, RulesetNames: names, RulesetEnforcement: enforcement,
+		Branch: branch, Rules: rules, managedID: managed.ID, RulesetNames: names, RulesetEnforcement: enforcement,
 		Legacy: legacy, QueueRuleset: queue, Missing: missing, LegacyUnread: unread,
 	}, nil
 }
@@ -215,23 +219,15 @@ func (g *GitHubDriver) branchRules(ctx context.Context, branch string) ([]LiveBr
 	return rules, nil
 }
 
-// rulesetListing maps the id of every ruleset the repository listing returns to its name and to
-// its enforcement.
-func (g *GitHubDriver) rulesetListing(ctx context.Context) (names, enforcement map[int]string, err error) {
-	listPath, err := g.repoPath("rulesets")
-	if err != nil {
-		return nil, nil, err
-	}
+// labels indexes every entry, including inherited rulesets, for aggregate protection reporting.
+func (list rulesetListing) labels() (names, enforcement map[int]string) {
 	names, enforcement = map[int]string{}, map[int]string{}
-	err = g.walkRulesets(ctx, listPath, func(ruleset ghRulesetRaw) bool {
-		names[ruleset.ID] = ruleset.Name
-		enforcement[ruleset.ID] = ruleset.Enforcement
-		return false
-	})
-	if err != nil {
-		return nil, nil, err
+	for i := 0; i < len(list.entries) && i < maxListedRulesets; i++ {
+		entry := list.entries[i]
+		names[entry.ID] = entry.Name
+		enforcement[entry.ID] = entry.Enforcement
 	}
-	return names, enforcement, nil
+	return names, enforcement
 }
 
 // legacyProtection reads the legacy protection object of branch. It returns nil when GitHub
