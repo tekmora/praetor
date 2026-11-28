@@ -1,0 +1,9 @@
+type: fixed
+title: >-
+  Use the current repository after a transfer or rename. An unreadable or inconsistent repository identity
+  fails live audit comparisons of visibility, Actions permissions or branch protection, plan comparisons of
+  Actions permissions or remote branch protection, and remote rules audits that need forge evidence.
+  The identity read follows redirects only within the configured API origin. Workflow history uses
+  the resolved repository even when neither permissions nor visibility is declared. Remote sync
+  uses that same origin and repository for both rulesets, labels and metadata.
+breaking: true

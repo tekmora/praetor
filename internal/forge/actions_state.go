@@ -71,31 +71,37 @@ type workflowRunsPage struct {
 	Runs       []WorkflowRunRecord `json:"workflow_runs"`
 }
 
-// WorkflowPermissions reads GET /repos/{owner}/{repo}/actions/permissions/workflow and, for
-// the owner, GET /orgs/{owner}/actions/permissions/workflow. The repository value is required:
-// ErrActionsNotReadable when the forge refuses it. The organisation value is best effort: a
-// user-owned repository has none, and a token that may read the repository need not read its
-// organisation, so a refusal there leaves Organisation nil with the reason.
+// WorkflowPermissions reads the effective permissions of the repository and its current
+// owner, including after a repository transfer or rename.
 func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
-	owner, _, err := g.resolveRepository()
+	settings, err := g.ReadRepositorySettings(ctx)
 	if err != nil {
 		return LiveWorkflowPermissions{}, err
 	}
-	path, err := g.repoPath("actions/permissions/workflow")
-	if err != nil {
-		return LiveWorkflowPermissions{}, err
+	return settings.WorkflowPermissions(ctx)
+}
+
+// WorkflowPermissions reads the two permission documents named by this repository snapshot.
+// The organisation read is best effort for user-owned repositories and restricted tokens.
+func (s ResolvedRepository) WorkflowPermissions(ctx context.Context) (LiveWorkflowPermissions, error) {
+	if s.session == nil {
+		return LiveWorkflowPermissions{}, fmt.Errorf("%w: repository settings required", ErrRepositoryIdentityRead)
 	}
-	repository, err := g.readWorkflowPermissions(ctx, path)
+	if ctx == nil {
+		return LiveWorkflowPermissions{}, errors.New("read workflow permissions: context required")
+	}
+	driver := s.driver()
+	repository, err := driver.readWorkflowPermissions(ctx, "/repos/"+s.FullName()+"/actions/permissions/workflow")
 	if err != nil {
 		return LiveWorkflowPermissions{}, fmt.Errorf("read repository workflow permissions: %w", err)
 	}
 	live := LiveWorkflowPermissions{Repository: repository}
-	organisation, err := g.readWorkflowPermissions(ctx, "/orgs/"+url.PathEscape(owner)+"/actions/permissions/workflow")
+	organisation, err := driver.readWorkflowPermissions(ctx, "/orgs/"+url.PathEscape(s.owner)+"/actions/permissions/workflow")
 	switch {
 	case err == nil:
 		live.Organisation = &organisation
 	case errors.Is(err, ErrActionsNotReadable):
-		live.OrganisationUnread = fmt.Sprintf("%s is not an organisation, or the token cannot read its settings (%v)", owner, err)
+		live.OrganisationUnread = fmt.Sprintf("%s is not an organisation, or the token cannot read its settings (%v)", s.owner, err)
 	default:
 		return LiveWorkflowPermissions{}, fmt.Errorf("read organisation workflow permissions: %w", err)
 	}
@@ -104,6 +110,8 @@ func (g *GitHubDriver) WorkflowPermissions(ctx context.Context) (LiveWorkflowPer
 
 // readWorkflowPermissions reads and checks one workflow permissions document.
 func (g *GitHubDriver) readWorkflowPermissions(ctx context.Context, path string) (WorkflowPermissions, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
+	defer cancel()
 	body, status, err := g.sendRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return WorkflowPermissions{}, err

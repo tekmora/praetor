@@ -187,6 +187,16 @@ func TestSync_Remote_DeclaredMergeQueueWarnsAboutAStaleCheck(t *testing.T) {
 	}
 }
 
+// TestSyncRemoteTransferredQueueCheck warns about a guarded requirement that cannot report on a merge group.
+func TestSyncRemoteTransferredQueueCheck(t *testing.T) {
+	f := queueRemoteFixture(t, true)
+	writeFixtureFile(t, f.dir, ".github/workflows/transfer.yml", transferWorkflow())
+	stub := &forgeStub{repo: transferredRepository(), rulesets: map[int]map[string]any{1: liveMainRuleset("Transfer gate")}}
+	out, _, _ := runGuardedRemoteSync(t, f, stub)
+	mustContain(t, out, "[WARN] Remote branch protection written, but main still requires checks the merge queue never receives",
+		".github/workflows/transfer.yml: no merge_group trigger, so Transfer gate never report for a merge group")
+}
+
 // Positive: plan --remote previews exactly what sync --remote writes for both rulesets. Before
 // the sync it reports the missing merge queue as drift and writes nothing; after the sync it
 // reports no drift. Negative: a queue ruleset that gained a wildcard is drift in the preview and

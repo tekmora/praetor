@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/adopt"
@@ -39,19 +40,9 @@ var (
 	resolveActionsToken = func(ctx context.Context) string { return util.ResolveAuthTokenContext(ctx, "") }
 )
 
-// visibilityReader reads what visibility the repository has on the forge: forge.GitHubDriver,
-// or a stand-in in tests.
-type visibilityReader interface {
-	RepositoryVisibility(ctx context.Context) (string, error)
-}
-
-// actionsForge is the live forge reader of one audit or plan run, or why there is none: the
-// Actions reads, the branch protection read and the repository visibility read go through the
-// same driver.
+// actionsForge shares one repository lookup across the live checks in an audit or plan.
 type actionsForge struct {
-	reader     forge.ActionsReader
-	protection protectionReader
-	visibility visibilityReader
+	repository func() (forge.ResolvedRepository, error)
 	runs       *forge.WorkflowRunReport
 	notMade    string
 }
@@ -74,22 +65,43 @@ func openActionsForge(ctx context.Context, rootDir string, repo config.Repositor
 	if token == "" {
 		return actionsForge{notMade: "no forge token: set GITHUB_TOKEN or GH_TOKEN, or sign in with gh"}
 	}
-	driver := forge.NewGitHubDriver(token, actionsForgeEndpoint)
-	driver.SetRepository(repo.Owner, repo.Name)
-	return actionsForge{reader: driver, protection: driver, visibility: driver}
+	return newActionsForge(ctx, repo, token, actionsForgeEndpoint)
+}
+
+// newActionsForge shares the resolved repository or its lookup error across all live checks.
+func newActionsForge(ctx context.Context, repo config.RepositoryMetadata, token, endpoint string) actionsForge {
+	return actionsForge{repository: sync.OnceValues(func() (forge.ResolvedRepository, error) {
+		return forge.ResolveRepository(ctx, token, endpoint, repo.Owner, repo.Name)
+	})}
+}
+
+// actionsReader returns a bound run reader or the reason workflow history is unavailable.
+func (live actionsForge) actionsReader() (forge.ActionsReader, string) {
+	if live.repository == nil {
+		return nil, live.notMade
+	}
+	repository, err := live.repository()
+	if err != nil {
+		return nil, err.Error()
+	}
+	return repository, ""
 }
 
 // readActionsPermissions compares declared with the live workflow permissions, or returns why
 // the comparison was not made.
-func readActionsPermissions(ctx context.Context, declared config.ActionsPolicy, live actionsForge) (forge.ActionsFinding, string) {
-	if live.reader == nil {
-		return forge.ActionsFinding{}, live.notMade
+func readActionsPermissions(ctx context.Context, declared config.ActionsPolicy, live actionsForge) (forge.ActionsFinding, error) {
+	if live.repository == nil {
+		return forge.ActionsFinding{}, errors.New(live.notMade)
 	}
-	state, err := live.reader.WorkflowPermissions(ctx)
+	repository, err := live.repository()
 	if err != nil {
-		return forge.ActionsFinding{}, err.Error()
+		return forge.ActionsFinding{}, err
 	}
-	return forge.EvaluateLiveActionsPermissions(declared, state), ""
+	state, err := repository.WorkflowPermissions(ctx)
+	if err != nil {
+		return forge.ActionsFinding{}, err
+	}
+	return forge.EvaluateLiveActionsPermissions(declared, state), nil
 }
 
 // auditLiveForge is the audit gate that reads the forge (#611, #612, #159). The live workflow
@@ -99,14 +111,13 @@ func readActionsPermissions(ctx context.Context, declared config.ActionsPolicy, 
 // and fails the audit on drift (auditRepositoryVisibility). The branch protection the default
 // branch enforces is compared with the declared policy and fails the audit on drift
 // (auditLiveBranchProtection). Every check runs whatever an earlier one found, and the failures
-// are joined, so one drift never hides another. A check the forge did not answer is named as not
-// made, never passed. sync --remote reconciles the branch protection and neither Actions setting.
-func auditLiveForge(ctx context.Context, manifest *config.Manifest, rootDir string, policy *config.ResolvedPolicy, offline bool) error {
+// are joined, so one drift never hides another. An unreadable repository identity fails the
+// comparisons that need repository identity. Other unanswered forge checks report why they were skipped.
+func auditLiveForge(ctx context.Context, manifest *config.Manifest, rootDir string, policy *config.ResolvedPolicy, live actionsForge) error {
 	ctx, cancel := context.WithTimeout(ctx, actionsForgeTimeout)
 	defer cancel()
-	live := openActionsForge(ctx, rootDir, manifest.Repository, offline)
 	permissions := auditActionsPermissions(ctx, manifest.Overrides.Actions, live)
-	visibility := auditRepositoryVisibility(ctx, manifest.Repository, live)
+	visibility := auditRepositoryVisibility(manifest.Repository, live)
 	live.runs = auditWorkflowRuns(ctx, manifest, rootDir, live)
 	return errors.Join(permissions, visibility, auditLiveBranchProtection(ctx, manifest, rootDir, policy, live))
 }
@@ -118,9 +129,8 @@ func auditLiveForge(ctx context.Context, manifest *config.Manifest, rootDir stri
 // (adopt.AuditBranchProtectionWithPolicy), so a ruleset GitHub never applied passed it (#159).
 // Drift fails the audit and names every property that differs; a setting stricter than declared
 // passes. Like the committed ruleset gate, it compares nothing when adoption.decline declines
-// the branch-ruleset step or the policy requires no ruleset. A read the forge did not answer is a
-// check not made ([SKIP]); a comparison that cannot be evaluated, such as an invalid review
-// requirement or more required checks than a ruleset holds, is a local defect and fails.
+// the branch-ruleset step or the policy requires no ruleset. A missing repository identity or
+// invalid comparison target fails the audit. An unanswered branch protection read is a skip.
 func auditLiveBranchProtection(ctx context.Context, manifest *config.Manifest, rootDir string, policy *config.ResolvedPolicy, live actionsForge) error {
 	notCompared, err := liveProtectionNotCompared(manifest, policy, live)
 	if err != nil {
@@ -138,11 +148,11 @@ func auditLiveBranchProtection(ctx context.Context, manifest *config.Manifest, r
 		fmt.Println(skip)
 		return nil
 	}
-	target, notes, err := auditProtectionTarget(ctx, rootDir, manifest, policy.BranchProtection, live.runs)
+	target, notes, err := auditProtectionTarget(ctx, rootDir, manifest, policy.BranchProtection, live)
 	if err != nil {
 		return fmt.Errorf("[FAIL] Live branch protection audit failed: %w", err)
 	}
-	protection, findings, err := compareLiveProtection(ctx, live.protection, target)
+	protection, findings, err := compareLiveProtection(ctx, target)
 	var unread *forgeReadError
 	switch {
 	case errors.As(err, &unread):
@@ -158,12 +168,12 @@ func auditLiveBranchProtection(ctx context.Context, manifest *config.Manifest, r
 // auditProtectionTarget uses the same declared checks as plan and ruleset apply, less any check
 // that the default branch does not report yet (from origin/<branch> or the forge workflow-run
 // report). The fetched default branch also supplies evidence of a pending rename.
-func auditProtectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, runs ...*forge.WorkflowRunReport) (protectionTarget, []string, error) {
-	target, err := liveProtectionTarget(ctx, rootDir, manifest, policy)
+func auditProtectionTarget(ctx context.Context, rootDir string, manifest *config.Manifest, policy config.BranchProtectionPolicy, live actionsForge) (protectionTarget, []string, error) {
+	target, err := live.protectionTarget(ctx, rootDir, manifest, policy)
 	if err != nil {
 		return protectionTarget{}, nil, err
 	}
-	report := firstRunReport(runs)
+	report := live.runs
 	ref := "origin/" + target.branch
 	commit, err := util.ResolveGitCommit(ctx, rootDir, "refs/remotes/"+ref)
 	if err != nil {
@@ -179,7 +189,7 @@ func auditProtectionTarget(ctx context.Context, rootDir string, manifest *config
 		return target, append([]string{note}, notes...), pendingErr
 	}
 	renamed, err := forge.RequiredStatusContextRenames(ctx, rootDir, strings.TrimSpace(string(ancestor.Stdout)),
-		target.repository, forge.ForMergeQueue(policy.MergeQueue))
+		target.repository.FullName(), forge.ForMergeQueue(policy.MergeQueue))
 	if errors.Is(err, forge.ErrCommittedWorkflowAbsent) {
 		return target, absentWorkflowNote(ref, err), nil
 	}
@@ -189,14 +199,6 @@ func auditProtectionTarget(ctx context.Context, rootDir string, manifest *config
 	return pendingProtectionRenames(ctx, rootDir, commit, ref, target, renamed, report)
 }
 
-// firstRunReport returns the first workflow run report in runs, or nil if runs is empty.
-func firstRunReport(runs []*forge.WorkflowRunReport) *forge.WorkflowRunReport {
-	if len(runs) == 0 {
-		return nil
-	}
-	return runs[0]
-}
-
 // A squash or rebase merge can leave HEAD's merge-base before an already landed rename.
 // The fetched branch's own checks close that window, and checks the default branch does not
 // report yet (on origin/<branch> or in the forge workflow-run report) are excused as not compared.
@@ -204,7 +206,7 @@ func pendingProtectionRenames(ctx context.Context, rootDir, commit, ref string, 
 	opts := []forge.ContextOption{forge.ForMergeQueue(target.policy.MergeQueue), forge.WithDeclaredStatusContexts(target.policy.StatusContexts)}
 	var notes []string
 	if len(renames) > 0 {
-		contexts, err := forge.RequiredStatusContextsAt(ctx, rootDir, commit, target.repository, opts...)
+		contexts, err := forge.RequiredStatusContextsAt(ctx, rootDir, commit, target.repository.FullName(), opts...)
 		if errors.Is(err, forge.ErrCommittedWorkflowAbsent) {
 			return target, absentWorkflowNote(ref, err), nil
 		}
@@ -213,7 +215,7 @@ func pendingProtectionRenames(ctx context.Context, rootDir, commit, ref string, 
 		}
 		target.renames, notes = filterUnlandedRenames(ref, renames, contexts)
 	}
-	unreported, err := forge.UnreportedStatusContexts(ctx, rootDir, commit, target.repository, report, opts...)
+	unreported, err := forge.UnreportedStatusContexts(ctx, rootDir, commit, target.repository.FullName(), report, opts...)
 	if errors.Is(err, forge.ErrCommittedWorkflowAbsent) {
 		target.renames = nil
 		return target, absentWorkflowNote(ref, err), nil
@@ -279,7 +281,7 @@ func liveProtectionNotCompared(manifest *config.Manifest, policy *config.Resolve
 		return "", errors.New("[FAIL] Live branch protection audit failed: policy is required")
 	case !adopt.RulesetRequired(policy.BranchProtection):
 		return "[INFO] Live branch protection not compared with the forge: policy requires neither linear history nor signed commits, so it declares no branch protection ruleset.", nil
-	case live.protection == nil:
+	case live.repository == nil:
 		return "[SKIP] Live branch protection not compared with the forge: " + live.notMade, nil
 	}
 	return "", nil
@@ -390,10 +392,12 @@ func auditActionsPermissions(ctx context.Context, declared *config.ActionsPolicy
 		fmt.Println("[INFO] Actions workflow permissions: overrides.actions declares none; nothing compared with the forge.")
 		return nil
 	}
-	finding, notMade := readActionsPermissions(ctx, *declared, live)
+	finding, err := readActionsPermissions(ctx, *declared, live)
 	switch {
-	case notMade != "":
-		fmt.Printf("[SKIP] Actions workflow permissions not compared with the forge: %s\n", notMade)
+	case errors.Is(err, forge.ErrRepositoryIdentityRead):
+		return fmt.Errorf("[FAIL] Actions workflow permissions: %w", err)
+	case err != nil:
+		fmt.Printf("[SKIP] Actions workflow permissions not compared with the forge: %v\n", err)
 	case finding.Verdict.Failed():
 		return fmt.Errorf("[FAIL] Actions workflow permissions %s: %s", finding.Verdict, finding.Detail)
 	default:
@@ -405,33 +409,33 @@ func auditActionsPermissions(ctx context.Context, declared *config.ActionsPolicy
 // auditRepositoryVisibility compares the declared repository visibility with what the forge
 // reports, or reports why the comparison was not made. Drift fails the audit and changing
 // visibility is left to the operator.
-func auditRepositoryVisibility(ctx context.Context, repo config.RepositoryMetadata, live actionsForge) error {
+func auditRepositoryVisibility(repo config.RepositoryMetadata, live actionsForge) error {
 	if strings.TrimSpace(repo.Visibility) == "" {
 		fmt.Println("[INFO] Repository visibility not compared with the forge: repository.visibility declares none.")
 		return nil
 	}
-	if live.visibility == nil {
+	if live.repository == nil {
 		fmt.Printf("[SKIP] Repository visibility not compared with the forge: %s\n", live.notMade)
 		return nil
 	}
-	liveVisibility, err := live.visibility.RepositoryVisibility(ctx)
+	repository, err := live.repository()
 	if err != nil {
-		fmt.Printf("[SKIP] Repository visibility not compared with the forge: %v\n", err)
-		return nil
+		return fmt.Errorf("[FAIL] Repository visibility: %w", err)
 	}
-	drift := forge.VisibilityDrift(repo.Visibility, liveVisibility)
+	drift := forge.VisibilityDrift(repo.Visibility, repository.Visibility)
 	if drift != "" {
 		return fmt.Errorf("[FAIL] Repository visibility compared with the forge: %s; changing visibility is the operator's decision", drift)
 	}
-	fmt.Printf("[PASS] Repository visibility compared with the forge: GitHub reports %s.\n", liveVisibility)
+	fmt.Printf("[PASS] Repository visibility compared with the forge: GitHub reports %s.\n", repository.Visibility)
 	return nil
 }
 
 // auditWorkflowRuns prints the workflow run report, or why the runs were not read, and returns
 // the report when read.
 func auditWorkflowRuns(ctx context.Context, manifest *config.Manifest, rootDir string, live actionsForge) *forge.WorkflowRunReport {
-	if live.reader == nil {
-		fmt.Printf("[SKIP] Workflow runs not read from the forge: %s\n", live.notMade)
+	reader, reason := live.actionsReader()
+	if reader == nil {
+		fmt.Printf("[SKIP] Workflow runs not read from the forge: %s\n", reason)
 		return nil
 	}
 	branch, err := forge.RepositoryDefaultBranch(ctx, rootDir, manifest)
@@ -439,7 +443,7 @@ func auditWorkflowRuns(ctx context.Context, manifest *config.Manifest, rootDir s
 		fmt.Printf("[SKIP] Workflow runs not read from the forge: %v\n", err)
 		return nil
 	}
-	report, err := forge.AuditWorkflowRunHealth(ctx, rootDir, branch, live.reader, manifest.WorkflowRuns)
+	report, err := forge.AuditWorkflowRunHealth(ctx, rootDir, branch, reader, manifest.WorkflowRuns)
 	if err != nil {
 		fmt.Printf("[SKIP] Workflow runs on %s not read from the forge: %v\n", branch, err)
 		return nil
@@ -449,22 +453,23 @@ func auditWorkflowRuns(ctx context.Context, manifest *config.Manifest, rootDir s
 }
 
 // printPlanActionsPermissions previews the live workflow permission comparison. plan reports
-// the verdict and never fails on it, as it reports file drift; the audit fails.
-func printPlanActionsPermissions(ctx context.Context, manifest *config.Manifest, rootDir string, offline bool) {
+// permission drift and returns an error when the repository identity cannot be read.
+func printPlanActionsPermissions(ctx context.Context, declared *config.ActionsPolicy, live actionsForge) error {
 	fmt.Println("\nLive Actions workflow permissions (read-only; sync does not change them):")
-	declared := manifest.Overrides.Actions
 	if declared == nil {
 		fmt.Println("  - overrides.actions declares none; nothing compared")
-		return
+		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, actionsForgeTimeout)
-	defer cancel()
-	finding, notMade := readActionsPermissions(ctx, *declared, openActionsForge(ctx, rootDir, manifest.Repository, offline))
-	if notMade != "" {
-		fmt.Printf("  - not compared: %s\n", notMade)
-		return
+	finding, err := readActionsPermissions(ctx, *declared, live)
+	if errors.Is(err, forge.ErrRepositoryIdentityRead) {
+		return fmt.Errorf("plan Actions workflow permissions: %w", err)
+	}
+	if err != nil {
+		fmt.Printf("  - not compared: %v\n", err)
+		return nil
 	}
 	fmt.Printf("  - %s: %s\n", finding.Verdict, finding.Detail)
+	return nil
 }
 
 // liveMergeQueueVerdict fails a branch the forge protects with a merge queue and a required
@@ -477,7 +482,7 @@ func liveMergeQueueVerdict(ctx context.Context, rootDir string, target protectio
 	if !target.policy.MergeQueue && live != nil && live.HasActiveRule(forge.MergeQueueRule) {
 		return errors.New("[FAIL] " + forge.UndeclaredMergeQueueFailure(target.branch))
 	}
-	findings, err := forge.LiveMergeQueueFindings(ctx, rootDir, live)
+	findings, err := forge.LiveMergeQueueFindings(ctx, rootDir, target.repository.FullName(), live)
 	if err != nil {
 		return fmt.Errorf("[FAIL] Live branch protection of %s: read the merge_group triggers: %w", target.branch, err)
 	}

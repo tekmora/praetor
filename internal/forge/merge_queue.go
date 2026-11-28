@@ -13,6 +13,7 @@ import (
 
 	"github.com/cordanaLLM/praetor/internal/config"
 	"github.com/cordanaLLM/praetor/internal/ghworkflow"
+	"github.com/cordanaLLM/praetor/internal/util"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -141,6 +142,12 @@ func selectContexts(files []workflowFile, called calledWorkflows, identity strin
 // workflows (RequiredStatusContextsPlanned), every workflow that requires a pull request check
 // but lacks the merge_group trigger. A nil planned reads the workflows on disk alone.
 func MergeQueueFindings(ctx context.Context, repoPath string, planned map[string][]byte) ([]MergeQueueFinding, error) {
+	return mergeQueueFindings(ctx, repoPath, planned, "")
+}
+
+// mergeQueueFindings evaluates guards against the live repository when supplied. Local
+// ruleset rendering resolves guards from the checkout, including its declared source.
+func mergeQueueFindings(ctx context.Context, repoPath string, planned map[string][]byte, repository string) ([]MergeQueueFinding, error) {
 	if ctx == nil {
 		return nil, errors.New("merge queue findings require a context")
 	}
@@ -154,11 +161,13 @@ func MergeQueueFindings(ctx context.Context, repoPath string, planned map[string
 	if err != nil {
 		return nil, err
 	}
-	identity, err := guardIdentity(files, repoPath)
-	if err != nil {
-		return nil, err
+	if repository == "" {
+		repository, err = guardIdentity(files, repoPath)
+		if err != nil {
+			return nil, err
+		}
 	}
-	_, findings, err := splitMergeGroupFiles(files, newCalledWorkflows(files), identity)
+	_, findings, err := splitMergeGroupFiles(files, newCalledWorkflows(files), repository)
 	return findings, err
 }
 
@@ -280,13 +289,15 @@ func (l *LiveBranchProtection) HasActiveRule(ruleType string) bool {
 	return false
 }
 
-// LiveMergeQueueFindings lists, for a branch protected live by a merge queue, the workflows of
-// the repository at repoPath that lack merge_group while one of their contexts is a status
-// check the branch requires: no group ever reports it, so every queued group waits for it until
-// the queue's check timeout. It is empty for a branch without an active merge_queue rule.
-func LiveMergeQueueFindings(ctx context.Context, repoPath string, live *LiveBranchProtection) ([]MergeQueueFinding, error) {
+// LiveMergeQueueFindings evaluates workflow guards at repoPath against the live owner/name.
+// It lists workflows that lack merge_group while the branch requires one of their checks.
+// It returns no findings for a branch without an active merge_queue rule.
+func LiveMergeQueueFindings(ctx context.Context, repoPath, repository string, live *LiveBranchProtection) ([]MergeQueueFinding, error) {
 	if live == nil || !live.HasActiveRule(MergeQueueRule) {
 		return nil, nil
+	}
+	if _, _, err := util.SplitGitHubRepository(repository); err != nil {
+		return nil, fmt.Errorf("live merge queue requires an owner/name repository: %w", err)
 	}
 	enforcement, err := collectEnforcement(live)
 	if err != nil {
@@ -297,7 +308,7 @@ func LiveMergeQueueFindings(ctx context.Context, repoPath string, live *LiveBran
 		required = append(required, check)
 	}
 	slices.Sort(required)
-	findings, err := MergeQueueFindings(ctx, repoPath, nil)
+	findings, err := mergeQueueFindings(ctx, repoPath, nil, repository)
 	if err != nil {
 		return nil, err
 	}

@@ -93,6 +93,70 @@ func TestSync_Remote_RequiresOnlyChecksThatReportInTheRepository(t *testing.T) {
 	mustContain(t, out, "[INFO] Not required on GitHub for acme/widgets, because a repository guard skips their jobs there by default: Leg (Linux), Leg (Windows)")
 }
 
+// runTransferredSync reconciles a checkout whose second check reports only after the transfer.
+func runTransferredSync(t *testing.T, stub *forgeStub) (string, error) {
+	t.Helper()
+	f, endpoint := remoteProtectionFixture(t, stub)
+	writeFixtureFile(t, f.dir, ".github/workflows/ci.yml", ciWorkflow)
+	writeFixtureFile(t, f.dir, ".github/workflows/transfer.yml", transferWorkflow())
+	writeDeclaredRuleset(t, f.dir, declaredProtection(false))
+	return runSyncCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+endpoint)
+}
+
+// TestSyncRemoteTransferredRequiredCheck requires the guarded job in the write and live read-back.
+func TestSyncRemoteTransferredRequiredCheck(t *testing.T) {
+	stub := &forgeStub{repo: transferredRepository(), rulesets: map[int]map[string]any{1: liveMainRuleset("CI")}}
+	out, err := runTransferredSync(t, stub)
+	if err != nil {
+		t.Fatalf("sync transferred repository: %v\n%s", err, out)
+	}
+	requireRulesetCheck(t, "written ruleset", stub.storedRuleset(t, 1), "Transfer gate", true)
+	mustContain(t, out,
+		"[DRIFT] Required status checks: declared 2, live 1 of 2 required; missing: Transfer gate",
+		"Live branch protection of main on GitHub for new-org/imago, read back:",
+		"[OK] Required status checks: declared 2, live 2 of 2 required")
+	reads := stub.readPaths()
+	if len(reads) == 0 || reads[0] != "/repos/acme/widgets" {
+		t.Fatalf("expected identity GET at the checkout coordinates first, got %v", reads)
+	}
+	for _, path := range reads[1:] {
+		if path != "/repos/new-org/imago" && !strings.HasPrefix(path, "/repos/new-org/imago/") {
+			t.Errorf("read outside the resolved repository: %s", path)
+		}
+	}
+	for _, write := range stub.recorded() {
+		if !strings.Contains(write, " /repos/new-org/imago/") {
+			t.Errorf("write outside the resolved repository: %s", write)
+		}
+	}
+}
+
+// TestSyncRemoteTransferredCheckUnenforced distinguishes a stored requirement from an enforced one.
+func TestSyncRemoteTransferredCheckUnenforced(t *testing.T) {
+	stub := &forgeStub{repo: transferredRepository(), rulesUnenforced: true, legacy: classicProtection("CI")}
+	out, err := runTransferredSync(t, stub)
+	requireRulesetCheck(t, "stored ruleset", stub.storedRuleset(t, 1), "Transfer gate", true)
+	mustErrContain(t, err, "still does not enforce the declared Required status checks")
+	_, readback, found := strings.Cut(out, "for new-org/imago, read back:")
+	if !found {
+		t.Fatalf("missing live read-back of new-org/imago:\n%s", out)
+	}
+	mustContain(t, readback, "[DRIFT] Required status checks: declared 2, live 1 of 2 required; missing: Transfer gate")
+}
+
+// TestSyncRemoteInvalidIdentityStopsBeforeWrite rejects a mismatched owner before reconciliation.
+func TestSyncRemoteInvalidIdentityStopsBeforeWrite(t *testing.T) {
+	repo := transferredRepository()
+	repo["owner"] = map[string]string{"login": "acme"}
+	stub := &forgeStub{repo: repo}
+	f, endpoint := remoteProtectionFixture(t, stub)
+	_, err := runSyncCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+endpoint)
+	mustErrContain(t, err, `read repository identity: owner.login "acme" disagrees with full_name "new-org/imago"`)
+	if writes := stub.recorded(); len(writes) != 0 {
+		t.Fatalf("writes after invalid identity: %v", writes)
+	}
+}
+
 // liveLegRuleset is a live praetor ruleset whose only rule requires the named checks, as an
 // operational fork's ruleset looks after a sync that wrote every rendered check.
 func liveLegRuleset(checks ...string) map[string]any {

@@ -207,29 +207,43 @@ func TestRulesetReadersForTheQueueAudit(t *testing.T) {
 	}
 }
 
-// Positive and negative: a live branch with an active merge_queue rule that requires a context
-// of a workflow without merge_group is a finding; the same requirement without a queue rule, and
-// a queue requiring only merge_group contexts, are not.
+// TestLiveMergeQueueFindings checks queue enforcement, missing branches and invalid live coordinates.
 func TestLiveMergeQueueFindings(t *testing.T) {
 	root := queueFixture(t)
 	queue := LiveBranchRule{Type: "merge_queue"}
 	checks := LiveBranchRule{Type: "required_status_checks", Parameters: json.RawMessage(
 		`{"required_status_checks":[{"context":"Build"},{"context":"Documentation Governance"}]}`)}
-	findings, err := LiveMergeQueueFindings(t.Context(), root, &LiveBranchProtection{Branch: "main", Rules: []LiveBranchRule{queue, checks}})
-	if err != nil || len(findings) != 1 || findings[0].Workflow != ".github/workflows/docs.yml" {
-		t.Fatalf("queue + docs context: %+v, %v", findings, err)
-	}
-	findings, err = LiveMergeQueueFindings(t.Context(), root, &LiveBranchProtection{Branch: "main", Rules: []LiveBranchRule{checks}})
-	if err != nil || len(findings) != 0 {
-		t.Fatalf("no queue rule: %+v, %v", findings, err)
-	}
 	onlyBuild := LiveBranchRule{Type: "required_status_checks", Parameters: json.RawMessage(`{"required_status_checks":[{"context":"Build"}]}`)}
-	findings, err = LiveMergeQueueFindings(t.Context(), root, &LiveBranchProtection{Branch: "main", Rules: []LiveBranchRule{queue, onlyBuild}})
-	if err != nil || len(findings) != 0 {
-		t.Fatalf("queue + merge_group context: %+v, %v", findings, err)
+	for _, tc := range [...]struct {
+		name  string
+		rules []LiveBranchRule
+		want  []string
+	}{
+		{"queue with docs check", []LiveBranchRule{queue, checks}, []string{".github/workflows/docs.yml"}},
+		{"no queue", []LiveBranchRule{checks}, nil},
+		{"queue with build check", []LiveBranchRule{queue, onlyBuild}, nil},
+	} {
+		live := &LiveBranchProtection{Branch: "main", Rules: tc.rules}
+		findings, err := LiveMergeQueueFindings(t.Context(), root, "acme/widgets", live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var paths []string
+		for _, finding := range findings {
+			paths = append(paths, finding.Workflow)
+		}
+		if !slices.Equal(paths, tc.want) {
+			t.Errorf("%s: workflows %v, want %v", tc.name, paths, tc.want)
+		}
 	}
-	if findings, err := LiveMergeQueueFindings(t.Context(), root, nil); err != nil || findings != nil {
+	if findings, err := LiveMergeQueueFindings(t.Context(), root, "acme/widgets", nil); err != nil || findings != nil {
 		t.Fatalf("nil live: %+v, %v", findings, err)
+	}
+	for _, repository := range [...]string{"", "missing-owner-and-slash", "acme/.."} {
+		live := &LiveBranchProtection{Branch: "main", Rules: []LiveBranchRule{queue, checks}}
+		if _, err := LiveMergeQueueFindings(t.Context(), root, repository, live); err == nil {
+			t.Errorf("live queue accepted invalid repository %q", repository)
+		}
 	}
 }
 

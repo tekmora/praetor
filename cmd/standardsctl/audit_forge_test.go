@@ -25,6 +25,7 @@ import (
 // actionsStub is a stand-in forge for the live Actions checks: the workflow permissions of
 // acme/widgets and of the acme organisation, and one runs page per workflow file name.
 type actionsStub struct {
+	metadataStatus        int
 	repoStatus, orgStatus int
 	repo, org             map[string]any
 	runs                  map[string]map[string]any
@@ -42,9 +43,7 @@ func serveActions(t *testing.T, stub *actionsStub) {
 
 // serve records the request and answers it (answer).
 func (s *actionsStub) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	s.requests = append(s.requests, r.Method+" "+r.URL.EscapedPath())
-	s.mu.Unlock()
+	s.recordRequest(r)
 	status, body := s.answer(r.URL.Path)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -63,18 +62,11 @@ func pointLiveChecksAt(t *testing.T, url string) {
 	t.Cleanup(func() { actionsForgeEndpoint, resolveActionsToken = endpoint, token })
 }
 
+// answer serves repository metadata, permissions and workflow runs by request path.
 func (s *actionsStub) answer(path string) (int, any) {
 	switch {
 	case path == "/repos/acme/widgets":
-		if s.repoStatus != 0 {
-			return s.repoStatus, s.repo
-		}
-		if s.repo != nil {
-			if vis, ok := s.repo["visibility"]; ok {
-				return http.StatusOK, map[string]any{"visibility": vis}
-			}
-		}
-		return http.StatusOK, map[string]any{"visibility": "public"}
+		return orOK(s.metadataStatus), fixtureRepositorySettings("public")
 	case path == "/repos/acme/widgets/actions/permissions/workflow":
 		return orOK(s.repoStatus), s.repo
 	case path == "/orgs/acme/actions/permissions/workflow":
@@ -143,12 +135,10 @@ func TestAuditLiveActions_Positive_CompliantRepositoryPasses(t *testing.T) {
 	}
 	mustContain(t, out,
 		"[PASS] Actions workflow permissions compared with the forge: live workflow permissions match the declaration.",
+		"[PASS] Repository visibility compared with the forge: GitHub reports public.",
 		"[INFO] Workflow runs on main: no workflow under .github/workflows that runs on its own; nothing read.",
 		"Audit Summary: configured governance gates passed")
-	if got := strings.Join(stub.seen(), "\n"); !strings.Contains(got, "GET /repos/acme/widgets/actions/permissions/workflow") ||
-		!strings.Contains(got, "GET /orgs/acme/actions/permissions/workflow") {
-		t.Fatalf("requests = %s", got)
-	}
+	requireIdentityFirst(t, stub.seen())
 }
 
 // Negative (#611): a declared false with a live true inherited from the organisation fails as
@@ -207,6 +197,28 @@ func TestAuditLiveActions_Boundary_ChecksNotMadeAreNamed(t *testing.T) {
 	mustContain(t, out, "[SKIP] Actions workflow permissions not compared with the forge: read repository workflow permissions: status 403")
 	if strings.Contains(out, "[PASS] Actions workflow permissions") {
 		t.Fatalf("a refused read was reported as a pass:\n%s", out)
+	}
+}
+
+// TestActionsRepositoryReadFailure verifies audit and plan fail before comparing permissions
+// when the repository GET fails, even though both permissions endpoints would answer.
+func TestActionsRepositoryReadFailure(t *testing.T) {
+	f := newAuditFixture(t)
+	f.declareActions(t, "read", false)
+	stub := &actionsStub{
+		metadataStatus: http.StatusServiceUnavailable,
+		repo:           workflowPermissions("read", false),
+		org:            workflowPermissions("read", false),
+	}
+	serveActions(t, stub)
+	_, err := f.audit(t)
+	mustErrContain(t, err, "[FAIL] Actions workflow permissions: read repository identity")
+	mustErrContain(t, err, "503")
+	_, err = runPlanCmd(t, "--config="+f.manifestPath)
+	mustErrContain(t, err, "read repository identity")
+	got := strings.Join(stub.seen(), "\n")
+	if strings.Count(got+"\n", "GET /repos/acme/widgets\n") != 2 || strings.Contains(got, "/permissions/workflow") {
+		t.Fatalf("requests across audit and plan = %s", got)
 	}
 }
 
@@ -496,7 +508,8 @@ func TestAuditLiveBranchProtection_PendingContextRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, _, err := auditProtectionTarget(t.Context(), f.dir, manifest, declaredProtection(false))
+	live := openActionsForge(t.Context(), f.dir, manifest.Repository, false)
+	target, _, err := auditProtectionTarget(t.Context(), f.dir, manifest, declaredProtection(false), live)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +599,8 @@ func TestAuditProtectionTarget_RenameMergeQueueSelection(t *testing.T) {
 			}
 			policy := declaredProtection(false)
 			policy.MergeQueue = tc.mergeQueue
-			target, _, err := auditProtectionTarget(t.Context(), f.dir, manifest, policy)
+			live := openActionsForge(t.Context(), f.dir, manifest.Repository, false)
+			target, _, err := auditProtectionTarget(t.Context(), f.dir, manifest, policy, live)
 			if err != nil || len(target.renames) != tc.want {
 				t.Fatalf("renames = %+v, %v; want %d", target.renames, err, tc.want)
 			}
@@ -756,7 +770,8 @@ func TestAuditProtectionTarget_CommitOnlyUnreportedChecks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load fixture manifest: %v", err)
 	}
-	target, notes, err := auditProtectionTarget(t.Context(), f.dir, manifest, declaredProtection(false))
+	live := openActionsForge(t.Context(), f.dir, manifest.Repository, false)
+	target, notes, err := auditProtectionTarget(t.Context(), f.dir, manifest, declaredProtection(false), live)
 	if err != nil || !slices.Equal(target.contexts, []string{"CI"}) {
 		t.Fatalf("commit-only contexts = %v, %v; want [CI]", target.contexts, err)
 	}
@@ -915,16 +930,7 @@ func TestAuditLiveBranchProtection_Negative_ManifestPresenceErrorDoesNotSkip(t *
 // answers the Actions reads and protection every other request.
 func serveForge(t *testing.T, actions *actionsStub, protection *forgeStub) {
 	t.Helper()
-	rest := protection.handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/actions/") {
-			actions.serve(t, w, r)
-			return
-		}
-		rest(w, r)
-	}))
-	t.Cleanup(server.Close)
-	pointLiveChecksAt(t, server.URL)
+	pointLiveChecksAt(t, comparisonEndpoint(t, actions, protection))
 }
 
 // Negative (#159 review): drifted Actions workflow permissions do not stop the branch protection
@@ -1185,7 +1191,7 @@ func visibilityFixture(t *testing.T, declared string, stub *forgeStub) *auditFix
 func TestAuditRepositoryVisibility_Positive_MatchingPasses(t *testing.T) {
 	for _, vis := range []string{"public", "private"} {
 		t.Run(vis, func(t *testing.T) {
-			stub := &forgeStub{repo: map[string]any{"visibility": vis, "topics": []any{}}}
+			stub := &forgeStub{repo: fixtureRepositorySettings(vis)}
 			f := visibilityFixture(t, vis, stub)
 			out, err := f.audit(t)
 			if err != nil {
@@ -1209,7 +1215,7 @@ func TestAuditRepositoryVisibility_Negative_DriftFails(t *testing.T) {
 		{"declared_public_forge_private", "public", "private"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stub := &forgeStub{repo: map[string]any{"visibility": tc.live, "topics": []any{}}}
+			stub := &forgeStub{repo: fixtureRepositorySettings(tc.live)}
 			f := visibilityFixture(t, tc.declared, stub)
 			_, err := f.audit(t)
 			if err == nil {
@@ -1224,7 +1230,7 @@ func TestAuditRepositoryVisibility_Negative_DriftFails(t *testing.T) {
 
 // Boundary: a manifest that declares no repository.visibility is reported as not compared and passes.
 func TestAuditRepositoryVisibility_Boundary_UndeclaredIsInfo(t *testing.T) {
-	stub := &forgeStub{repo: map[string]any{"visibility": "public", "topics": []any{}}}
+	stub := &forgeStub{repo: fixtureRepositorySettings("public")}
 	f := visibilityFixture(t, "", stub)
 	out, err := f.audit(t)
 	if err != nil {
@@ -1246,7 +1252,7 @@ func TestAuditRepositoryVisibility_Boundary_CaseInsensitivePasses(t *testing.T) 
 		{"private", "Private"},
 	} {
 		t.Run(tc.declared+"_vs_"+tc.live, func(t *testing.T) {
-			stub := &forgeStub{repo: map[string]any{"visibility": tc.live, "topics": []any{}}}
+			stub := &forgeStub{repo: fixtureRepositorySettings(tc.live)}
 			f := visibilityFixture(t, tc.declared, stub)
 			out, err := f.audit(t)
 			if err != nil {
@@ -1254,19 +1260,5 @@ func TestAuditRepositoryVisibility_Boundary_CaseInsensitivePasses(t *testing.T) 
 			}
 			mustContain(t, out, fmt.Sprintf("[PASS] Repository visibility compared with the forge: GitHub reports %s.", tc.live))
 		})
-	}
-}
-
-// Boundary: a forge read error skips the visibility check with the documented treatment and does not fail the audit.
-func TestAuditRepositoryVisibility_Boundary_ForgeReadErrorSkips(t *testing.T) {
-	stub := &forgeStub{repoStatus: http.StatusInternalServerError}
-	f := visibilityFixture(t, "public", stub)
-	out, err := f.audit(t)
-	if err != nil {
-		t.Fatalf("a forge read error failed the audit: %v\n%s", err, out)
-	}
-	mustContain(t, out, "[SKIP] Repository visibility not compared with the forge: ")
-	if strings.Contains(out, "[PASS] Repository visibility") || strings.Contains(out, "[FAIL] Repository visibility") {
-		t.Fatalf("a forge read error reported pass or fail:\n%s", out)
 	}
 }

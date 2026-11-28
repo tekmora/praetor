@@ -1,0 +1,211 @@
+// SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+//
+// SPDX-License-Identifier: EUPL-1.2
+
+package main
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/cordanaLLM/praetor/internal/forge"
+)
+
+// recordRequest keeps all the fixture reads in wire order across both handlers.
+func (s *actionsStub) recordRequest(r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, r.Method+" "+r.URL.EscapedPath())
+}
+
+// comparisonEndpoint serves both comparisons at an endpoint the remote flags can select.
+func comparisonEndpoint(t *testing.T, actions *actionsStub, protection *forgeStub) string {
+	t.Helper()
+	rest := protection.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/acme/widgets" || strings.Contains(r.URL.Path, "/actions/") {
+			actions.serve(t, w, r)
+			return
+		}
+		actions.recordRequest(r)
+		rest(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+// requireIdentityFirst checks the order of permission reads and rejects a second metadata GET.
+func requireIdentityFirst(t *testing.T, got []string) {
+	t.Helper()
+	want := []string{
+		"GET /repos/acme/widgets",
+		"GET /repos/acme/widgets/actions/permissions/workflow",
+		"GET /orgs/acme/actions/permissions/workflow",
+	}
+	if len(got) < len(want) || !slices.Equal(got[:len(want)], want) || slices.Contains(got[len(want):], want[0]) {
+		t.Fatalf("requests = %v, want %v first with one repository GET", got, want)
+	}
+}
+
+// TestPlanRemoteIdentityFirst uses only the explicit connection for both live comparisons.
+func TestPlanRemoteIdentityFirst(t *testing.T) {
+	f := newAuditFixture(t)
+	f.declareActions(t, "read", false)
+	stub := &actionsStub{repo: workflowPermissions("read", false), org: workflowPermissions("read", true)}
+	out, err := runPlanCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+comparisonEndpoint(t, stub, &forgeStub{}))
+	if err != nil {
+		t.Fatalf("remote plan: %v\n%s", err, out)
+	}
+	requireIdentityFirst(t, stub.seen())
+	mustContain(t, out, "  - compliant:", "Live branch protection of main on GitHub for acme/widgets")
+}
+
+// transferredRepository is the metadata returned when the checkout still names acme/widgets.
+func transferredRepository() map[string]any {
+	return map[string]any{
+		"full_name": "new-org/imago", "owner": map[string]string{"login": "new-org"}, "visibility": "public",
+	}
+}
+
+// transferWorkflow reports Transfer gate only in the repository returned by the identity GET.
+func transferWorkflow() string {
+	guard := "if: github.repository == (vars.PRAETOR_CANONICAL_REPOSITORY || 'new-org/imago')"
+	return strings.Replace(prJobWorkflow("Transfer gate"), "runs-on:", guard+"\n    runs-on:", 1)
+}
+
+// transferredAuditFixture omits both declarations that would otherwise trigger an identity read.
+func transferredAuditFixture(t *testing.T, current *forgeStub) *auditFixture {
+	t.Helper()
+	f := protectedFixture(t, false, "", current)
+	manifest := strings.Replace(fixtureManifest("acme", "widgets", false), "  visibility: \"public\"\n", "", 1)
+	writeFixtureFile(t, f.dir, ".standards.yaml", manifest)
+	f.commitWorkflows(t, map[string]string{"transfer.yml": transferWorkflow()})
+	f.recordOriginMain(t)
+	return f
+}
+
+// TestTransferredRepositoryRequiredChecks exercises the guarded job in both live comparisons.
+// The old checkout has CI protected. The current repository also runs Transfer gate on each PR.
+func TestTransferredRepositoryRequiredChecks(t *testing.T) {
+	stub := &forgeStub{
+		repo:     transferredRepository(),
+		rulesets: liveRuleset(t, declaredProtection(false), []string{"CI"}, "active"),
+		runs:     map[string]map[string]any{"ci.yml": completedMainRunsPage(), "transfer.yml": completedMainRunsPage()},
+	}
+	f := transferredAuditFixture(t, stub)
+	old := &forgeStub{runs: map[string]map[string]any{"ci.yml": completedMainRunsPage()}}
+	oldHandler, currentHandler := old.handler(), stub.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, forgeStubRepo) {
+			oldHandler(w, r)
+			return
+		}
+		currentHandler(w, r)
+	}))
+	t.Cleanup(server.Close)
+	pointLiveChecksAt(t, server.URL)
+	const missing = "Required status checks: declared 2, live 1 of 2 required; missing: Transfer gate"
+	t.Run("audit", func(t *testing.T) {
+		_, err := f.audit(t)
+		mustErrContain(t, err, missing)
+		if paths := old.readPaths(); len(paths) != 0 {
+			t.Errorf("reads under the old repository after resolution: %v", paths)
+		}
+		if paths := stub.readPaths(); !slices.Contains(paths, "/repos/new-org/imago/actions/workflows/transfer.yml/runs") {
+			t.Errorf("missing current workflow history in %v", paths)
+		}
+	})
+	t.Run("plan remote", func(t *testing.T) {
+		out, err := runPlanCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+actionsForgeEndpoint)
+		if err != nil {
+			t.Fatalf("remote plan: %v\n%s", err, out)
+		}
+		mustContain(t, out, "[DRIFT] "+missing, "Live branch protection of main on GitHub for new-org/imago")
+	})
+}
+
+// TestAuditRepositoryVisibility_InvalidIdentity fails a visibility-only declaration even when public matches.
+func TestAuditRepositoryVisibility_InvalidIdentity(t *testing.T) {
+	for _, tc := range [...]struct{ name, login, want string }{
+		{"inconsistent owner", "old-org", `owner.login "old-org" disagrees with full_name "new-org/imago"`},
+		{"empty owner", "", `owner.login: invalid GitHub repository owner ""`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &forgeStub{repo: map[string]any{
+				"full_name": "new-org/imago", "owner": map[string]string{"login": tc.login}, "visibility": "public",
+			}}
+			f := visibilityFixture(t, "public", stub)
+			out, err := f.audit(t)
+			mustErrContain(t, err, "[FAIL] Repository visibility: read repository identity: "+tc.want)
+			if strings.Contains(out, "[PASS] Repository visibility") {
+				t.Fatalf("visibility passed with invalid identity:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestAuditRepositoryVisibility_Boundary_ForgeReadErrorFails names the failed repository GET.
+func TestAuditRepositoryVisibility_Boundary_ForgeReadErrorFails(t *testing.T) {
+	stub := &forgeStub{repoStatus: http.StatusInternalServerError}
+	f := visibilityFixture(t, "public", stub)
+	_, err := f.audit(t)
+	mustErrContain(t, err, "[FAIL] Repository visibility: read repository identity: unexpected status 500")
+}
+
+// TestPlanRemoteProtectionIdentityFailure requires metadata even without declared Actions permissions.
+func TestPlanRemoteProtectionIdentityFailure(t *testing.T) {
+	stub := &forgeStub{repoStatus: http.StatusInternalServerError}
+	f, endpoint := remoteProtectionFixture(t, stub)
+	_, err := runPlanCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+endpoint)
+	mustErrContain(t, err, "read repository identity: unexpected status 500")
+	if got := stub.readPaths(); !slices.Equal(got, []string{"/repos/acme/widgets"}) {
+		t.Errorf("reads after identity failure: %v", got)
+	}
+}
+
+// TestAuditSkipsRunHistoryAfterIdentityFailure rejects protection evidence from the old coordinates.
+func TestAuditSkipsRunHistoryAfterIdentityFailure(t *testing.T) {
+	stub := &forgeStub{repoStatus: http.StatusServiceUnavailable}
+	f := transferredAuditFixture(t, stub)
+	out, err := f.audit(t)
+	mustErrContain(t, err, "read repository identity")
+	mustContain(t, out, "[SKIP] Workflow runs not read from the forge: read repository identity")
+	if paths := stub.readPaths(); !slices.Equal(paths, []string{"/repos/acme/widgets"}) {
+		t.Errorf("reads after identity failure: %v", paths)
+	}
+}
+
+// TestSyncRefusesCrossOriginIdentityRedirect plants the same writable full name on two forges.
+func TestSyncRefusesCrossOriginIdentityRedirect(t *testing.T) {
+	f := queueRemoteFixture(t, true)
+	foreign := &forgeStub{repo: transferredRepository()}
+	other := httptest.NewServer(foreign.handler())
+	t.Cleanup(other.Close)
+	local := &forgeStub{repo: transferredRepository()}
+	writable := local.handler()
+	var lookup actionsStub
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets" {
+			lookup.recordRequest(r)
+			http.Redirect(w, r, other.URL+"/repos/new-org/imago", http.StatusMovedPermanently)
+			return
+		}
+		writable(w, r)
+	}))
+	t.Cleanup(server.Close)
+	_, err := runSyncCmd(t, "--config="+f.manifestPath, "--remote", "--token=fixture", "--endpoint="+server.URL)
+	if !errors.Is(err, forge.ErrRepositoryIdentityRead) {
+		t.Errorf("sync error = %v, want ErrRepositoryIdentityRead", err)
+	}
+	if requests := lookup.seen(); !slices.Equal(requests, []string{"GET /repos/acme/widgets"}) {
+		t.Errorf("initial identity lookup: %v", requests)
+	}
+	if foreign.requestCount() != 0 || local.requestCount() != 0 {
+		t.Errorf("requests beyond the redirect: local reads %v, writes %v; foreign reads %v, writes %v",
+			local.readPaths(), local.recorded(), foreign.readPaths(), foreign.recorded())
+	}
+}
