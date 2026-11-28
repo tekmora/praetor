@@ -6,6 +6,7 @@ package apicompat
 
 import (
 	"bytes"
+	"fmt"
 	"go/build/constraint"
 	"go/format"
 	"os"
@@ -235,6 +236,21 @@ func assertSetupGoStep(t *testing.T, step *ghworkflow.Step) {
 	}
 }
 
+// compareStepEnv reports whether env is the hosted compare step environment (#1037, #1907).
+func compareStepEnv(env map[string]string) error {
+	if got := env["GOTOOLCHAIN"]; got != "auto" {
+		return fmt.Errorf("compare step GOTOOLCHAIN = %v, want %q", got, "auto")
+	}
+	if got := env["BASE"]; got != "${{ github.event.pull_request.base.sha }}" {
+		return fmt.Errorf("compare step BASE = %v, want ${{ github.event.pull_request.base.sha }}", got)
+	}
+	if got := env["TMPDIR"]; got != "${{ runner.temp }}" {
+		return fmt.Errorf("compare step TMPDIR = %v, want ${{ runner.temp }}", got)
+	}
+	return nil
+}
+
+// assertCompareStep requires the hosted compare step to carry BASE, GOTOOLCHAIN and TMPDIR (#1907).
 func assertCompareStep(t *testing.T, step *ghworkflow.Step) {
 	t.Helper()
 	if step == nil {
@@ -244,19 +260,17 @@ func assertCompareStep(t *testing.T, step *ghworkflow.Step) {
 	if err := step.Env.Decode(&env); err != nil {
 		t.Fatalf("decode compare step env: %v", err)
 	}
-	if got := env["GOTOOLCHAIN"]; got != "auto" {
-		t.Errorf("compare step GOTOOLCHAIN = %v, want %q", got, "auto")
-	}
-	if got := env["BASE"]; got != "${{ github.event.pull_request.base.sha }}" {
-		t.Errorf("compare step BASE = %v, want ${{ github.event.pull_request.base.sha }}", got)
+	if err := compareStepEnv(env); err != nil {
+		t.Error(err)
 	}
 }
 
 // Positive: setup-go exports GOTOOLCHAIN=local unconditionally, so the rendered workflow
-// pins go-version: stable in setup-go and sets GOTOOLCHAIN: auto in the compare step env
-// so a module go or toolchain directive selects the toolchain (#1037). Negative: the
-// compare step does not leave GOTOOLCHAIN unset or local. Boundary: setup-go keeps
-// cache: false, and the compare step env passes both BASE and GOTOOLCHAIN: auto.
+// pins go-version: stable in setup-go and sets GOTOOLCHAIN: auto and TMPDIR to the runner
+// temp directory in the compare step env (#1037, #1907). Negative: the compare step does
+// not leave GOTOOLCHAIN unset or local, and compareStepEnv rejects env without TMPDIR.
+// Boundary: setup-go keeps cache: false, and the compare step env passes BASE, GOTOOLCHAIN
+// and TMPDIR.
 func TestWorkflowToolchainConfiguration(t *testing.T) {
 	spec, err := ghworkflow.Parse([]byte(Workflow))
 	if err != nil {
@@ -278,4 +292,16 @@ func TestWorkflowToolchainConfiguration(t *testing.T) {
 	}
 	assertSetupGoStep(t, setupGoStep)
 	assertCompareStep(t, compareStep)
+}
+
+// Negative: an environment without TMPDIR is not the hosted compare step (#1907).
+func TestWorkflowCompareStepEnvNegative(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{
+		"BASE":        "${{ github.event.pull_request.base.sha }}",
+		"GOTOOLCHAIN": "auto",
+	}
+	if err := compareStepEnv(env); err == nil || !strings.Contains(err.Error(), "TMPDIR") {
+		t.Fatalf("compareStepEnv = %v, want error naming TMPDIR", err)
+	}
 }

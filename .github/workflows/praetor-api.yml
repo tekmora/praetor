@@ -72,4 +72,5 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           GOTOOLCHAIN: auto
+          TMPDIR: ${{ runner.temp }}
         run: go run tools/apicompat/gate/main.go -base="$BASE"
