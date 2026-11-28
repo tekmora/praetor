@@ -2,6 +2,7 @@ package adopt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -163,9 +164,11 @@ func TestIncludeExpanderNamesPathAndCause(t *testing.T) {
 	}
 }
 
+// TestMakefileImplicitSourceNearBoundary checks source names and the listing limit.
 func TestMakefileImplicitSourceNearBoundary(t *testing.T) {
-	big := map[string]string{"gen.mk": "a:\n"}
-	for i := 0; i <= maxImplicitSourceEntries; i++ {
+	const documentedLimit = 4096
+	big := map[string]string{"d/x.mk": "a:\n"}
+	for i := 1; i < documentedLimit; i++ {
 		big[fmt.Sprintf("d/f%d", i)] = ""
 	}
 	s := includeRepo(t, map[string]string{"gen.mk": "a:\n"}, "gen.mk")
@@ -181,12 +184,37 @@ func TestMakefileImplicitSourceNearBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := makefileImplicitSourceNear(context.Background(), s.repoPath, "missing/gen.mk"); err == nil {
-		t.Error("unreadable directory counted as clean")
+	boundary := includeRepo(t, big, "d/x.mk")
+	if err := makefileImplicitSourceNear(t.Context(), boundary.repoPath, "d/x.mk"); err != nil {
+		t.Fatalf("directory at the entry bound: %v", err)
 	}
-	over := includeRepo(t, big, "gen.mk")
-	if err := makefileImplicitSourceNear(context.Background(), over.repoPath, "d/x.mk"); err == nil {
+	mustWrite(t, filepath.Join(boundary.repoPath, "d", "extra"), "")
+	if err := makefileImplicitSourceNear(t.Context(), boundary.repoPath, "d/x.mk"); err == nil {
 		t.Error("directory over the entry bound counted as clean")
+	}
+}
+
+// TestMakefileImplicitSourceCaseLinks distinguishes hard links from a single case-aliased entry.
+func TestMakefileImplicitSourceCaseLinks(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "gen.mk")
+	mustWrite(t, base, "a:\n")
+	mustWrite(t, filepath.Join(dir, "GEN.MK.sh"), "")
+	err := os.Link(base, filepath.Join(dir, "GEN.MK"))
+	if errors.Is(err, os.ErrExist) {
+		if err := makefileImplicitSourceNear(t.Context(), dir, "gen.mk"); err == nil || !strings.Contains(err.Error(), "GEN.MK.sh") {
+			t.Fatalf("case-aliased gen.mk should see GEN.MK.sh: %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := makefileImplicitSourceNear(t.Context(), dir, "gen.mk"); err != nil {
+		t.Fatalf("separately listed GEN.MK made gen.mk ambiguous: %v", err)
+	}
+	if err := makefileImplicitSourceNear(t.Context(), dir, "GEN.MK"); err == nil || !strings.Contains(err.Error(), "GEN.MK.sh") {
+		t.Fatalf("GEN.MK should see its own source: %v", err)
 	}
 }
 
@@ -451,4 +479,35 @@ func includeDocsSession(t *testing.T, files map[string]string, opts AdoptOptions
 	s := docsSession(t, files, opts)
 	s.verification = &VerificationPlan{Status: verificationDeclared, Build: [][]string{{"go", "build", "./..."}}, Test: [][]string{{"go", "test", "./..."}}}
 	return s
+}
+
+// TestTrackedNumericIncludeCase checks the actual RCS and SCCS spellings beside a caseless operand.
+func TestTrackedNumericIncludeCase(t *testing.T) {
+	for _, name := range [...]string{"rcs", "sCcS", "RCS", "SCCS"} {
+		t.Run(name, func(t *testing.T) {
+			s := includeRepo(t, map[string]string{"123": "help:\n"}, "123")
+			visible := makeRemakeDir(t, s.repoPath, name)
+			_, err := mergeWithIncludes(s, "include 123\n")
+			if visible && (err == nil || !strings.Contains(err.Error(), name)) {
+				t.Errorf("visible remake source %q: merge error = %v", name, err)
+			}
+			if !visible && err != nil {
+				t.Errorf("tracked numeric include beside %q: %v", name, err)
+			}
+		})
+	}
+}
+
+// makeRemakeDir creates the directory and reports whether its uppercase spelling is visible.
+func makeRemakeDir(t *testing.T, repoPath, name string) bool {
+	t.Helper()
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- a fixture directory needs the owner search bit; 0o700 is least privilege
+	if err := os.Mkdir(filepath.Join(repoPath, name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Lstat(filepath.Join(repoPath, strings.ToUpper(name)))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return err == nil
 }

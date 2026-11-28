@@ -77,6 +77,9 @@ const generatedVerifySummary = "`" + verifyCommand + "` = repository gate. Steps
 // noVerifyTargetSummary directs repositories without a generated makefile to their declared gates.
 const noVerifyTargetSummary = "No `" + verifyCommand + "` target: `makefile` declined in `" + manifestFile + "`. Run gates above + declared build/test commands (footer) directly.\n"
 
+// ambiguousVerifySummary directs repositories with unresolved Makefile ownership to their declared commands.
+const ambiguousVerifySummary = "Makefile ownership of `verify-all` is unresolved. Run the gates above and declared build/test commands directly.\n"
+
 // unavailableVerifySummary explains why a generated target cannot yet verify the project.
 const unavailableVerifySummary = "`" + verifyCommand + "` fails until project build + test commands exist; reasons in footer.\n"
 
@@ -97,6 +100,8 @@ func verificationSummary(facts harnessFacts) string {
 	switch {
 	case plan.Status == verificationPreserved || facts.repositoryOwned&hisscatalog.PipelineVerifyAll != 0:
 		return repositoryOwnedVerifySummary
+	case plan.ambiguousVerifyAll:
+		return ambiguousVerifySummary
 	case pipelines&hisscatalog.PipelineVerifyAll == 0:
 		return noVerifyTargetSummary
 	case plan.Status == verificationUnavailable:

@@ -164,8 +164,8 @@ type makefileOwnershipRow struct {
 // appendable, a continued assignment, recipe line or comment declared verify-all, a continued
 // target name declared nothing, and a define whose continued line swallows endef closed there.
 // info-message is the one bare expansion the reader exempts: a line made only of info, warning
-// and error calls expands to nothing (makefileSilentRows). computed-target-list declares
-// verify-all, but the reader claims no target from a line whose target list holds a reference.
+// and error calls expands to nothing (makefileSilentRows). An unbound reference in
+// computed-target-list leaves every target in its head unresolved.
 var makefileIssue554Rows = map[string]makefileOwnershipRow{
 	"single-line-template": {
 		makefile:  "make-rule = $(1): ; @echo custom\n$(call make-rule,verify-all)\n",
@@ -674,6 +674,50 @@ func TestMakefileComputedTargetNamesTheFileFixes(t *testing.T) {
 	assertOwnershipRows(t, makefileComputedRows)
 }
 
+// TestMakefileUnresolvedRuleHead checks that an unprovable head yields no target or recipe,
+// even when the requested target is a literal sibling and the recipe itself is literal.
+func TestMakefileUnresolvedRuleHead(t *testing.T) {
+	for _, tc := range [...]struct {
+		name, file string
+		targets    []string
+	}{
+		{"empty expansion", "EMPTY :=\ndoc\\$(EMPTY) verify-all: ; @true\n", []string{`doc\$(EMPTY)`, `doc\`, "doc verify-all", "verify-all"}},
+		{"expanded colon", "RULE = other: ; @true\n$(RULE) verify-all:\n", []string{"$(RULE)", "other", "verify-all"}},
+		{"quoted blank", "NAME := notes\ndoc\\ $(NAME) verify-all: ; @true\n", []string{"doc $(NAME)", "doc notes", "notes", "verify-all"}},
+		{"quoted tab", "NAME := notes index\ndoc\\\t$(NAME) verify-all: ; @true\n", []string{"doc notes", "doc\tnotes", "index", "verify-all"}},
+		{"function between siblings", "NAME := notes\n$(NAME) x$(if , phantom , fallback ) verify-all: ; @true\n",
+			[]string{"notes", "x", "phantom", "fallback", "verify-all"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range tc.targets {
+				assertUnresolvedMakefileTarget(t, tc.file, target)
+			}
+		})
+	}
+}
+
+// assertUnresolvedMakefileTarget checks ownership, recipe lookup and audit evidence for one name.
+func assertUnresolvedMakefileTarget(t *testing.T, file, target string) {
+	t.Helper()
+	if util.MakefileHasTarget(file, target) || !util.MakefileMayDefineTarget(file, target) {
+		t.Errorf("ownership of %q should be unresolved", target)
+	}
+	if recipe, found := util.MakefileTargetRecipe(file, target); found {
+		t.Errorf("unexpected recipe for %q: %q", target, recipe)
+	}
+	if got := util.MakefileTargetStatus(file, target); got != util.MakefileTargetUnproven {
+		t.Errorf("evidence for %q = %v, want unproven", target, got)
+	}
+}
+
+// TestMakefileUnresolvedHeadKeepsLaterRecipe checks that only the ambiguous declaration is skipped.
+func TestMakefileUnresolvedHeadKeepsLaterRecipe(t *testing.T) {
+	const file = "$(UNKNOWN) verify-all:\n\t@echo computed\nverify-all:\n\t@echo literal\n"
+	if recipe, found := util.MakefileTargetRecipe(file, "verify-all"); !found || recipe != "\t@echo literal\n" {
+		t.Fatalf("verify-all recipe = %q, found %v", recipe, found)
+	}
+}
+
 // The issue #537 shape declares none of the targets the documentation gate and the verification
 // block append, and the reader resolves each of its five computed names to the path Make declares:
 // every name counts as a rule of its own, and a name the file does not declare counts as none.
@@ -936,4 +980,191 @@ func TestMakefileTargetRecipe(t *testing.T) {
 			}
 		})
 	}
+}
+
+type makefileBodyCase struct {
+	name, target, makefile string
+	want                   bool
+}
+
+var makefileTargetHasBodyPositiveCases = []makefileBodyCase{
+	{"recipe-only", "verify-all", "verify-all:\n\t@true\n", true},
+	{"inline-semicolon-recipe", "verify-all", "verify-all: ; @true\n", true},
+	{"crlf-recipe", "verify-all", "verify-all:\r\n\t@true\r\n", true},
+}
+
+var makefileTargetHasBodyNegativeCases = []makefileBodyCase{
+	{"prerequisites-only", "verify-all", "verify-all: lint\nlint:\n\t@true\n", false},
+	{"order-only-prerequisite", "verify-all", "verify-all: | out\nout:\n\t@true\n", false},
+	{"literal-before-wait", "verify-all", "verify-all: lint .WAIT\n", false},
+	{"prerequisite-with-variable-recipe", "verify-all", "verify-all: lint\n\t$(MAKE) lint\n", false},
+	{"other-continued-recipe", "verify-all", "verify-all: lint\nother:\n\t@echo \\\n  ok\n", false},
+	{"other-conditional-recipe", "verify-all", "verify-all: lint\nifdef ALT\nother:\n\t@echo \\\n  ok\nendif\n", false},
+	{"recipe-after-ifdef-endif", "verify-all", "verify-all:\nifdef CI\nendif\n\t@true\n", false},
+	{"second-rule-adds-body", "verify-all", "verify-all:\nverify-all: lint\n", false},
+	{"short-variable-prerequisite", "verify-all", "D :=\nverify-all: $D\n", false},
+	{"parenthesized-variable-prerequisite", "verify-all", "D := lint\nverify-all: $(D)\n", false},
+	{"braced-variable-prerequisite", "verify-all", "D := lint\nverify-all: ${D}\n", false},
+	{"static-pattern", "verify-all", "verify-all: %:\n", false},
+	{"double-colon-empty", "verify-all", "verify-all::\n", false},
+	{"double-colon-recipe", "verify-all", "verify-all::\n\t@true\n", false},
+	{"conditional-head", "verify-all", "ifeq 'a' 'b'\nverify-all: lint\nendif\n", false},
+	{"variable-recipe", "verify-all", "verify-all:\n\t$(MAKE) lint\n", false},
+	{"comment-recipe", "verify-all", "verify-all:\n\t# explanatory note\n", false},
+	{"prefixed-comment-recipe", "verify-all", "verify-all:\n\t@# explanatory note\n", false},
+	{"continued-after-literal-body", "verify-all", "verify-all: lint\n\t@true\n\t@echo \\\n  ok\n", false},
+	{"possible-owner-after-endif", "verify-all", "verify-all: lint\nifdef ALT\nother:\nendif\n\t@echo \\\n  ok\n", false},
+	{"wildcard-prerequisite", "verify-all", "verify-all: *.go\n", false},
+	{"wildcard-target", "verify-all", "verify-* verify-all: lint\n", false},
+	{"quoted-blank-target", "verify-all", "\"release verify-all\": lint\n", false},
+	{"inline-variable-after-prerequisite", "verify-all", "verify-all: lint ; $(MAKE)\n", false},
+	{"colon-in-variable-reference-prerequisite", "verify-all", "verify-all: $(SRCS:.c=.o)\n", false},
+	{"literal-name-with-space", "release verify-all", "release\\ verify-all: ; @true\n", false},
+	{"literal-name-with-tab", "release\tverify-all", "release\\\tverify-all: ; @true\n", false},
+	{"even-backslashes-before-space", "verify-all", "release\\\\ verify-all: ; @true\n", false},
+	{"continued-prerequisite", "verify-all", "verify-all: \\\n  lint\n", false},
+	{"continued-recipe", "verify-all", "verify-all:\n\t@echo \\\n  ok\n", false},
+	{"continued-blank-then-recipe", "verify-all", "verify-all:\n\t\\\n\t@true\n", false},
+	{"variable-target-prerequisite", "verify-all", "GATE := verify-all\n$(GATE): lint\nlint:\n\t@true\n", false},
+	{"variable-target-recipe", "verify-all", "GATE := verify\nNAME := $(GATE)-all\n$(NAME):\n\t@true\n", false},
+	{"recipe-in-ifeq", "verify-all", "verify-all:\nifeq (1,1)\n\t@true\nendif\n", false},
+	{"recipe-in-else", "verify-all", "verify-all:\nifeq (1,0)\nelse\n\t@true\nendif\n", false},
+	{"else-recipe-after-if-other-rule", "verify-all", "verify-all:\nifeq (1,0)\nother:\n\t@false\nelse\n\t@true\nendif\n", false},
+	{"absent-target", "verify-all", "build:\n\t@true\n", false},
+	{"suffix-after-quoted-tab", "verify-all", "release\\\tverify-all: ; @true\n", false},
+	{"empty-makefile", "verify-all", "", false},
+	{"empty-target", "verify-all", "verify-all:\n", false},
+	{"empty-target-before-other", "verify-all", "verify-all:\n\nother:\n\t@true\n", false},
+	{"empty-inline-semicolon", "verify-all", "verify-all: ;\n", false},
+	{"inline-semicolon-comment-only", "verify-all", "verify-all: ; # note\n", false},
+	{"comment-only", "verify-all", "verify-all: # no body\n", false},
+	{"wait-without-prerequisites", "verify-all", "verify-all: .WAIT | .WAIT\n", false},
+	{"empty-order-only-pipe", "verify-all", "verify-all: |\n", false},
+	{"whitespace-tab-line", "verify-all", "verify-all:\n\t   \n", false},
+	{"continued-blank-recipe", "verify-all", "verify-all:\n\t\\\n\t   \n", false},
+	{"define-endef-decoy", "empty", "empty:\n\ndefine M\nempty: ; @true\nendef\n", false},
+	{"define-only", "verify-all", "define M\nverify-all:\n\t@true\nendef\n", false},
+	{"continued-recipe-decoy", "empty", "empty:\n\nother:\n\t@echo \\\nempty: ; @true\n", false},
+	{"directives-without-recipe", "verify-all", "verify-all:\nifeq (1,1)\nelse\nendif\n", false},
+	{"directives-before-other-target", "verify-all", "verify-all:\nifneq (a,b)\nendif\nother:\n\t@true\n", false},
+	{"assignment-closes-recipe", "verify-all", "verify-all:\nX := 1\n\t@true\n", false},
+	{"target-specific-variable", "verify-all", "verify-all: CFLAGS := -g\n", false},
+	{"unbound-variable-target", "verify-all", "$(GATE): lint\n", false},
+	{"variable-target-empty", "verify-all", "GATE := verify-all\n$(GATE):\n", false},
+	{"recipe-prefix-mentioned", "verify-all", ".RECIPEPREFIX = >\nverify-all:\n> @true\n", false},
+}
+
+// assertMakefileTargetHasBodyCases checks literal body evidence for each fixture.
+func assertMakefileTargetHasBodyCases(t *testing.T, cases []makefileBodyCase) {
+	t.Helper()
+	for i := 0; i < len(cases) && i < util.MaxMakefileLines; i++ {
+		tc := cases[i]
+		t.Run(tc.name, func(t *testing.T) {
+			if got := util.MakefileTargetHasBody(tc.makefile, tc.target); got != tc.want {
+				t.Fatalf("MakefileTargetHasBody(%q, %q) = %v, want %v", tc.makefile, tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMakefileTargetHasBodyPositive covers literal commands.
+func TestMakefileTargetHasBodyPositive(t *testing.T) {
+	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyPositiveCases)
+}
+
+// TestMakefileTargetHasBodyNegative covers empty, computed and conditional rules.
+func TestMakefileTargetHasBodyNegative(t *testing.T) {
+	assertMakefileTargetHasBodyCases(t, makefileTargetHasBodyNegativeCases)
+}
+
+// TestMakefileAssignmentComments checks dollars on both sides of a possible comment boundary.
+func TestMakefileAssignmentComments(t *testing.T) {
+	for _, tc := range [...]struct {
+		value string
+		want  util.MakefileEvidence
+	}{
+		{"fast # see $(MODE)", util.MakefileTargetPresent},
+		{`fast\\# see $(MODE)`, util.MakefileTargetPresent},
+		{"$(MODE) # see mode", util.MakefileTargetUnproven},
+		{`fast\# see $(MODE)`, util.MakefileTargetUnproven},
+		{"fast; $(MODE) # see mode", util.MakefileTargetUnproven},
+	} {
+		file := "MODE := " + tc.value + "\ncheck: ; @true\n"
+		if got := util.MakefileTargetStatus(file, "check"); got != tc.want {
+			t.Errorf("assignment value %q: status = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestMakefileTargetWholeFile requires the complete file to qualify before reporting any evidence.
+func TestMakefileTargetWholeFile(t *testing.T) {
+	const rule = "check: ; @true\n"
+	for _, tc := range [...]struct {
+		name, file string
+		want       util.MakefileEvidence
+	}{
+		{"literal file", "# gates\nMODE := fast\n\tOPTS = -v\n\nall: check\ncheck: lint | out\n\t@true\n", util.MakefileTargetPresent},
+		{"reference in Make comment", "check: # documents $(MODE)\n\ttrue\n", util.MakefileTargetPresent},
+		{"semicolon in Make comment", "check: # note ; echo ok\n", util.MakefileTargetUnproven},
+		{"reference after hash in inline recipe", rule + "other: ; echo '# $(MODE)'\n", util.MakefileTargetUnproven},
+		{"replacement", rule + "check: ;\n", util.MakefileTargetUnproven},
+		{"duplicate without recipe", rule + "other check:\n", util.MakefileTargetUnproven},
+		{"equivalent target spelling", rule + "./check: ;\n", util.MakefileTargetUnproven},
+		{"phony literal rule", ".PHONY: check\n" + rule, util.MakefileTargetPresent},
+		{"suffix remake", rule + ".SUFFIXES: .next\n.next: ; cp Makefile.next Makefile\n", util.MakefileTargetUnproven},
+		{"suffix list alone", rule + ".SUFFIXES: .next\n", util.MakefileTargetUnproven},
+		{"single suffix", rule + ".next: ; @true\n", util.MakefileTargetUnproven},
+		{"double suffix", rule + ".next.mk: ; @true\n", util.MakefileTargetUnproven},
+		{"dot target in list", rule + "other .DEFAULT: ; @true\n", util.MakefileTargetUnproven},
+		{"dot-prefixed path", rule + "./other: ; @true\n", util.MakefileTargetUnproven},
+		{"implicit source prerequisite", rule + "other: Makefile.c\n", util.MakefileTargetUnproven},
+		{"pattern rule", rule + "%: %.next\n", util.MakefileTargetUnproven},
+		{"pattern prerequisite", rule + "other: | %.next\n", util.MakefileTargetUnproven},
+		{"static pattern rule", rule + "other: %: %.next\n", util.MakefileTargetUnproven},
+		{"VPATH assignment", rule + "VPATH := src\n", util.MakefileTargetUnproven},
+		{"remade Makefile", rule + "Makefile: next.mk ; cp next.mk Makefile\n", util.MakefileTargetUnproven},
+		{"remade lowercase makefile", "./makefile other: next.mk\n" + rule, util.MakefileTargetUnproven},
+		{"remade GNUmakefile", rule + "other .//GNUmakefile: next.mk\n", util.MakefileTargetUnproven},
+		{"Makefile prerequisite", rule + "other: Makefile\n", util.MakefileTargetPresent},
+		{"prefix from include", "include settings.mk\ncheck:\n\tX := one\n", util.MakefileTargetUnproven},
+		{"late include", rule + "include settings.mk\n", util.MakefileTargetUnproven},
+		{"late optional include", rule + "-include settings.mk\n", util.MakefileTargetUnproven},
+		{"silent include", "sinclude settings.mk\n" + rule, util.MakefileTargetUnproven},
+		{"recipe prefix", rule + ".RECIPEPREFIX := >\n", util.MakefileTargetUnproven},
+		{"dot variable", rule + ".FLAGS = yes\n", util.MakefileTargetUnproven},
+		{"special variable", rule + "MAKEFILES = settings.mk\n", util.MakefileTargetUnproven},
+		{"define", rule + "define FLAGS\nx\nendef\n", util.MakefileTargetUnproven},
+		{"export", "export MODE = fast\n" + rule, util.MakefileTargetUnproven},
+		{"override", rule + "override MODE := fast\n", util.MakefileTargetUnproven},
+		{"vpath", rule + "vpath %.mk src\n", util.MakefileTargetUnproven},
+		{"BOM before conditional", "\ufeffifeq (a,b)\ncheck: dep\nendif\n", util.MakefileTargetUnproven},
+		{"conditional after literal recipe", rule + "ifdef MODE\nendif\n", util.MakefileTargetUnproven},
+		{"unexpected preamble", "\x01# header\n" + rule, util.MakefileTargetUnproven},
+		{"BOM before comment", "\ufeff# heading\n" + rule, util.MakefileTargetUnproven},
+		{"unrelated continuation", rule + "# continued \\\n# here\n", util.MakefileTargetUnproven},
+		{"unrelated computed rule", rule + "$(NAME): dep\n", util.MakefileTargetUnproven},
+		{"truncated tail", rule + strings.Repeat("#\n", util.MaxMakefileLines), util.MakefileTargetUnproven},
+		{"orphan tab rule", "\tcheck: ; @true\n", util.MakefileTargetUnproven},
+		{"unknown syntax without target", "-include settings.mk\n", util.MakefileTargetUnproven},
+		{"missing in literal file", "other: ; @true\n", util.MakefileTargetMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := util.MakefileTargetStatus(tc.file, "check"); got != tc.want {
+				t.Fatalf("MakefileTargetStatus = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMakefileTargetHasBodyBoundary checks rule boundaries, quoted heads and the physical line limit.
+func TestMakefileTargetHasBodyBoundary(t *testing.T) {
+	prefix := strings.Repeat("V := a:b\n", util.MaxMakefileLines-1)
+	assertMakefileTargetHasBodyCases(t, []makefileBodyCase{
+		{"ifeq-quoted-rule-leaves-verify-all-empty", "verify-all", "verify-all:\nifeq\"other\":\n\t@true\n", false},
+		{"ifeq-quoted-rule-is-nonliteral", "ifeq\"other\"", "verify-all:\nifeq\"other\":\n\t@true\n", false},
+		{"both-branches-replace-open-rule", "verify-all", "verify-all:\nifeq (a,b)\nother:\n\t@true\nelse\nanother:\n\t@true\nendif\n\t@echo tail\n", false},
+		{"rule-at-line-bound-with-prerequisite", "verify-all", prefix + "verify-all: dep ; @true\n", true},
+		{"recipe-past-line-bound", "verify-all", prefix + "verify-all:\n\t@true\n", false},
+		{"rule-past-line-bound", "verify-all", prefix + "V := c\nverify-all: dep\n", false},
+	})
 }

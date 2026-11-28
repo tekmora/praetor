@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 
@@ -36,48 +34,17 @@ func (s *adoptSession) includeExpander(ctx context.Context) makefileExpander {
 	}
 }
 
-// maxImplicitSourceEntries bounds how many directory entries makefileImplicitSourceNear reads
-// (HISS-02); a larger directory is treated as holding a source.
-const maxImplicitSourceEntries = 4096
-
-// makefileImplicitSourceNear returns an error when Make could remake the included file rel below
-// root from a source beside it, or when the directory cannot be read to tell. GNU Make remakes an
-// included makefile before it reads it, and its built-in match-anything rules build "name" from
-// "name.sh", "name.c", "name.o", "name,v", "RCS/name,v", "s.name" and "SCCS/s.name", chained
-// through VPATH or further rules (measured against GNU Make 4.4.1 with "include gen.mk" and a
-// newer "gen.mk.sh" or "s.gen.mk.sh"). The allow-list is therefore every entry whose name contains
-// the file's base name other than the file itself, plus a directory named RCS or SCCS. An
-// unreadable or oversized directory counts as holding one.
-func makefileImplicitSourceNear(ctx context.Context, root, rel string) error {
+// makefileImplicitSourceNear checks the included file's pinned parent for built-in remake sources.
+func makefileImplicitSourceNear(ctx context.Context, root, rel string) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, contextopt.MaxDuration)
+	defer cancel()
 	dir, base := path.Split(rel)
 	handle, err := contextopt.OpenDirectoryIn(ctx, root, path.Join(".", dir))
 	if err != nil {
 		return fmt.Errorf("read directory of %s: %w", rel, err)
 	}
-	entries, err := listRootDirectory(handle)
-	if err != nil {
-		return fmt.Errorf("list directory of %s: %w", rel, err)
-	}
-	if len(entries) > maxImplicitSourceEntries {
-		return fmt.Errorf("directory of %s holds more than %d entries", rel, maxImplicitSourceEntries)
-	}
-	for i := 0; i < len(entries) && i < maxImplicitSourceEntries; i++ {
-		if name := entries[i].Name(); util.MakefileImplicitSourceName(name, base) {
-			return fmt.Errorf("%s sits beside %s, which Make may build it from", rel, name)
-		}
-	}
-	return nil
-}
-
-// listRootDirectory reads at most maxImplicitSourceEntries+1 entries of scope's top directory and
-// closes scope.
-func listRootDirectory(scope *os.Root) ([]fs.DirEntry, error) {
-	top, err := scope.Open(".")
-	if err != nil {
-		return nil, errors.Join(err, scope.Close())
-	}
-	entries, err := top.ReadDir(maxImplicitSourceEntries + 1)
-	return entries, errors.Join(err, top.Close(), scope.Close())
+	defer func() { err = errors.Join(err, handle.Close()) }()
+	return util.MakefileImplicitSourceNear(ctx, handle, base)
 }
 
 // readTrackedFragment returns the text of the file rel names below root when git tracks it under

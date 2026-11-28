@@ -152,10 +152,12 @@ func (s *makefileScanner) syntax(line string, fields []string) {
 		s.set(makefileRecipeClosed)
 	case makefileConditionalWords[fields[0]]:
 		s.conditional(fields)
-	case makefileTargetNames(line) != nil:
-		s.set(makefileRecipeOpen)
 	default:
-		s.set(makefileRecipeClosed)
+		if _, _, ok := MakefileRuleParts(line); ok {
+			s.set(makefileRecipeOpen)
+		} else {
+			s.set(makefileRecipeClosed)
+		}
 	}
 }
 

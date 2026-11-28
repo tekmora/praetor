@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -32,10 +34,12 @@ func runRules(args []string) error {
 	return runRulesAudit(args[1:])
 }
 
+// printRulesUsage writes the CLI usage and notes the narrower enforced definition.
 func printRulesUsage() {
 	fmt.Println("Usage: standardsctl rules audit [--json] [--root <dir>] [--remote]")
 	fmt.Println("\nSubcommands:")
-	fmt.Println("  audit  Resolve declared enforcement evidence for HISS and Operational Rules")
+	fmt.Println("  audit  Resolve declared rule pointers (status) and live forge read-back (enforced)")
+	fmt.Println("\nNote: enforced is true only when live forge read-back matches with no pending forge pointer; local pointer resolution reports status=present, not enforced.")
 }
 
 func runRulesAudit(args []string) error {
@@ -58,12 +62,10 @@ func runRulesAuditWithReader(args []string, injected protectionReader) error {
 	defer cancel()
 	opts := ruleregistry.AuditOptions{Forge: rulesForgeProvider(flags, injected)}
 	report, auditErr := ruleregistry.AuditWithOptions(ctx, flags.root, opts)
-	if report != nil {
-		if printErr := printRulesReport(report, flags.jsonOutput); printErr != nil {
-			return printErr
-		}
+	if report == nil {
+		return auditErr
 	}
-	return auditErr
+	return errors.Join(auditErr, printRulesReport(report, flags.jsonOutput))
 }
 
 func parseRulesAuditFlags(args []string) (rulesAuditFlags, error) {
@@ -194,76 +196,97 @@ func ruleForgeSetting(property string) (ruleregistry.ForgeSetting, bool) {
 	}
 }
 
+// printRulesReport renders the rule registry audit report as JSON or human-readable text.
 func printRulesReport(report *ruleregistry.Report, jsonOutput bool) error {
 	if jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	fmt.Println("=== Rule enforcement audit ===")
+	var text bytes.Buffer
+	text.WriteString("=== Rule enforcement audit ===\n")
 	for i := 0; i < len(report.Rows) && i < maxReportRules; i++ {
 		row := report.Rows[i]
-		fmt.Printf("%s %s %s\n", row.ID, row.Class, row.Evidence)
+		fmt.Fprintf(&text, "%s %s status=%s %s\n", row.ID, row.Class, row.Status, row.Evidence)
 	}
-	printForgeComparisons(report)
-	printInstructionOnly(report)
-	printRulesSummary(report)
-	return nil
+	printForgeComparisons(&text, report)
+	printInstructionOnly(&text, report)
+	printRulesSummary(&text, report)
+	_, err := text.WriteTo(os.Stdout)
+	return err
 }
 
-func printForgeComparisons(report *ruleregistry.Report) {
-	printedRemote, printedOffline := false, false
+// printForgeComparisons writes offline assertions and live read-back comparisons for forge pointers.
+func printForgeComparisons(text *bytes.Buffer, report *ruleregistry.Report) {
+	printed := map[string]bool{}
 	for i := 0; i < len(report.Rows) && i < maxReportRules; i++ {
 		for j := 0; j < len(report.Rows[i].Forge) && j < maxRuleForgeComparisons; j++ {
 			comparison := report.Rows[i].Forge[j]
-			if !comparison.ReadBack {
-				if !printedOffline {
-					fmt.Println("asserted, not read back:")
-					printedOffline = true
-				}
-				fmt.Printf("  %s forge:%s asserted %s\n", report.Rows[i].ID, comparison.Setting, comparison.Asserted)
-				continue
+			heading := "asserted, not read back:\n"
+			detail := ""
+			if comparison.ReadBack {
+				heading = "forge comparisons:\n"
+				detail = fmt.Sprintf(", observed %s, match=%t", comparison.Observed, comparison.Match)
 			}
-			if !printedRemote {
-				fmt.Println("forge comparisons:")
-				printedRemote = true
+			if !printed[heading] {
+				text.WriteString(heading)
+				printed[heading] = true
 			}
-			fmt.Printf("  %s forge:%s asserted %s, observed %s, match=%t\n", report.Rows[i].ID,
-				comparison.Setting, comparison.Asserted, comparison.Observed, comparison.Match)
+			fmt.Fprintf(text, "  %s forge:%s asserted %s%s\n", report.Rows[i].ID, comparison.Setting, comparison.Asserted, detail)
 		}
 	}
 }
 
-func printInstructionOnly(report *ruleregistry.Report) {
+// printInstructionOnly lists prose-only rules containing prohibition wording.
+func printInstructionOnly(text *bytes.Buffer, report *ruleregistry.Report) {
 	printed := false
 	for i := 0; i < len(report.Rows) && i < maxReportRules; i++ {
 		if !report.Rows[i].Candidate {
 			continue
 		}
 		if !printed {
-			fmt.Println("instruction-only prohibitions:")
+			text.WriteString("instruction-only prohibitions:\n")
 			printed = true
 		}
-		fmt.Printf("  %s\n", report.Rows[i].ID)
+		fmt.Fprintf(text, "  %s\n", report.Rows[i].ID)
 	}
 }
 
-func printRulesSummary(report *ruleregistry.Report) {
-	counts := report.Counts()
+// printRulesSummary writes class counts, status counts, enforced/unenforced totals, and invalid declarations.
+func printRulesSummary(text *bytes.Buffer, report *ruleregistry.Report) {
+	fmt.Fprintf(text, "classes: %s\n", formatRuleClassCounts(report.Counts()))
+	fmt.Fprintf(text, "statuses: %s\n", formatRuleStatusCounts(report.StatusCounts()))
+	unenforced := len(report.UnenforcedIDs())
+	enforced := max(0, min(len(report.Rows), maxReportRules)-unenforced)
+	fmt.Fprintf(text, "enforced: %d (live forge read-back matched with no pending forge setting; local pointer presence is status=present, not enforced)\n", enforced)
+	fmt.Fprintf(text, "unenforced: %d\n", unenforced)
+	for i := 0; i < len(report.Problems) && i < maxReportProblems; i++ {
+		fmt.Fprintf(text, "invalid: %s\n", report.Problems[i])
+	}
+}
+
+// formatRuleClassCounts formats rule counts in canonical class order.
+func formatRuleClassCounts(counts map[ruleregistry.Class]int) string {
 	classes := []ruleregistry.Class{
 		ruleregistry.ClassCIGate, ruleregistry.ClassHook, ruleregistry.ClassReviewGate,
 		ruleregistry.ClassGuidance, ruleregistry.ClassStaged,
 	}
 	parts := make([]string, 0, len(classes))
-	for i := 0; i < len(classes); i++ {
+	for i := 0; i < len(classes) && i < 8; i++ {
 		parts = append(parts, fmt.Sprintf("%s=%d", classes[i], counts[classes[i]]))
 	}
-	fmt.Printf("classes: %s\n", strings.Join(parts, ", "))
-	fmt.Printf("unenforced: %d\n", len(report.UnenforcedIDs()))
-	if len(report.Problems) == 0 {
-		return
+	return strings.Join(parts, ", ")
+}
+
+// formatRuleStatusCounts formats rule counts in canonical status order.
+func formatRuleStatusCounts(counts map[ruleregistry.Status]int) string {
+	statuses := []ruleregistry.Status{
+		ruleregistry.StatusPresent, ruleregistry.StatusForgeObserved, ruleregistry.StatusForgePending,
+		ruleregistry.StatusUnresolved, ruleregistry.StatusGuidance,
 	}
-	for i := 0; i < len(report.Problems) && i < maxReportProblems; i++ {
-		fmt.Printf("invalid: %s\n", report.Problems[i])
+	parts := make([]string, 0, len(statuses))
+	for i := 0; i < len(statuses) && i < 8; i++ {
+		parts = append(parts, fmt.Sprintf("%s=%d", statuses[i], counts[statuses[i]]))
 	}
+	return strings.Join(parts, ", ")
 }

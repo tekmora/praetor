@@ -194,6 +194,8 @@ var makefileRemadeAmbiguousCases = map[string]string{
 	"command binding":                         "include gen.mk\nX != echo gen.mk: gen.src\n",
 	"bare expansion":                          "include gen.mk\n$(RULES)\n",
 	"define block":                            "include gen.mk\ndefine R\ngen.mk: gen.src\nendef\n",
+	"export with a rule delimiter":            "include gen.mk\nexport check: dep\n",
+	"orphan tab rule":                         "include gen.mk\n\tcheck: dep\n",
 	"bare export":                             "include gen.mk\nexport X\n",
 	"load":                                    "include gen.mk\nload x.so\n",
 	"computed in conditional":                 "include gen.mk\nifdef X\n$(G): s\nendif\n",

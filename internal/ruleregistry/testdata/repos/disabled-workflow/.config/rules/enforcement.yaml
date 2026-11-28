@@ -1,0 +1,10 @@
+version: 1
+rules:
+  - id: HISS-01
+    class: ci-gate
+    evidence:
+      - workflow:ci.yml#literal-false
+  - id: HISS-02
+    class: ci-gate
+    evidence:
+      - workflow:ci.yml#expr-false

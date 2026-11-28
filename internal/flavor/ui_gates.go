@@ -270,29 +270,22 @@ func checkUIMakefileGap(repoPath string) string {
 	return ""
 }
 
+// verifyAllRunsUIGates checks the first verify-all recipe and each confirmed prerequisite edge.
 func verifyAllRunsUIGates(normalized string) bool {
-	if !util.MakefileHasTarget(normalized, "verify-all") || !util.MakefileHasTarget(normalized, "ui-gates") {
-		return false
-	}
-	if recipe, ok := util.MakefileTargetRecipe(normalized, "verify-all"); ok && strings.Contains(recipe, "ui-gates") {
-		return true
-	}
-	lines := strings.Split(normalized, "\n")
-	for i := 0; i < len(lines) && i < util.MaxMakefileLines; i++ {
-		if makefileLineHasPrereq(lines[i], "verify-all", "ui-gates") {
+	var hasUI, seenVerify, runsUI bool
+	for rule := range util.MakefileRules(normalized) {
+		hasUI = hasUI || slices.Contains(rule.Targets, "ui-gates")
+		if slices.Contains(rule.Targets, "verify-all") {
+			if !seenVerify {
+				runsUI = strings.Contains(strings.Join(rule.Recipe, "\n"), "ui-gates")
+				seenVerify = true
+			}
+			runsUI = runsUI || slices.Contains(strings.Fields(rule.Prerequisites), "ui-gates") ||
+				slices.Contains(strings.Fields(rule.InlineRecipe), "ui-gates")
+		}
+		if hasUI && runsUI {
 			return true
 		}
 	}
 	return false
-}
-
-func makefileLineHasPrereq(line, target, prereq string) bool {
-	if strings.HasPrefix(line, "\t") || strings.HasPrefix(strings.TrimSpace(line), "#") {
-		return false
-	}
-	head, prereqs, found := strings.Cut(line, ":")
-	if !found {
-		return false
-	}
-	return slices.Contains(strings.Fields(head), target) && slices.Contains(strings.Fields(prereqs), prereq)
 }

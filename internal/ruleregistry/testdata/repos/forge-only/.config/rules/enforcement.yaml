@@ -1,0 +1,6 @@
+version: 1
+rules:
+  - id: HISS-01
+    class: ci-gate
+    evidence:
+      - forge:required_signatures

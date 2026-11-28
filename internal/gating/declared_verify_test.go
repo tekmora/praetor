@@ -12,9 +12,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cordanaLLM/praetor/internal/util"
 )
 
 // declaredVerifyRepo is a committed Python root (pyproject.toml, no go.mod, no Cargo.lock) whose
@@ -182,6 +185,7 @@ func TestRunDeclaredVerifyStage_RunsNothingWhereItDoesNotApply(t *testing.T) {
 	}
 }
 
+// TestDeclaresVerifyTargetReadsTheMakefileMakeReads checks lookup order, size and literal declarations.
 func TestDeclaresVerifyTargetReadsTheMakefileMakeReads(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -192,6 +196,7 @@ func TestDeclaresVerifyTargetReadsTheMakefileMakeReads(t *testing.T) {
 		{"lower-case makefile declares it", map[string]string{"makefile": verifyAllMakefile}, true},
 		{"GNUmakefile is read first", map[string]string{"GNUmakefile": "test:\n", "Makefile": verifyAllMakefile}, false},
 		{"target only in a comment", map[string]string{"Makefile": "# verify-all:\ntest:\n"}, false},
+		{"empty expansion before sibling", map[string]string{"Makefile": "EMPTY :=\ndoc\\$(EMPTY) verify-all: ; @true\n"}, false},
 		{"no makefile", map[string]string{}, false},
 		{"oversized makefile", map[string]string{"Makefile": verifyAllMakefile + strings.Repeat("#\n", maxMakefileBytes/2)}, false},
 	}
@@ -203,6 +208,35 @@ func TestDeclaresVerifyTargetReadsTheMakefileMakeReads(t *testing.T) {
 			}
 			if got := declaresVerifyTarget(dir); got != tc.want {
 				t.Fatalf("declaresVerifyTarget = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDeclaresVerifyTargetBackslashes checks both the stage decision and each exact target name.
+func TestDeclaresVerifyTargetBackslashes(t *testing.T) {
+	candidates := [...]string{"doc", `doc\`, `doc\\`, "notes", "doc notes", `doc\ notes`}
+	for count, want := range [...][]string{
+		{"doc", "notes"},
+		{"doc notes"},
+		{`doc\`, "notes"},
+		{`doc\ notes`},
+		{`doc\\`, "notes"},
+	} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			dir := t.TempDir()
+			file := "doc" + strings.Repeat(`\`, count) + " notes verify-all: ; @true\n"
+			writeFile(t, filepath.Join(dir, "Makefile"), file)
+			if !declaresVerifyTarget(dir) {
+				t.Error("declared verification lost the literal verify-all sibling")
+			}
+			if util.MakefileMayDefineTarget(file, "absent") {
+				t.Error("a fully resolved target list left an absent target unresolved")
+			}
+			for _, name := range candidates {
+				if got := util.MakefileHasTarget(file, name); got != slices.Contains(want, name) {
+					t.Errorf("MakefileHasTarget(%q) = %v, want targets %q", name, got, want)
+				}
 			}
 		})
 	}

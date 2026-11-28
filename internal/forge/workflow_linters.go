@@ -808,55 +808,32 @@ func readRootMakefileData(ctx context.Context, repoPath string) ([]byte, bool) {
 	return nil, false
 }
 
+// readRootMakefile collects the declared rules a workflow can reach from a make command.
 func readRootMakefile(ctx context.Context, repoPath string) map[string]*makeTargetDef {
 	data, ok := readRootMakefileData(ctx, repoPath)
 	if !ok {
 		return nil
 	}
-	lines := joinMakefileLines(string(data))
-	makeVars := collectMakeVariables(lines)
+	content := string(data)
+	makeVars := collectMakeVariables(joinMakefileLines(content))
 	targets := make(map[string]*makeTargetDef)
-	var currentTargets []string
-
-	for i := 0; i < len(lines) && i < maxLogicalLines; i++ {
-		line := lines[i]
-		if strings.HasPrefix(line, "\t") {
-			recipe := stripMakeRecipePrefixes(line)
-			recipe = expandMakeVariables(recipe, makeVars)
-			for _, t := range currentTargets {
-				targets[t].recipes = append(targets[t].recipes, recipe)
-			}
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			currentTargets = nil
-			continue
-		}
-		currentTargets = parseTargetLine(trimmed, makeVars, targets)
+	for rule := range util.MakefileRules(content) {
+		recordMakeRule(rule, makeVars, targets)
 	}
 	return targets
 }
 
-func parseTargetLine(trimmed string, makeVars map[string]string, targets map[string]*makeTargetDef) []string {
-	colon := strings.Index(trimmed, ":")
-	if colon < 0 || isMakeAssignment(trimmed, colon) {
-		return nil
+// recordMakeRule adds the prerequisites and commands of a confirmed rule to each ordinary target.
+func recordMakeRule(rule util.MakefileRule, makeVars map[string]string, targets map[string]*makeTargetDef) {
+	var recipes []string
+	if inline := strings.TrimSpace(rule.InlineRecipe); inline != "" {
+		recipes = append(recipes, expandMakeVariables(stripMakeRecipePrefixes(inline), makeVars))
 	}
-	head := strings.TrimSpace(trimmed[:colon])
-	targetNames := strings.Fields(head)
-	rest := trimmed[colon+1:]
-	inlineRecipe := ""
-	if semi := strings.Index(rest, ";"); semi >= 0 {
-		inlineRecipe = strings.TrimSpace(rest[semi+1:])
-		rest = rest[:semi]
+	for _, line := range rule.Recipe {
+		recipes = append(recipes, expandMakeVariables(stripMakeRecipePrefixes(line), makeVars))
 	}
-	if commentIdx := strings.Index(rest, "#"); commentIdx >= 0 {
-		rest = rest[:commentIdx]
-	}
-	prereqs := strings.Fields(rest)
-	var active []string
-	for _, name := range targetNames {
+	prereqs := strings.Fields(rule.Prerequisites)
+	for _, name := range rule.Targets {
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
@@ -864,14 +841,8 @@ func parseTargetLine(trimmed string, makeVars map[string]string, targets map[str
 			targets[name] = &makeTargetDef{}
 		}
 		targets[name].prerequisites = append(targets[name].prerequisites, prereqs...)
-		if inlineRecipe != "" {
-			rec := stripMakeRecipePrefixes(inlineRecipe)
-			rec = expandMakeVariables(rec, makeVars)
-			targets[name].recipes = append(targets[name].recipes, rec)
-		}
-		active = append(active, name)
+		targets[name].recipes = append(targets[name].recipes, recipes...)
 	}
-	return active
 }
 
 func recordMakeVariable(vars map[string]string, varName, op, val string) {
@@ -996,15 +967,6 @@ func stripMakeRecipePrefixes(s string) string {
 		s = strings.TrimLeft(s[1:], "\t ")
 	}
 	return s
-}
-
-func isMakeAssignment(line string, colon int) bool {
-	rest := line[colon:]
-	if strings.HasPrefix(rest, ":=") || strings.HasPrefix(rest, "::=") {
-		return true
-	}
-	head := line[:colon]
-	return strings.ContainsAny(head, "=+?!")
 }
 
 func joinMakefileLines(content string) []string {

@@ -6,6 +6,9 @@ package forge
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -184,6 +187,34 @@ func TestCommandRunsTool_GoRunners(t *testing.T) {
 				t.Fatalf("commandRunsTool(%q, %q) = %v; want %v", tc.line, tc.tool, got, tc.wantMatch)
 			}
 		})
+	}
+}
+
+// TestParseTargetLineDelimiter checks which rule supplies the ui-gates prerequisite.
+func TestParseTargetLineDelimiter(t *testing.T) {
+	for _, tc := range [...]struct {
+		line string
+		want bool
+	}{
+		{`aux\:tag verify-all: ui-gates`, true},
+		{"verify-all:: ui-gates", true},
+		{"NAME := aux\n$(NAME) verify-all: ui-gates", true},
+		{"$(NAME) verify-all: ui-gates\nNAME := aux", false},
+		{"verify-all ::= ui-gates", false},
+		{"$(UNKNOWN) verify-all: ui-gates", false},
+		{"$(SRCS:.c=.o) verify-all: ui-gates", false},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(tc.line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		targets := readRootMakefile(t.Context(), dir)
+		def, found := targets["verify-all"]
+		if found != tc.want {
+			t.Errorf("%q: found verify-all = %v, want %v", tc.line, found, tc.want)
+		} else if found && !slices.Equal(def.prerequisites, []string{"ui-gates"}) {
+			t.Errorf("%q: verify-all prerequisites = %q", tc.line, def.prerequisites)
+		}
 	}
 }
 

@@ -264,6 +264,15 @@ func TestWorkingTreeVerifyAllRecipeOwnership(t *testing.T) {
 			makefile: "verify-all:\n" + unavailableVerificationRecipe,
 		},
 		{
+			name:     "unresolved sibling",
+			makefile: "$(UNKNOWN) verify-all: ; @true\n",
+		},
+		{
+			name:     "fixed binding",
+			makefile: "NAME := verify-all\n$(NAME): ; @true\n",
+			want:     hisscatalog.PipelineVerifyAll,
+		},
+		{
 			name:     "no verify-all target",
 			makefile: "test:\n" + unavailableVerificationRecipe,
 		},
@@ -291,5 +300,29 @@ func TestWorkingTreeVerifyAllRecipeOwnership(t *testing.T) {
 				t.Errorf("repository-owned pipelines = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAmbiguousVerificationKeepsDeclaredCommands checks the plan and the predicted Makefile step.
+func TestAmbiguousVerificationKeepsDeclaredCommands(t *testing.T) {
+	const file = "$(UNKNOWN) verify-all: ; @true\n"
+	plan := &VerificationPlan{Status: verificationDeclared, Test: [][]string{{"go", "test"}}}
+	preserveCustomVerification(plan, []byte(file))
+	if plan.Status != verificationDeclared || len(plan.Test) != 1 || strings.Join(plan.Test[0], " ") != "go test" {
+		t.Errorf("ambiguous Makefile replaced the declared test: %+v", plan)
+	}
+	if !strings.Contains(plan.notice(), "unresolved") {
+		t.Errorf("plan did not report unresolved ownership: %s", plan.notice())
+	}
+	if !mayDefineVerificationTarget(file) {
+		t.Error("an ambiguous rule allowed an append")
+	}
+	s := &adoptSession{repoPath: t.TempDir(), verification: plan, declined: []string{"git-hooks"}}
+	generated, _, err := s.generatedPipelines(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generated&hisscatalog.PipelineVerifyAll != 0 {
+		t.Errorf("credited a pipeline that adoption cannot append: %v", generated)
 	}
 }

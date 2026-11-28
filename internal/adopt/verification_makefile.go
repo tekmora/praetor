@@ -440,7 +440,14 @@ func preserveCustomVerification(plan *VerificationPlan, data []byte) {
 		text = normalized
 	}
 	text = withoutDocumentationMakefileBlock(text)
-	if !mayDefineVerificationTarget(text) || isReplaceableVerificationMakefile(text, plan) ||
+	if !util.MakefileHasTarget(text, verificationTarget) {
+		plan.ambiguousVerifyAll = mayDefineVerificationTarget(text)
+		if plan.ambiguousVerifyAll && plan.Status == verificationNotApplicable {
+			plan.Reasons = []string{"No build system was detected."}
+		}
+		return
+	}
+	if isReplaceableVerificationMakefile(text, plan) ||
 		text == buildMakefile(plan) || text == buildMakefileFormat(plan, verificationRecipePrefix, true, false) {
 		return
 	}

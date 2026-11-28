@@ -249,7 +249,7 @@ func (b *makefileBindings) fixed(name string) bool {
 // definition (measured: "A := X=docs-lint" and "MAKEFLAGS += $(A)" define X), no escape and no
 // command, whose output the reader does not know.
 func makefileHarmlessFlagsValue(operator, value string) bool {
-	text, _, _ := strings.Cut(value, "#")
+	text := makefileBeforeComment(value)
 	if operator == "!=" || strings.ContainsAny(text, "$\\") {
 		return false
 	}
@@ -301,7 +301,7 @@ func makefileValueByte(c byte) bool {
 // references in it at once; "=" defers them, so only a value without references is fixed. Any
 // other operator fixes nothing.
 func (v makefileVariables) bind(binding makefileBinding) (makefileValue, bool) {
-	text, _, _ := strings.Cut(binding.value, "#")
+	text := makefileBeforeComment(binding.value)
 	text = strings.TrimLeft(text, " \t")
 	switch binding.operator {
 	case ":=", "::=":
@@ -319,19 +319,17 @@ func (v makefileVariables) bind(binding makefileBinding) (makefileValue, bool) {
 	return makefileValue{text: expanded, line: binding.line, depth: depth + 1}, true
 }
 
-// expand returns text with every reference replaced by the value it names as of the logical line
-// at index line, and how many bindings deep the deepest reference goes. It fails on a byte
-// makefileValueByte rejects, on a reference the reader fixes no value for before that line
-// (lookup), and on a text or result longer than MaxMakefileLineBytes.
+// expand resolves a complete value or rule head to plain path text and horizontal blanks.
+// A byte outside that alphabet or a reference without a fixed value invalidates the whole input.
 func (v makefileVariables) expand(text string, line int) (string, int, bool) {
 	if len(text) > MaxMakefileLineBytes {
 		return "", 0, false
 	}
 	var expanded strings.Builder
 	depth := 0
-	for i := 0; i < len(text) && expanded.Len() <= MaxMakefileLineBytes; {
+	for i := 0; i < len(text); {
 		if text[i] != '$' {
-			if !makefileValueByte(text[i]) {
+			if !makefileValueByte(text[i]) || expanded.Len() == MaxMakefileLineBytes {
 				return "", 0, false
 			}
 			expanded.WriteByte(text[i])
@@ -340,15 +338,12 @@ func (v makefileVariables) expand(text string, line int) (string, int, bool) {
 		}
 		width := makefileReferenceWidth(text[i:])
 		value, ok := v.lookup(text[i:i+width], line)
-		if !ok {
+		if !ok || expanded.Len()+len(value.text) > MaxMakefileLineBytes {
 			return "", 0, false
 		}
 		expanded.WriteString(value.text)
 		depth = max(depth, value.depth)
 		i += width
-	}
-	if expanded.Len() > MaxMakefileLineBytes {
-		return "", 0, false
 	}
 	return expanded.String(), depth, true
 }
@@ -364,22 +359,18 @@ func (v makefileVariables) lookup(reference string, line int) (makefileValue, bo
 	return value, ok && value.line < line
 }
 
-// targets returns the target names a rule on the logical line at index line declares, names as
-// makefileRule returns them: a literal name as it is, and a computed one expanded (expand) and
-// split at its blanks, as Make splits it. It reports false when a computed name does not resolve:
-// only Make can say what the line declares.
-func (v makefileVariables) targets(names []string, line int) ([]string, bool) {
-	resolved := make([]string, 0, len(names))
-	for _, name := range names {
-		if !strings.Contains(name, "$") {
-			resolved = append(resolved, name)
-			continue
-		}
-		expanded, _, ok := v.expand(name, line)
+// targets returns the provable names in a rule head. A computed head must resolve in full
+// to plain path words before any name counts. Literal heads keep their Make quoting rules.
+func (v makefileVariables) targets(head string, line int) ([]string, bool) {
+	if strings.Contains(head, "$") {
+		literal, _, ok := v.expand(head, line)
 		if !ok {
 			return nil, false
 		}
-		resolved = append(resolved, strings.Fields(expanded)...)
+		return strings.Fields(literal), true
 	}
-	return resolved, true
+	names := MakefileTargetWords(head)
+	count := len(names)
+	names = slices.DeleteFunc(names, func(name string) bool { return strings.Contains(name, "%") })
+	return names, len(names) == count
 }

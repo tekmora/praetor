@@ -197,8 +197,10 @@ used, so `X != cat rebind.txt` with `rebind.txt` holding `$(eval NAME := build)`
 `NAME := build` the same way (`makefileEvaluatesText` in `internal/util/makefile_variables.go`).
 Neither does a file whose computed binding names hold more than 256 literal runs in all
 (`MaxMakefileComputedRuns`): the reader splits each such name once and compares every variable it
-fixes with each run, and the bound keeps that work small on a large Makefile. A line such as
-`$(PREFIX) verify-all: dep` with `PREFIX` bound nowhere counts as no `verify-all` rule.
+fixes with each run, and the bound keeps that work small on a large Makefile. A computed rule head
+must resolve in full to plain path words. In `$(PREFIX) verify-all: dep`, an unbound `PREFIX`
+leaves both targets unresolved. A backslash in a computed head also leaves the entire head
+unresolved, even when the variable has a fixed value. Literal heads retain Make's quoted blanks.
 
 The documentation gate block is the one place adoption follows includes. When the Makefile holds
 `include path` with literal operands only, adoption reads each file that Git tracks under exactly
@@ -785,32 +787,94 @@ With `adoption.decline: [labels]` adoption writes none, and both audits pass wit
 
 `standardsctl rules audit` reads `.config/rules/enforcement.yaml`, which gives every HISS rule and
 every AGENTS.md operational rule an enforcement class (`ci-gate`, `hook`, `review-gate`,
-`guidance` or `staged`) and evidence pointers, and checks that each pointer resolves: `test:` to a
-Go test function, `hook:` to a lefthook hook command, `make:` to a Makefile target, `workflow:` to
-a workflow job, `gate:` to a stage of `praetorctl gate run`, and `forge:` to a closed branch
-protection setting: `required_signatures`, `linear_history`, `required_reviews` or
-`required_checks`. An unknown setting fails like an unknown pointer kind. The stage names come from
-`gating.StageNames()`, which reads the same list the pipeline executes (`pipelineStages` in
+`guidance` or `staged`) and evidence pointers, and checks that each pointer resolves (`internal/ruleregistry/audit.go`): `test:` to a
+Go test function, `hook:` to a lefthook hook command, `make:` to a literal Makefile rule as described below,
+`workflow:` to a workflow job whose `if:` condition is not literal `false` (`false` or
+`${{ false }}`, `ghworkflow.NeverRuns` in `internal/ghworkflow/ghworkflow.go`), `gate:` to a stage
+of `praetorctl gate run`, and `forge:` to a closed branch protection setting:
+`required_signatures`, `linear_history`, `required_reviews` or `required_checks`. An unknown
+setting fails like an unknown pointer kind. The stage names come from `gating.StageNames()`, which
+reads the same list the pipeline executes (`pipelineStages` in
 [`internal/gating/pipeline.go`](https://github.com/cordanaLLM/praetor/blob/main/internal/gating/pipeline.go)),
 so a stage the pipeline drops stops resolving and fails the audit
-(`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`). Rules with class `guidance`,
-or without an entry, are reported as prose-only; this slice reports them and does not fail.
+(`TestStageNames_PipelineOrder` in `internal/gating/stages_test.go`).
 
-A committed branch-protection policy is an assertion, not evidence that the forge applies it.
-Without `--remote`, a `forge:` pointer therefore appears under `asserted, not read back` and does
-not count as an enforced path. Another resolved pointer on the same rule still enforces that rule.
-With `standardsctl rules audit --remote`, the command resolves the same effective policy and status
+A `make:<target>` pointer reads `present` only when exactly one rule names the target and that
+rule has a literal recipe. The command can follow `;` or begin on a tab-led recipe line. A
+prerequisite, a recipe comment or a command containing a Make variable reference supplies no
+literal command evidence.
+
+The reader must recognize **every line** of the Makefile, including lines after the recipe.
+It accepts blanks, comments, tab-led recipe lines, single-colon rules with literal target and
+prerequisite words, and simple literal assignments to ordinary variables. An include, directive,
+conditional, continuation, byte-order mark, special variable assignment or second declaration of
+the requested target makes the pointer unresolved with `not statically provable`. A rule that
+targets `GNUmakefile`, `makefile` or `Makefile` has the same effect on every pointer in the
+file because Make can replace and re-read its rules before running the requested target.
+The audit checks the first existing file in the order `GNUmakefile`, `makefile`, `Makefile` and
+leaves every pointer for it unresolved if Make could rebuild it from a sibling such as `Makefile.sh`,
+`s.Makefile` or an `RCS` directory, or if the audit cannot read the directory within its 4096-entry limit.
+The sibling check is a conservative substring match: any entry whose name contains the makefile's name,
+such as `NotesAboutMakefile.md`, counts as a possible source and leaves those pointers unresolved too.
+Every pointer is also unresolved for a dot target other than `.PHONY` (including `.SUFFIXES` and
+single- or double-suffix rules), a `%` in a target or prerequisite (including static pattern
+rules), a `vpath` directive or a `VPATH` assignment. A missing target in a fully recognized file
+reports `unresolved evidence pointer`.
+See `TestAudit_MakeWholeFile`, `TestAudit_MakeImplicitSource` and `TestAudit_MakeTargetBodyShapes` in
+`internal/ruleregistry/registry_test.go`.
+
+A `test:<directory>.<name>` pointer needs a top-level test function in a visible `_test.go`
+file. Its package must match the package declared by ordinary Go files in that directory or its
+external `_test` package. The reader skips `package documentation`. A Go filename suffix
+restricting the OS or architecture, or a leading `//go:build` or `// +build` constraint,
+excludes a file before the reader parses its body. For example, `gate_windows_test.go` is
+excluded and `windows_test.go` is eligible. The reader needs an eligible ordinary source file
+to establish the package. The parameter may use a pointer to the imported `testing.T` or a
+direct type alias such as `type T = testing.T` in another qualifying file of the same package.
+See `TestAudit_TestPackageFiles`, `TestAudit_TestFilenameConstraints`, `TestAudit_TestBuildHeader`
+and `TestAudit_TestParameterAlias`.
+
+A `workflow:<file>#<job>` pointer reads the effective `if` condition from the parsed job.
+A YAML merge key (`<<`) in the document, the `jobs` mapping or the selected job mapping makes
+the pointer unresolved, including when the job inherits `if: false`. Direct aliases for jobs
+and conditions use the condition of the referenced value. See `TestAudit_WorkflowJobAlias`.
+
+Each text row shows the rule ID, class, status and evidence. A guidance rule appears as
+
+```text
+HISS-01 guidance status=guidance prose-only
+```
+
+The text summary counts rules by class and status and gives separate totals for enforced and
+unenforced rules. In `standardsctl rules audit --json`, each rule carries both `status` and
+`enforced` as shown below.
+
+| Status | `enforced` | Meaning |
+| :--- | :--- | :--- |
+| `present` | `false` | every declared pointer is local and resolved structurally in the working tree |
+| `forge-observed` | `true` | every declared pointer resolved, no required forge setting is pending, and at least one `forge:` setting matched live read-back |
+| `forge-pending` | `false` | every local pointer resolved and at least one required `forge:` setting is asserted without live read-back |
+| `unresolved` | `false` | a declared pointer failed structural resolution, lacked evidence, or mismatched live forge read-back; also a `guidance` entry that declares evidence, which fails registry validation (`unresolved: guidance carries evidence` for 1 to 32 pointers; above that limit any entry reads `unresolved: too many evidence pointers`) |
+| `guidance` | `false` | the rule has class `guidance` with no declared evidence, or no registry entry (`prose-only`); reported without failing |
+
+The registry runs no local gate and reads no receipt, so structural pointer resolution alone reports
+`status` `present` with `enforced: false`. A committed branch-protection policy is an assertion, not
+evidence that the forge applies it: without `--remote`, a rule carrying any required `forge:`
+pointer appears under `asserted, not read back` and reports `status` `forge-pending` with
+`enforced: false`, even when local pointers on the same rule resolve. With
+`standardsctl rules audit --remote`, the command resolves the same effective policy and status
 contexts as `plan --remote`, reads the live branch protection once through the shared forge reader,
-and uses `forge.EvaluateBranchProtection` for the comparison. Text and JSON report the setting's
-asserted value, observed value and match result for each rule. Drift fails with the rule ID and all
-three values; a failed live read fails by name instead of falling back to the offline result. The
-remote flags use the same token, endpoint, origin-identity check and bounded command context as
-`plan --remote`.
+and uses `forge.EvaluateBranchProtection` for the comparison. When every declared pointer of a rule
+resolves and every required `forge:` pointer on it matches live read-back, the row reports `status`
+`forge-observed` and `enforced: true`. Text and JSON report the setting's asserted value, observed
+value and match result for each rule. Drift fails with the rule ID and all three values; a failed
+live read fails by name instead of falling back to the offline result. The remote flags use the same
+token, endpoint, origin-identity check and bounded command context as `plan --remote`.
 
 The report also lists guidance or unregistered rules containing the allow-listed instruction-only
 phrases `is told not to`, `must not` or `never` under `instruction-only prohibitions`. This is a
-non-failing conversion list; a rule with executable enforcement is not listed. Computing forge-app
-permissions as the intersection of task needs and policy remains outside this slice.
+non-failing conversion list; a rule with declared evidence pointers is not listed. Computing
+forge-app permissions as the intersection of task needs and policy remains outside this slice.
 
 ### Stages that do not apply are skipped, not failed
 

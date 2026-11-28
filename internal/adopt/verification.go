@@ -13,6 +13,9 @@ import (
 // VerificationPlan declares selected project commands, never an execution result.
 // Unavailable plans produce failing scaffold recipes; custom recipes are preserved.
 type VerificationPlan struct {
+	// ambiguousVerifyAll suppresses generated pipeline credit when the append guard keeps an unresolved rule.
+	ambiguousVerifyAll bool
+
 	Status   string              `json:"status"`
 	Runtimes []string            `json:"runtimes"`
 	Build    [][]string          `json:"build"`
@@ -52,6 +55,7 @@ const (
 	verificationPreserved     = "preserved-unverified"
 	verificationNotApplicable = "not-applicable"
 
+	ambiguousVerifyReason    = "Makefile ownership of verify-all is unresolved. Adoption kept the existing rules."
 	notApplicableReason      = "no build system; verify-all checks agent context, caveman sources and audit."
 	notApplicableBuildRecipe = "\t@printf '%s\\n' 'build: not applicable: no build system; verify-all checks agent context, caveman sources and audit.'\n"
 	notApplicableTestRecipe  = "\t@printf '%s\\n' 'test: not applicable: no build system; verify-all checks agent context, caveman sources and audit.'\n"
@@ -312,7 +316,9 @@ func (p *VerificationPlan) notice() string {
 		reason = strings.Join(p.Reasons, " ")
 	}
 	parts := []string{"Project verification " + p.Status + ": " + reason}
-	if p.Status == verificationUnavailable {
+	if p.ambiguousVerifyAll {
+		parts = append(parts, ambiguousVerifyReason)
+	} else if p.Status == verificationUnavailable {
 		parts = append(parts, p.unavailableDetail()...)
 	}
 	if len(p.SelectedBy) > 0 {

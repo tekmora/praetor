@@ -35,9 +35,6 @@ const (
 	maxDeclaredVerifyDiagnostic = 2048
 )
 
-// makefileNames are the names GNU Make reads a makefile under, in the order it tries them.
-var makefileNames = []string{"GNUmakefile", "makefile", "Makefile"}
-
 // declaredVerifyCommand is the command line the stage runs and every reason names.
 var declaredVerifyCommand = "make " + declaredVerifyTarget
 
@@ -100,7 +97,7 @@ func declaredVerifyNotApplicable(ctx context.Context, cfg *stageConfig) (string,
 // declaresVerifyTarget reports whether the makefile GNU Make would read at repoDir declares
 // verify-all. An unreadable or oversized makefile declares nothing.
 func declaresVerifyTarget(repoDir string) bool {
-	for _, name := range makefileNames {
+	for _, name := range util.DefaultMakefileNames() {
 		path := filepath.Join(repoDir, name)
 		if !util.FileExists(path) {
 			continue
