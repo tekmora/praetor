@@ -767,6 +767,9 @@ func ResolveAuthTokenContext(ctx context.Context, explicitToken string) string {
 // commandEnvironmentKey scopes subprocess environment to one operation tree.
 type commandEnvironmentKey struct{}
 
+// maxEnvironmentEntries bounds caller-supplied environment lists and override lists.
+const maxEnvironmentEntries = 256
+
 // WithCommandEnvironment makes RunCommand, RunGit, RunCommandBytes and RunCommandStream use
 // exactly environment for this context's child processes, in place of the ambient
 // environment minus the git repository variables. It is also how a caller opts back into an
@@ -775,11 +778,11 @@ func WithCommandEnvironment(ctx context.Context, environment []string) (context.
 	if ctx == nil {
 		return nil, errors.New("command environment requires a context")
 	}
-	const maxEnvironmentEntries = 256
 	if len(environment) > maxEnvironmentEntries {
 		return nil, errors.New("command environment exceeds 256 entries")
 	}
 	copied := make([]string, len(environment))
 	copy(copied, environment)
+	ctx = context.WithValue(ctx, commandEntriesKey{}, []string(nil))
 	return context.WithValue(ctx, commandEnvironmentKey{}, copied), nil
 }

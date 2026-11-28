@@ -96,6 +96,8 @@ type Step struct {
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	// InheritScope runs a nested local step inside its verified parent admission.
+	InheritScope bool
 }
 
 // Run runs the step in its own scope where the host offers scopes, and unscoped otherwise with
@@ -110,10 +112,12 @@ func Run(ctx context.Context, s Step) error {
 		return err
 	}
 	name, args := s.Argv[0], s.Argv[1:]
-	if ok, why := ScopesAvailable(ctx); ok {
-		name, args = "systemd-run", ScopeArgs(unitName(s.Label, time.Now()), s.Limits, s.Argv)
-	} else if _, err := fmt.Fprintf(s.Stderr, "admission %s: runs unscoped, %s\n", s.Label, why); err != nil {
-		return err
+	if !s.InheritScope {
+		if ok, why := ScopesAvailable(ctx); ok {
+			name, args = "systemd-run", ScopeArgs(unitName(s.Label, time.Now()), s.Limits, s.Argv)
+		} else if _, err := fmt.Fprintf(s.Stderr, "admission %s: runs unscoped, %s\n", s.Label, why); err != nil {
+			return err
+		}
 	}
 	return util.RunCommandPassthrough(ctx, "", name, s.Stdin, s.Stdout, s.Stderr, args...)
 }

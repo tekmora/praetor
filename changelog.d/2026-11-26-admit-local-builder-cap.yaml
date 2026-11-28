@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
+
+type: fixed
+title: Share the three-builder default across Linux launch environments and reuse verified parent leases for nested admissions
+breaking: false

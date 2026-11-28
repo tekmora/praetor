@@ -20,7 +20,7 @@ praetorctl admit --local --label verify-all -- make verify-all
 ```
 
 Everything after `--` is the step. `PRAETOR_ADMIT_EXECUTORS` points to the remote inventory.
-Use `--local` or `PRAETOR_ADMIT_EXECUTOR=local` to select the workstation. While the workstation
+Use `--local` or `PRAETOR_ADMIT_EXECUTOR=local` to select a Linux workstation. While the workstation
 is under a threshold, the command prints one
 line per reading and keeps waiting:
 
@@ -37,6 +37,22 @@ ends:
 
 An agent runs `praetorctl admit` as a background command. Its client then reports the step's end,
 and the admission line in the output shows when the step started.
+
+Local admission allows three concurrent builders by default. Set
+`PRAETOR_ADMIT_MAX_LOCAL_BUILDERS` to change the default or pass `--max-local-builders N`
+for one invocation. Both accept integers from 1 through 256. Every invocation by the same
+Linux user counts slots in `/tmp/praetor-admit-<uid>/praetor-admit-leases/local`,
+including shells and services with different `XDG_RUNTIME_DIR` or `TMPDIR` settings.
+When all slots are occupied, the caller polls until a lease is released or `--wait`
+expires. The refusal names the occupancy, for example `admit: local builders 3 of 3 busy`.
+
+A nested `praetorctl admit` inside a local step rechecks host headroom and runs in the
+outer step’s scope using its slot. The child environment carries the lease holder’s PID in
+`PRAETOR_ADMIT_LOCAL_LEASE_PID`. Admission verifies that an ancestor with that PID holds
+a live local lease and that the start tick recorded in the lease matches the ancestor’s
+start tick in `/proc/<pid>/stat`. The directory lock keeps this check and stale-file reclamation mutually
+exclusive. When a holder exits, Linux releases its flock and the next reservation can
+reclaim the file.
 
 ## Remote executor inventory
 
@@ -254,23 +270,20 @@ systemd-run --user --scope --quiet --collect --expand-environment=no \
 ```
 
 `--expand-environment=no` keeps systemd from rewriting `$` in the command's arguments. Before each
-step the command checks that scopes work by starting an empty one. Where that fails (no user
-manager, a container, macOS, Windows), the step runs without a scope, and a line names the reason:
+outer local step on Linux the command checks that scopes work by starting an empty one. If the
+Linux user manager is unavailable, the step retains its builder lease and logs why it runs unscoped.
 
 ```text
 admission verify-all: runs unscoped, <reason>
 ```
 
-The host readings follow what each platform reports:
+Local admission requires Linux. On macOS and Windows, explicit local selection and a
+remote-to-local fallback return an error naming the platform before polling the host or
+running a step. On macOS, select a remote Linux executor through the inventory. Windows
+also lacks the Unix advisory locks required for remote executor leasing.
 
-| Platform | Memory | Swap | Load |
-| :--- | :--- | :--- | :--- |
-| Linux | `/proc/meminfo` `MemAvailable` | `/proc/meminfo` `SwapFree` | `/proc/loadavg` |
-| Windows | `GlobalMemoryStatusEx` available physical memory | not measured | not measured |
-| macOS | not measured | not measured | not measured |
-
-A figure that is not measured is not judged, and the admission line says so. When memory itself is
-not measured, the step is admitted with `admitted unjudged`.
+On Linux, admission reads `MemAvailable` and `SwapFree` from `/proc/meminfo` and load
+from `/proc/loadavg`.
 
 ## Evidence
 
