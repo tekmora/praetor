@@ -1295,6 +1295,11 @@ Loaded remotely, the action has no `.git`, so a forced run first checks out prae
   `.gitattributes` when adoption should refresh it. An edited copy of any of them, or one with
   mixed line endings, is left as it is and keeps the contract above
   (`TestAdoptDoesNotRepinAnEditedOrForeignCatalog`).
+- **Checkpoint script modes.** On POSIX, adoption sets mode `0755` on staged checkpoint
+  scripts whose verified source starts with `#!`. A new or refreshed script is executable
+  as soon as it appears. Re-adoption restores the same mode on a matching script and
+  preserves its checkout line endings (`TestAdopt_CheckpointSourceModes`).
+  Issue 2073 tracks the remaining checkpoint filesystem work.
 - **Files the repository ignores.** Once every step has run, adoption asks git whether the
   repository's own ignore rules exclude any file it created, verified, merged or replaced
   (`reportIgnoredWrites` in `internal/adopt/ignored_writes.go`). An ignored file that git does

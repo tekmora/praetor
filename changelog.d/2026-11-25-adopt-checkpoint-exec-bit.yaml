@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
+type: fixed
+title: >-
+  Adoption publishes verified checkpoint scripts with mode 0755 on POSIX and restores
+  that mode on re-adoption. Issue 2073 tracks the remaining checkpoint filesystem work.
