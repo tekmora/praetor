@@ -188,6 +188,15 @@ func walkComponents(ctx context.Context, current *os.Root, parts []string) (_ *o
 	return current, nil
 }
 
+// OpenChildDirectory pins one directory directly beneath parent without following a symlink.
+// The caller owns the returned handle. The parent remains open.
+func OpenChildDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
+	if ctx == nil || parent == nil || !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+		return nil, fmt.Errorf("context, parent directory and flat child name required")
+	}
+	return childDirectory(ctx, parent, name)
+}
+
 func childDirectory(ctx context.Context, parent *os.Root, name string) (*os.Root, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

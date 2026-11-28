@@ -1,0 +1,3 @@
+type: fixed
+title: Fail HISS-20 coverage verification on unowned corpus fixtures and declare HISS-08 Rust gap ownership
+issue: "#2052"

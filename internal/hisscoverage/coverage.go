@@ -17,6 +17,7 @@ package hisscoverage
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -202,12 +203,20 @@ func validateRule(rule *Rule, seen map[string]struct{}) error {
 	return nil
 }
 
+const maxLanguageBytes = 255
+
+// validLanguageSegment checks the directory name used in every fixture path for a claim.
+func validLanguageSegment(language string) bool {
+	return len(language) <= maxLanguageBytes && strings.TrimSpace(language) != "" &&
+		language != "." && !strings.ContainsAny(language, "/\\\x00") && filepath.IsLocal(language)
+}
+
 // validateCoverage checks one language entry. A claim of enforcement without a named
 // mechanism is refused: that combination is how a matrix cell comes to advertise a gate that
 // does not exist.
 func validateCoverage(ruleID string, cov *Coverage, langs map[string]struct{}) error {
-	if strings.TrimSpace(cov.Language) == "" {
-		return fmt.Errorf("%w: rule %s has coverage with no language", ErrInvalidCatalog, ruleID)
+	if !validLanguageSegment(cov.Language) {
+		return fmt.Errorf("%w: rule %s language %q escapes the fixture tree", ErrInvalidCatalog, ruleID, cov.Language)
 	}
 	if _, dup := langs[cov.Language]; dup {
 		return fmt.Errorf("%w: rule %s declares %s twice", ErrInvalidCatalog, ruleID, cov.Language)

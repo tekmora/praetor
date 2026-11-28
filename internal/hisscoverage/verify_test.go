@@ -1,10 +1,17 @@
 package hisscoverage
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/cordanaLLM/praetor/internal/hisscatalog"
@@ -209,6 +216,35 @@ func TestValidateRefusesDuplicateAndEmpty(t *testing.T) {
 	dupLang.Rules[0].Coverage = append(dupLang.Rules[0].Coverage, dupLang.Rules[0].Coverage[0])
 	if err := dupLang.Validate(); !errors.Is(err, ErrInvalidCatalog) {
 		t.Errorf("a language declared twice must be refused, got %v", err)
+	}
+}
+
+// TestValidateRefusesUnsafeLanguage checks the diagnostic for malformed claim directories.
+func TestValidateRefusesUnsafeLanguage(t *testing.T) {
+	const rule = "HISS-01"
+	languages := [...]string{
+		"../x", "a/b", "..", ".", "", " ", "/x", `a\b`, "a\x00b", strings.Repeat("a", 256),
+	}
+	for i := 0; i < len(languages); i++ {
+		language := languages[i]
+		t.Run(fmt.Sprintf("%q", language), func(t *testing.T) {
+			err := catalogFor(rule, language, StateManual).Validate()
+			if !errors.Is(err, ErrInvalidCatalog) {
+				t.Fatalf("language %q: expected ErrInvalidCatalog, got %v", language, err)
+			}
+			message := err.Error()
+			if !strings.Contains(message, rule) || !strings.Contains(message, fmt.Sprintf("%q", language)) ||
+				!strings.Contains(message, "escapes") {
+				t.Errorf("expected rule, quoted language and escape diagnostic, got %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsMaxLengthLanguage pins the inclusive byte limit.
+func TestValidateAcceptsMaxLengthLanguage(t *testing.T) {
+	if err := catalogFor("HISS-01", strings.Repeat("a", 255), StateManual).Validate(); err != nil {
+		t.Fatalf("a 255-byte language must be accepted: %v", err)
 	}
 }
 
@@ -434,13 +470,7 @@ const malformedGo = "package p\n\nfunc F() {\n"
 // writeCorpusFixture stages an additional fixture file under an existing corpus root.
 func writeCorpusFixture(t *testing.T, root, rule, lang, bucket, name, body string) {
 	t.Helper()
-	dir := filepath.Join(root, filepath.FromSlash(FixtureDir), rule, lang, bucket)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatalf("create fixture dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	plantCorpusFile(t, root, rule+"/"+lang+"/"+bucket+"/"+name, body)
 }
 
 // delegatedCatalogFor builds a one-claim catalog attributed to runner.
@@ -576,4 +606,568 @@ func TestVerifyIntentionalGapMarkerContract(t *testing.T) {
 	writeCorpusFixture(t, noReason, "HISS-01", "go", bucketGap, "no-reason.go", markedReasonlessGo)
 	requireFinding(t, "marker without reason", noReason, catalogFor("HISS-01", "go", StatePartial),
 		"no-reason.go", "reason")
+}
+
+// plantCorpusFile writes body at rel (a slash path below FixtureDir) inside root.
+func plantCorpusFile(t *testing.T, root, rel, body string) string {
+	t.Helper()
+	slashRel := FixtureDir + "/" + rel
+	full := filepath.Join(root, filepath.FromSlash(slashRel))
+	dir := filepath.Dir(full)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create dir for %s: %v", slashRel, err)
+	}
+	if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", slashRel, err)
+	}
+	return slashRel
+}
+
+// withoutCoverageCell returns a shallow copy of catalog with ruleID/lang removed, and reports
+// whether the cell was present.
+func withoutCoverageCell(catalog *Catalog, ruleID, lang string) (*Catalog, bool) {
+	out := &Catalog{Version: catalog.Version, Rules: make([]Rule, 0, len(catalog.Rules))}
+	removed := false
+	for i := 0; i < len(catalog.Rules); i++ {
+		rule := catalog.Rules[i]
+		if rule.ID != ruleID {
+			out.Rules = append(out.Rules, rule)
+			continue
+		}
+		kept := make([]Coverage, 0, len(rule.Coverage))
+		for j := 0; j < len(rule.Coverage); j++ {
+			if rule.Coverage[j].Language == lang {
+				removed = true
+				continue
+			}
+			kept = append(kept, rule.Coverage[j])
+		}
+		rule.Coverage = kept
+		if len(rule.Coverage) > 0 {
+			out.Rules = append(out.Rules, rule)
+		}
+	}
+	return out, removed
+}
+
+// TestVerifyCorpusOwnershipControl is the passing control case that holds before and after
+// corpus-ownership reconciliation: fixtures inside valid buckets of declared cells pass Verify.
+func TestVerifyCorpusOwnershipControl(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	plantCorpusFile(t, root, "HISS-01/go/gap/method-cycle.go", cleanGo)
+
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !report.Passed() || report.Fixtures != 2 {
+		t.Fatalf("owned positive and gap fixtures must pass (fixtures=%d): %+v", report.Fixtures, report.Findings)
+	}
+}
+
+// TestVerifyCommittedCorpusOwnsHISS08Rust verifies that the committed catalog owns HISS-08/rust
+// as unsupported with mechanism none and that the whole committed fixture corpus passes Verify.
+func TestVerifyCommittedCorpusOwnsHISS08Rust(t *testing.T) {
+	root := filepath.Join("..", "..")
+	catalog, err := LoadCatalog(t.Context(), root)
+	if err != nil {
+		t.Fatalf("load repository catalog: %v", err)
+	}
+	cov, ok := catalog.Lookup("HISS-08", "rust")
+	if !ok {
+		t.Fatalf("HISS-08/rust must be declared in %s so its gap fixtures have an owner", CatalogFile)
+	}
+	if cov.State != StateUnsupported || cov.Mechanism != "none" || !cov.ReplayedHere() {
+		t.Fatalf("HISS-08/rust = %+v, want state=%q mechanism=%q replayed directly", cov, StateUnsupported, "none")
+	}
+	report, err := Verify(t.Context(), root, catalog)
+	if err != nil {
+		t.Fatalf("verify repository catalog: %v", err)
+	}
+	if !report.Passed() {
+		t.Fatalf("committed corpus must pass Verify: %+v", report.Findings)
+	}
+}
+
+// TestVerifyRejectsOrphanFixtures is the negative dimension for corpus ownership: any fixture
+// file under FixtureDir that maps to no declared rule/language cell or valid bucket fails Verify
+// and names the path.
+func TestVerifyRejectsOrphanFixtures(t *testing.T) {
+	cases := []struct {
+		name string
+		rel  string
+	}{
+		{"undeclared rule and language", "HISS-08/rust/gap/orphan.rs"},
+		{"corpus root file", "orphan.go"},
+		{"rule level file", "HISS-01/orphan.go"},
+		{"language level file outside bucket", "HISS-01/go/orphan.go"},
+		{"unknown bucket", "HISS-01/go/retired/orphan.go"},
+		{"nested subdirectory inside bucket", "HISS-01/go/positive/nested/orphan.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+			wantPath := plantCorpusFile(t, root, tc.rel, cleanGo)
+			report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if report.Passed() {
+				t.Fatalf("planted orphan %s passed Verify", wantPath)
+			}
+			if len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantPath) {
+				t.Fatalf("findings = %+v, want one naming %s", report.Findings, wantPath)
+			}
+		})
+	}
+}
+
+// TestVerifyRejectsMisspelledLanguageDirectory is the negative and boundary dimension for
+// directory ownership: a misspelled language directory or undeclared rule directory fails Verify
+// whether it holds fixtures or sits empty on disk, naming its path.
+func TestVerifyRejectsMisspelledLanguageDirectory(t *testing.T) {
+	t.Run("populated misspelled language", func(t *testing.T) {
+		root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+		wantPath := plantCorpusFile(t, root, "HISS-01/golnag/positive/recursion.go", recursiveGo)
+		report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.Passed() || len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantPath) {
+			t.Fatalf("findings = %+v, want failure naming %s", report.Findings, wantPath)
+		}
+	})
+	for _, rel := range []string{"HISS-01/golnag", "HISS-03"} {
+		t.Run("empty "+rel, func(t *testing.T) {
+			root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+			wantPath := FixtureDir + "/" + rel
+			// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- an empty directory fixture needs the owner execute bit to be listed; 0o750 matches the fixture tree
+			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(wantPath)), 0o750); err != nil {
+				t.Fatalf("mkdir %s: %v", wantPath, err)
+			}
+			report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if report.Passed() || len(report.Findings) != 1 || !strings.Contains(report.Findings[0].String(), wantPath) {
+				t.Fatalf("findings = %+v, want failure naming %s", report.Findings, wantPath)
+			}
+		})
+	}
+}
+
+// TestVerifyRemovingHISS08RustFailsCommittedCorpus proves the three committed HISS-08 Rust gap
+// fixtures are owned by HISS-08/rust: dropping that cell makes Verify fail and name all three.
+func TestVerifyRemovingHISS08RustFailsCommittedCorpus(t *testing.T) {
+	root := filepath.Join("..", "..")
+	catalog, err := LoadCatalog(t.Context(), root)
+	if err != nil {
+		t.Fatalf("load repository catalog: %v", err)
+	}
+	trimmed, removed := withoutCoverageCell(catalog, "HISS-08", "rust")
+	if !removed {
+		t.Errorf("HISS-08/rust must be declared in %s", CatalogFile)
+	}
+	report, err := Verify(t.Context(), root, trimmed)
+	if err != nil {
+		t.Fatalf("verify without HISS-08/rust: %v", err)
+	}
+	if report.Passed() {
+		t.Fatal("without HISS-08/rust, the committed Rust gap fixtures are unowned and Verify must fail")
+	}
+	want := []string{
+		".config/hiss/testdata/HISS-08/rust/gap/command-shell.rs",
+		".config/hiss/testdata/HISS-08/rust/gap/libc-kill.rs",
+		".config/hiss/testdata/HISS-08/rust/gap/libloading-open.rs",
+	}
+	if len(report.Findings) != len(want) {
+		t.Fatalf("findings = %+v, want the %d HISS-08/rust gap files", report.Findings, len(want))
+	}
+	for i := range want {
+		if !strings.Contains(report.Findings[i].String(), want[i]) {
+			t.Errorf("finding %d = %q, want path %s", i, report.Findings[i], want[i])
+		}
+	}
+}
+
+// plantSymlink creates a symbolic link at linkPath pointing to target, skipping on hosts without symlink rights.
+func plantSymlink(t *testing.T, target, linkPath string) {
+	t.Helper()
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- parent fixture directories require the owner execute bit to be traversed
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o750); err != nil {
+		t.Fatalf("mkdir parent for %s: %v", linkPath, err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
+}
+
+// TestVerifyRejectsSymlinkedCorpusRoot covers each component below the repository root.
+func TestVerifyRejectsSymlinkedCorpusRoot(t *testing.T) {
+	for _, rel := range []string{".config", ".config/hiss", FixtureDir} {
+		t.Run(rel, func(t *testing.T) {
+			root := t.TempDir()
+			outside := t.TempDir()
+			plantCorpusFile(t, outside, "outside.go", cleanGo)
+			plantSymlink(t, filepath.Join(outside, filepath.FromSlash(rel)), filepath.Join(root, filepath.FromSlash(rel)))
+			report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StateUnsupported))
+			if err == nil || report != nil {
+				t.Fatalf("symlink at %s: report=%+v error=%v", rel, report, err)
+			}
+			if !strings.Contains(filepath.ToSlash(err.Error()), rel) || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("error = %q, want symlink diagnostic naming %s", err, rel)
+			}
+			if strings.Contains(err.Error(), "outside.go") {
+				t.Fatalf("error listed a file beyond the link: %v", err)
+			}
+		})
+	}
+}
+
+// checkpointContext runs a fixture action at a chosen synchronous cancellation check.
+type checkpointContext struct {
+	context.Context
+	calls atomic.Int64
+	at    int64
+	act   func()
+}
+
+// Err runs the planted action on the configured call, then reports the wrapped context's error.
+func (c *checkpointContext) Err() error {
+	if c.calls.Add(1) == c.at {
+		c.act()
+	}
+	return c.Context.Err()
+}
+
+// TestVerifyKeepsPinnedCorpusAfterAncestorRename moves the ancestor at the first extra
+// checkpoint of a populated walk. An empty walk supplies the checkpoint count so the
+// fixture does not depend on a fixed number of context checks in directory opening.
+func TestVerifyKeepsPinnedCorpusAfterAncestorRename(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, filepath.FromSlash(FixtureDir))
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- corpus directories require the owner execute bit to be listed
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	catalog := catalogFor("HISS-01", "go", StatePartial)
+	empty := &checkpointContext{Context: t.Context()}
+	if _, err := Verify(empty, root, catalog); err != nil {
+		t.Fatal(err)
+	}
+	want := plantCorpusFile(t, root, "HISS-03/nested/original.go", cleanGo)
+	replacement := filepath.Join(root, "replacement")
+	plantCorpusFile(t, replacement, "HISS-03/nested/replacement.go", cleanGo)
+	link := filepath.Join(root, "link")
+	plantSymlink(t, filepath.Join(replacement, filepath.Dir(filepath.FromSlash(FixtureDir))), link)
+	ctx := &checkpointContext{Context: t.Context(), at: empty.calls.Load() + 1, act: func() {
+		replaceCorpusAncestor(t, filepath.Dir(dir), link)
+	}}
+	report, err := Verify(ctx, root, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.calls.Load() < ctx.at || len(report.Findings) != 1 || !strings.Contains(report.Findings[0].Detail, want) {
+		t.Fatalf("rename at check %d of %d: want pinned file %s, got %+v", ctx.at, ctx.calls.Load(), want, report.Findings)
+	}
+}
+
+// replaceCorpusAncestor swaps an already checked corpus directory for a symlink to link, skipping where Windows holds the tree.
+func replaceCorpusAncestor(t *testing.T, ancestor, link string) {
+	t.Helper()
+	err := os.Rename(ancestor, ancestor+"-moved")
+	// Windows can hold the original tree in place by denying the rename. Verify should
+	// still report the original fixture in that case.
+	const sharingViolation syscall.Errno = 32 // Windows ERROR_SHARING_VIOLATION
+	if runtime.GOOS == "windows" && (errors.Is(err, fs.ErrPermission) || errors.Is(err, sharingViolation)) {
+		t.Logf("open directory handle prevented renaming its ancestor: %v", err)
+		return
+	}
+	if err != nil {
+		t.Fatalf("move fixture ancestor: %v", err)
+	}
+	if err := os.Rename(link, ancestor); err != nil {
+		t.Fatalf("move fixture link into place: %v", err)
+	}
+}
+
+// TestCheckBelowRoot refuses the root itself and a sibling sharing its prefix, and accepts a child.
+func TestCheckBelowRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	for _, target := range []string{root, filepath.Join(parent, "repo-sibling")} {
+		if err := checkBelowRoot(root, target); err == nil || !strings.Contains(err.Error(), "escapes") {
+			t.Errorf("checkBelowRoot(%q, %q) = %v, want escape error", root, target, err)
+		}
+	}
+	if err := checkBelowRoot(root, filepath.Join(root, "child")); err != nil {
+		t.Fatalf("valid child: %v", err)
+	}
+}
+
+// TestVerifyRejectsEscapingLanguage refuses a catalog language whose claim path would leave the fixture tree.
+func TestVerifyRejectsEscapingLanguage(t *testing.T) {
+	escapeRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	if _, err := Verify(t.Context(), escapeRoot, catalogFor("HISS-01", "../../../../outside", StateManual)); err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("escaping language path error = %v, want escapes repository root", err)
+	}
+}
+
+// TestVerifyRejectsSymlinkedDirectoryInsideCorpus verifies that a symlinked directory anywhere
+// inside FixtureDir is reported as an unowned symlink and never entered.
+func TestVerifyRejectsSymlinkedDirectoryInsideCorpus(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "outside-leak.go"), []byte(recursiveGo), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	rels := []string{
+		"HISS-01/go/gap",
+		"HISS-01/rust",
+		"HISS-01/golnag/linked",
+		"HISS-01/go/positive/nested/linked",
+	}
+	for i := 0; i < len(rels); i++ {
+		rel := rels[i]
+		t.Run(rel, func(t *testing.T) {
+			assertSymlinkedCorpusSubdirNotEntered(t, outside, rel)
+		})
+	}
+}
+
+// assertSymlinkedCorpusSubdirNotEntered plants a symlink to outside at FixtureDir/rel and checks
+// that Verify reports the symlink path without replaying or listing anything inside outside.
+func assertSymlinkedCorpusSubdirNotEntered(t *testing.T, outside, rel string) {
+	t.Helper()
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	wantRel := FixtureDir + "/" + rel
+	plantSymlink(t, outside, filepath.Join(root, filepath.FromSlash(wantRel)))
+
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Passed() || report.Fixtures != 1 {
+		t.Fatalf("symlink %s must fail without replaying outside files: fixtures=%d findings=%+v",
+			wantRel, report.Fixtures, report.Findings)
+	}
+	if len(report.Findings) != 1 || !strings.Contains(report.Findings[0].Detail, "unowned symlink "+wantRel) {
+		t.Fatalf("findings = %+v, want one symlink diagnostic naming %s", report.Findings, wantRel)
+	}
+	if strings.Contains(report.Findings[0].String(), "outside-leak.go") {
+		t.Fatalf("finding leaked target contents: %s", report.Findings[0])
+	}
+}
+
+// syntheticDirEntry implements fs.DirEntry for bounded directory-reader tests.
+type syntheticDirEntry struct {
+	name string
+}
+
+// Name returns the synthetic entry's filename.
+func (e syntheticDirEntry) Name() string { return e.name }
+
+// IsDir reports false because synthetic entries represent regular files.
+func (e syntheticDirEntry) IsDir() bool { return false }
+
+// Type returns regular-file mode bits.
+func (e syntheticDirEntry) Type() fs.FileMode { return 0 }
+
+// Info returns os.ErrNotExist; readDirBounded inspects Name only while reading chunks.
+func (e syntheticDirEntry) Info() (fs.FileInfo, error) { return nil, os.ErrNotExist }
+
+// countingSyntheticDir yields total synthetic entries across ReadDir(n) calls while recording
+// the total entries handed back to the caller.
+type countingSyntheticDir struct {
+	fs.ReadDirFile
+	total    int
+	offset   int
+	finalErr error
+	cancel   context.CancelFunc
+}
+
+// ReadDir returns up to n synthetic entries (or all remaining when n <= 0) and counts them.
+func (d *countingSyntheticDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	rem := d.total - d.offset
+	if rem <= 0 {
+		if n <= 0 {
+			return nil, nil
+		}
+		return nil, io.EOF
+	}
+	take := rem
+	if n > 0 && n < take {
+		take = n
+	}
+	out := make([]fs.DirEntry, take)
+	for i := 0; i < take; i++ {
+		out[i] = syntheticDirEntry{name: fmt.Sprintf("entry-%05d.go", d.offset+i)}
+	}
+	d.offset += take
+	if d.cancel != nil {
+		d.cancel()
+	}
+	if d.offset == d.total {
+		return out, d.finalErr
+	}
+	return out, nil
+}
+
+// TestCorpusReadBoundaries checks the exact limit and the one-entry overflow allowance.
+func TestCorpusReadBoundaries(t *testing.T) {
+	for _, total := range []int{maxCorpusEntries, maxCorpusEntries + 1, maxCorpusEntries * 2} {
+		dir := &countingSyntheticDir{total: total}
+		entries, err := readDirChunks(t.Context(), dir, "corpus")
+		if total == maxCorpusEntries {
+			if err != nil || len(entries) != total {
+				t.Fatalf("at limit: got %d entries, %v", len(entries), err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "exceeds") || dir.offset != maxCorpusEntries+1 {
+			t.Fatalf("total %d: read %d, error %v, want overflow at %d", total, dir.offset, err, maxCorpusEntries+1)
+		}
+	}
+}
+
+// TestVerifyCorpusDirectoryEntryBound checks that Verify surfaces a directory overflow.
+func TestVerifyCorpusDirectoryEntryBound(t *testing.T) {
+	root := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	overDir := filepath.Join(root, filepath.FromSlash(FixtureDir), "HISS-01", "golnag")
+	// nosemgrep: go.lang.correctness.permissions.file_permission.incorrect-default-permission -- fixture directory needs the owner execute bit to be listed
+	if err := os.MkdirAll(overDir, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", overDir, err)
+	}
+	for i := 0; i < maxCorpusEntries+1; i++ {
+		name := filepath.Join(overDir, fmt.Sprintf("f%04d.go", i))
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if _, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial)); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Verify over %d entries = %v, want bound error", maxCorpusEntries+1, err)
+	}
+}
+
+// TestCorpusReadOverflowPreservesError keeps a read error next to the entry-bound overflow error.
+func TestCorpusReadOverflowPreservesError(t *testing.T) {
+	dir := &countingSyntheticDir{total: maxCorpusEntries + 1, finalErr: io.ErrUnexpectedEOF}
+	_, err := readDirChunks(t.Context(), dir, "corpus")
+	if !errors.Is(err, io.ErrUnexpectedEOF) || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("overflow with read error = %v, want both errors", err)
+	}
+}
+
+// TestCorpusReadCancellation stops the chunked listing when the context is cancelled before or between reads.
+func TestCorpusReadCancellation(t *testing.T) {
+	for _, beforeFirst := range []bool{true, false} {
+		ctx, cancel := context.WithCancel(t.Context())
+		dir := &countingSyntheticDir{total: corpusReadChunk + 1, cancel: cancel}
+		wantRead := corpusReadChunk
+		if beforeFirst {
+			cancel()
+			wantRead = 0
+		}
+		_, err := readDirChunks(ctx, dir, "corpus")
+		cancel()
+		if !errors.Is(err, context.Canceled) || dir.offset != wantRead {
+			t.Fatalf("beforeFirst=%t: read %d, error %v, want %d and cancellation", beforeFirst, dir.offset, err, wantRead)
+		}
+	}
+}
+
+// TestVerifyCancelledContextStopsCorpusWalk exercises present and absent corpus roots.
+func TestVerifyCancelledContextStopsCorpusWalk(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, present := range []bool{false, true} {
+		root := t.TempDir()
+		if present {
+			plantCorpusFile(t, root, "orphan.go", cleanGo)
+		}
+		report, err := Verify(ctx, root, catalogFor("HISS-01", "go", StateUnsupported))
+		if !errors.Is(err, context.Canceled) || report != nil {
+			t.Fatalf("present=%t: got report %+v, error %v, want only context.Canceled", present, report, err)
+		}
+	}
+}
+
+// TestVerifyBoundsUnownedSubtreeFindings verifies that an unowned subtree with more files than the
+// per-subtree findings cap yields the cap plus one summary finding naming the omitted file count.
+func TestVerifyBoundsUnownedSubtreeFindings(t *testing.T) {
+	const (
+		findingsBound = 64
+		extraFiles    = 11
+	)
+	atBoundRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	plantUnownedSubtreeFiles(t, atBoundRoot, findingsBound)
+	atReport, err := Verify(t.Context(), atBoundRoot, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify at-bound subtree: %v", err)
+	}
+	if atReport.Passed() || len(atReport.Findings) != findingsBound {
+		t.Fatalf("at-bound findings = %d, want %d", len(atReport.Findings), findingsBound)
+	}
+
+	overRoot := corpusRoot(t, "HISS-01", "go", bucketPositive, "recursion.go", recursiveGo)
+	plantUnownedSubtreeFiles(t, overRoot, findingsBound+extraFiles)
+	overReport, err := Verify(t.Context(), overRoot, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatalf("verify over-bound subtree: %v", err)
+	}
+	if overReport.Passed() || len(overReport.Findings) != findingsBound+1 {
+		t.Fatalf("over-bound findings = %d, want %d (%d + 1 summary)",
+			len(overReport.Findings), findingsBound+1, findingsBound)
+	}
+	wantSummary := fmt.Sprintf("%d further unowned file(s) omitted", extraFiles)
+	summaries := 0
+	for i := 0; i < len(overReport.Findings); i++ {
+		if strings.Contains(overReport.Findings[i].Detail, wantSummary) {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("summary findings containing %q = %d, want 1 in %+v", wantSummary, summaries, overReport.Findings)
+	}
+}
+
+// plantUnownedSubtreeFiles writes count unowned files across subdirectories of HISS-01/golnag.
+func plantUnownedSubtreeFiles(t *testing.T, root string, count int) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		rel := fmt.Sprintf("HISS-01/golnag/dir-%02d/file-%03d.go", i/16, i)
+		plantCorpusFile(t, root, rel, cleanGo)
+	}
+}
+
+// TestVerifyBoundsLooseFilesInUndeclaredRule caps an undeclared rule directory at 64 paths plus one summary.
+func TestVerifyBoundsLooseFilesInUndeclaredRule(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 75; i++ {
+		plantCorpusFile(t, root, fmt.Sprintf("HISS-03/loose-%02d.go", i), cleanGo)
+	}
+	report, err := Verify(t.Context(), root, catalogFor("HISS-01", "go", StatePartial))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 65 {
+		t.Fatalf("got %d findings, want 64 paths and one summary", len(report.Findings))
+	}
+	summaries := 0
+	paths := make(map[string]bool)
+	for _, f := range report.Findings {
+		if f.Fixture == "" {
+			summaries++
+			if !strings.Contains(f.Detail, FixtureDir+"/HISS-03: 11 further unowned file(s) omitted") {
+				t.Fatalf("unexpected subtree summary: %s", f.Detail)
+			}
+			continue
+		}
+		paths[f.Fixture] = strings.Contains(f.Detail, FixtureDir+"/HISS-03/"+f.Fixture)
+	}
+	if summaries != 1 {
+		t.Fatalf("got %d subtree summaries, want one", summaries)
+	}
+	for i := 0; i < 64; i++ {
+		if !paths[fmt.Sprintf("loose-%02d.go", i)] {
+			t.Fatalf("missing path for loose file %d", i)
+		}
+	}
 }
