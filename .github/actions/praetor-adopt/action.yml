@@ -26,7 +26,7 @@ inputs:
   go-version:
     description: "Go toolchain the step builds standardsctl with; the default mirrors the go directive in praetor's go.mod"
     required: false
-    default: "1.27"
+    default: "1.27.4"
   cache:
     description: "Let actions/setup-go restore and save the Go module and build caches. Set false in a job a pull request or its comment starts, where the entry saved would be restored by later trusted runs, and in a job that keeps its own Go cache"
     required: false

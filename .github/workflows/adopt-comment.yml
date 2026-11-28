@@ -94,7 +94,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The head's go.mod toolchain directive names the Go release, as in the adopt job above.
+      # Use the head's preferred toolchain when specified, otherwise its required Go release.
       # The action runs its own setup-go with check-latest, which resolves a range through the
       # lagging setup-go manifest; an exact release missing there is downloaded from go.dev.
       # This job keeps no Go cache, so it reads the release from go.mod instead of running a
@@ -105,11 +105,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release="$(sed -n 's/^toolchain go\([0-9][0-9a-z.]*\)$/\1/p' go.mod)"
-          if [ -z "$release" ]; then
-            echo "adopt: go.mod at the pull request head names no toolchain directive" >&2
-            exit 1
-          fi
+          # Before setup-go, validate both releases against x/mod/modfile.GoVersionRE.
+          release="$(LC_ALL=C awk '
+            function refuse(reason) {
+              print "adopt: go.mod at the pull request head has " reason > "/dev/stderr"
+              exit 1
+            }
+            function check(name) {
+              if (count[name] > 1) refuse("multiple " name " directives")
+              if (count[name] && !valid[name]) refuse("invalid " name " directive")
+            }
+            { sub(/\/\/.*/, ""); sub(/\r$/, "") }
+            block { if ($1 == ")") block = 0; next }
+            /^[[:blank:]]*(module|godebug|require|exclude|replace|retract|tool|ignore)[[:blank:]]*\([[:blank:]]*$/ { block = 1; next }
+            $1 == "go" || $1 == "toolchain" {
+              count[$1]++
+              version = $2
+              if ($1 == "toolchain" && !sub(/^go/, "", version)) version = ""
+              valid[$1] = NF == 2 && version ~ /^[1-9][0-9]*\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?([a-z]+[0-9]+)?$/
+              release[$1] = version
+            }
+            END {
+              check("toolchain")
+              check("go")
+              if (count["toolchain"]) print release["toolchain"]
+              else if (count["go"]) print release["go"]
+              else refuse("no go directive")
+            }
+          ' go.mod)"
           echo "go-version=$release" >> "$GITHUB_OUTPUT"
 
       # cache: "false" keeps setup-go from saving what this job built into the default

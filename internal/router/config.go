@@ -43,7 +43,7 @@ var ErrInvalidRoutingConfig = errors.New("invalid routing configuration")
 // LoadRoutingConfigContext loads one strict YAML document without network access.
 // It refuses nonregular files, missing prices, duplicate IDs and oversized input.
 func LoadRoutingConfigContext(ctx context.Context, path string) (*RoutingConfig, error) {
-	data, err := readRoutingFile(ctx, path)
+	data, err := readRoutingFile(ctx, path, MaxRoutingFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +260,8 @@ func finiteNonnegative(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }
 
-func readRoutingFile(ctx context.Context, path string) (data []byte, err error) {
+// readRoutingFile reads one stable regular file within the caller's byte limit and a five-second deadline.
+func readRoutingFile(ctx context.Context, path string, maxBytes int64) (data []byte, err error) {
 	if ctx == nil {
 		return nil, errors.New("routing reads require a context")
 	}
@@ -269,14 +270,15 @@ func readRoutingFile(ctx context.Context, path string) (data []byte, err error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	info, err := inspectRoutingFile(path)
+	info, err := inspectRoutingFile(path, maxBytes)
 	if err != nil {
 		return nil, err
 	}
-	return readInspectedRoutingFile(ctx, path, info)
+	return readInspectedRoutingFile(ctx, path, info, maxBytes)
 }
 
-func readInspectedRoutingFile(ctx context.Context, path string, info os.FileInfo) (data []byte, err error) {
+// readInspectedRoutingFile binds the read to the inspected file and detects changes during the read.
+func readInspectedRoutingFile(ctx context.Context, path string, info os.FileInfo, maxBytes int64) (data []byte, err error) {
 	file, err := openRoutingInput(path)
 	if err != nil {
 		return nil, err
@@ -289,12 +291,12 @@ func readInspectedRoutingFile(ctx context.Context, path string, info os.FileInfo
 	if !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
 		return nil, errors.New("routing input changed while opening")
 	}
-	data, err = io.ReadAll(io.LimitReader(file, MaxRoutingFileBytes+1))
+	data, err = io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > MaxRoutingFileBytes {
-		return nil, errors.New("routing input exceeds 1 MiB")
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("routing input exceeds %d MiB", maxBytes>>20)
 	}
 	if err := verifyRoutingRead(file, info, len(data)); err != nil {
 		return nil, err
@@ -316,13 +318,14 @@ func verifyRoutingRead(file *os.File, info os.FileInfo, length int) error {
 	return nil
 }
 
-func inspectRoutingFile(path string) (os.FileInfo, error) {
+// inspectRoutingFile checks the type and size before opening a routing input.
+func inspectRoutingFile(path string, maxBytes int64) (os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, fmt.Errorf("inspect routing input: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > MaxRoutingFileBytes {
-		return nil, errors.New("routing input must be regular and at most 1 MiB")
+	if !info.Mode().IsRegular() || info.Size() > maxBytes {
+		return nil, fmt.Errorf("routing input must be regular and at most %d MiB", maxBytes>>20)
 	}
 	return info, nil
 }

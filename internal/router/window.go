@@ -1,17 +1,18 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math"
 	"time"
 
-	"github.com/cordanaLLM/praetor/tribunus/catalog"
+	"github.com/tekmora/epitrop/catalog"
 )
 
 // Subscription window governor (#1142). A subscription lane shares one rolling usage window
-// with every session and agent on its account; the governor reads that window from a tribunus
+// with every session and agent on its account; the governor reads that window from an Epitrop
 // snapshot and refuses new work on the lane before the window runs out. A reading without a
 // fresh source is unknown, and unknown refuses.
 const (
@@ -88,9 +89,10 @@ func (d WindowDecision) Admits() bool {
 // WindowGovernor decides from one snapshot of readings at one instant. It keeps no counters:
 // a new snapshot makes a new governor.
 type WindowGovernor struct {
-	policy   WindowPolicy
-	readings map[string]catalog.Record
-	now      time.Time
+	policy        WindowPolicy
+	readings      map[string]catalog.Record
+	now           time.Time
+	emptySnapshot bool
 }
 
 // resolved returns the policy with its defaults filled in.
@@ -164,16 +166,31 @@ func checkLaneAccount(cfg *RoutingConfig, lane, account string) error {
 	return nil
 }
 
-// LoadWindowSnapshot reads a tribunus snapshot (tribunusctl sync --out) with the routing
-// reader's size and time bounds.
+// LoadWindowSnapshot reads an Epitrop catalog file and validates its pinned wire contract.
 func LoadWindowSnapshot(ctx context.Context, path string) (catalog.Snapshot, error) {
-	data, err := readRoutingFile(ctx, path)
+	data, err := readRoutingFile(ctx, path, maxWindowSnapshotBytes)
+	if err != nil {
+		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
+	}
+	// Whitespace counts toward the file limit but carries no snapshot fields.
+	data = bytes.Trim(data, " \t\r\n")
+	document, err := windowSnapshotDocument(data)
 	if err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
 	}
 	snapshot, err := catalog.ParseSnapshot(data)
 	if err != nil {
+		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w; re-run epitropctl sync --out <window-file> to write a fresh version %d snapshot", path, err, catalog.SnapshotSchemaVersion)
+	}
+	schema, err := windowSnapshotSchema()
+	if err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
+	}
+	if err := schema.Validate(document); err != nil {
+		return catalog.Snapshot{}, fmt.Errorf("window snapshot %s: %w", path, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return catalog.Snapshot{}, err
 	}
 	return snapshot, nil
 }
@@ -193,7 +210,12 @@ func NewWindowGovernor(cfg *RoutingConfig, snapshot catalog.Snapshot, now time.T
 	if err := snapshot.Validate(); err != nil {
 		return nil, fmt.Errorf("window snapshot: %w", err)
 	}
-	return &WindowGovernor{policy: cfg.Governance.Window.resolved(), readings: indexWindowReadings(snapshot), now: now}, nil
+	return &WindowGovernor{
+		policy:        cfg.Governance.Window.resolved(),
+		readings:      indexWindowReadings(snapshot),
+		now:           now,
+		emptySnapshot: len(snapshot.Records) == 0,
+	}, nil
 }
 
 // indexWindowReadings keys the subscription_cli records with a usage window by model_id,
@@ -228,7 +250,11 @@ func (g *WindowGovernor) Decide(account string) WindowDecision {
 	decision.Record = entry.WindowRecord
 	reading, ok := g.readings[entry.WindowRecord]
 	if !ok {
-		return decision.explain("no subscription_cli reading with a usage window for this record")
+		reason := "no subscription_cli reading with a usage window for this record"
+		if g.emptySnapshot {
+			reason += " (window snapshot is empty)"
+		}
+		return decision.explain(reason)
 	}
 	decision.Source = reading.Provenance.Source
 	age := int64(g.now.Sub(reading.Provenance.FetchedAt) / time.Second)

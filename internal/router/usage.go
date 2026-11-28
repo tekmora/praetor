@@ -20,7 +20,7 @@ type UsageSnapshot struct {
 
 // LoadUsageSnapshot reads a bounded, strict JSON snapshot. Unknown fields fail.
 func LoadUsageSnapshot(ctx context.Context, path string) (*UsageSnapshot, error) {
-	data, err := readRoutingFile(ctx, path)
+	data, err := readRoutingFile(ctx, path, MaxRoutingFileBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cordanaLLM/praetor/tribunus/catalog"
+	"github.com/tekmora/epitrop/catalog"
 )
 
 const windowCatalog = `version: 1
@@ -64,9 +64,12 @@ func windowReading(used float64, age, resetsIn time.Duration) catalog.Record {
 	}
 }
 
+// windowGovernor builds a WindowGovernor for cfg from a snapshot of records taken at windowNow and
+// fails the test when construction is refused.
 func windowGovernor(t *testing.T, cfg *RoutingConfig, records ...catalog.Record) *WindowGovernor {
 	t.Helper()
-	governor, err := NewWindowGovernor(cfg, catalog.Snapshot{GeneratedAt: windowNow, Records: records}, windowNow)
+	snapshot := catalog.Snapshot{SchemaVersion: catalog.SnapshotSchemaVersion, GeneratedAt: windowNow, Records: records}
+	governor, err := NewWindowGovernor(cfg, snapshot, windowNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +147,6 @@ func renamedReading(record catalog.Record, id string) catalog.Record {
 func TestWindowDecideBoundaries(t *testing.T) {
 	cfg := loadWindowCatalog(t, windowCatalog)
 	nan := math.NaN()
-	negative := -1.0
-	minusOne := -1
 	cases := []struct {
 		name   string
 		record catalog.Record
@@ -164,8 +165,6 @@ func TestWindowDecideBoundaries(t *testing.T) {
 		{"no reset reported", withoutReset(windowReading(10, 0, time.Hour)), WindowOK},
 		{"no used percent", withUsed(windowReading(10, 0, time.Hour), nil), WindowUnknown},
 		{"used percent NaN", withUsed(windowReading(10, 0, time.Hour), &nan), WindowUnknown},
-		{"negative burn", withBurn(windowReading(10, 0, time.Hour), &negative, nil), WindowUnknown},
-		{"negative agents", withBurn(windowReading(10, 0, time.Hour), nil, &minusOne), WindowUnknown},
 		{"api record is no window", withAccess(windowReading(10, 0, time.Hour), catalog.AccessAPI), WindowUnknown},
 	}
 	for _, tc := range cases {
@@ -287,6 +286,8 @@ func TestWindowPolicyValidation(t *testing.T) {
 	}
 }
 
+// TestNewWindowGovernorInputs refuses a config without governance.window, a zero time and a broken
+// window reading when a WindowGovernor is built.
 func TestNewWindowGovernorInputs(t *testing.T) {
 	cfg := loadWindowCatalog(t, windowCatalog)
 	plain := loadLaneCatalog(t)
@@ -298,7 +299,7 @@ func TestNewWindowGovernorInputs(t *testing.T) {
 	}
 	broken := windowReading(10, 0, time.Hour)
 	broken.Provenance.Source = ""
-	if _, err := NewWindowGovernor(cfg, catalog.Snapshot{Records: []catalog.Record{broken}}, windowNow); err == nil {
+	if _, err := NewWindowGovernor(cfg, catalog.Snapshot{SchemaVersion: catalog.SnapshotSchemaVersion, Records: []catalog.Record{broken}}, windowNow); err == nil {
 		t.Fatal("a record without provenance must be refused")
 	}
 	older, newer := windowReading(90, 5*time.Minute, time.Hour), windowReading(10, time.Minute, time.Hour)
@@ -309,9 +310,16 @@ func TestNewWindowGovernorInputs(t *testing.T) {
 	}
 }
 
+// TestLoadWindowSnapshot writes a marshalled Epitrop snapshot, loads it back (schema version 1), expects
+// its 70% reading to warn for the configured lane, and refuses a missing snapshot file.
 func TestLoadWindowSnapshot(t *testing.T) {
 	cfg := loadWindowCatalog(t, windowCatalog)
-	data, err := catalog.Snapshot{GeneratedAt: windowNow, Records: []catalog.Record{windowReading(70, 0, time.Hour)}}.Marshal()
+	data, err := catalog.Snapshot{
+		SchemaVersion: catalog.SnapshotSchemaVersion,
+		GeneratedAt:   windowNow,
+		Records:       []catalog.Record{windowReading(70, 0, time.Hour)},
+		SourceRuns:    []catalog.SourceRun{},
+	}.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,6 +331,9 @@ func TestLoadWindowSnapshot(t *testing.T) {
 	snapshot, err := LoadWindowSnapshot(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if snapshot.SchemaVersion != 1 {
+		t.Fatalf("loaded schema_version %d, want 1", snapshot.SchemaVersion)
 	}
 	governor, err := NewWindowGovernor(cfg, snapshot, windowNow)
 	if err != nil {

@@ -1,0 +1,4 @@
+type: changed
+title: Models route --windows reads Epitrop catalog schema version 1, up to 25,000 records and 64 MiB. Re-run epitropctl sync --out with the window file path to replace an unversioned Tribunus snapshot. Building Praetor now requires Go 1.27.4 or later because github.com/tekmora/epitrop v0.3.0-rc.1 requires it.
+issue: '#890'
+breaking: true

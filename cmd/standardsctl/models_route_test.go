@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cordanaLLM/praetor/internal/router"
-	"github.com/cordanaLLM/praetor/tribunus/catalog"
+	"github.com/tekmora/epitrop/catalog"
 )
 
 const cliRouteFixture = `version: 1
@@ -557,15 +557,24 @@ governance:
       max-a: {window_record: claude-code/five_hour}
 `
 
+// writeWindowSnapshot writes an Epitrop version 1 snapshot with one measured five-hour Claude Code
+// window at used percent, resetting in two hours, and returns its path.
 func writeWindowSnapshot(t *testing.T, used float64) string {
 	t.Helper()
 	now := time.Now().UTC()
 	resets := now.Add(2 * time.Hour)
-	data, err := catalog.Snapshot{GeneratedAt: now, Records: []catalog.Record{{
-		ModelID: "claude-code/five_hour", AccessPath: catalog.AccessSubscriptionCLI,
+	record := catalog.Record{
+		ModelID:     "claude-code/five_hour",
+		AccessPath:  catalog.AccessSubscriptionCLI,
 		Provenance:  catalog.Provenance{Source: "claude-local", FetchedAt: now, Kind: catalog.KindMeasured},
 		UsageWindow: &catalog.UsageWindow{UsedPercent: &used, ResetsAt: &resets},
-	}}}.Marshal()
+	}
+	data, err := catalog.Snapshot{
+		SchemaVersion: catalog.SnapshotSchemaVersion,
+		GeneratedAt:   now,
+		Records:       []catalog.Record{record},
+		SourceRuns:    []catalog.SourceRun{},
+	}.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
