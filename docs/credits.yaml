@@ -249,6 +249,20 @@ entries:
       - "go.mod"
     packages:
       - "go:github.com/pelletier/go-toml/v2"
+  - name: "goldmark"
+    url: "https://github.com/yuin/goldmark"
+    detail: "(`github.com/yuin/goldmark` v1.8.7)"
+    section: "shipped"
+    kind: "dependency"
+    relation: "shipped"
+    license: "MIT"
+    notice: "© 2019 Yusuke Inuzuka"
+    use: "Parses CommonMark and GFM task lists for pull request checklist validation"
+    paths:
+      - "go.mod"
+      - "internal/forge/pr_markdown.go"
+    packages:
+      - "go:github.com/yuin/goldmark"
   - name: "go-yaml v3"
     url: "https://github.com/yaml/go-yaml"
     detail: "(`go.yaml.in/yaml/v3` v3.0.5)"
@@ -259,7 +273,7 @@ entries:
     notice: >-
       MIT for the files ported from libyaml, © 2006–2011 Kirill Simonov; Apache-2.0 for the rest, © 2011–2019
       Canonical Ltd
-    use: "YAML decoding and encoding; the only Go module the binaries link"
+    use: "YAML decoding and encoding"
     paths:
       - "go.mod"
     packages:

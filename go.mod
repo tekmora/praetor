@@ -7,6 +7,7 @@ toolchain go1.27.4
 require (
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	github.com/yuin/goldmark v1.8.7
 	go.yaml.in/yaml/v3 v3.0.5
 )
 

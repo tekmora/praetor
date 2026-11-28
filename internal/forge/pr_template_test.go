@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yuin/goldmark/ast"
+
 	"github.com/cordanaLLM/praetor/internal/lockdown"
 )
 
@@ -61,19 +63,26 @@ func TestUntickedTemplateSatisfiesNothing(t *testing.T) {
 // The receipt fence must carry the label the extractor requires. A `text` fence is treated as a
 // code snippet in a description and never read, so the pasted receipt was silently ignored.
 func TestShippedTemplateReceiptFenceIsLabelled(t *testing.T) {
-	template := readTemplate(t)
+	doc, finding := parseChecklistDocument(readTemplate(t))
+	if finding != "" {
+		t.Fatal(finding)
+	}
 	var receiptFences, textFences int
-	for _, line := range strings.Split(template, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "```") {
-			continue
+	err := ast.Walk(doc.root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		block, ok := n.(*ast.FencedCodeBlock)
+		if !entering || !ok {
+			return ast.WalkContinue, nil
 		}
-		if isReceiptFence(trimmed) {
+		if doc.isReceipt(block) {
 			receiptFences++
 		}
-		if strings.EqualFold(strings.TrimLeft(trimmed, "`"), "text") {
+		if strings.EqualFold(string(block.Language(doc.source)), "text") {
 			textFences++
 		}
+		return ast.WalkContinue, nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if receiptFences == 0 {
 		t.Error("the template must offer a fence the receipt extractor reads; `text` is not one")
@@ -110,7 +119,7 @@ func fencedReceipt(t *testing.T, open, closing string) string {
 // Positive: only a ticked task-list item counts, whichever list marker it uses, and a
 // ~~~ receipt fence is read exactly like a ``` one (BUG-878).
 func TestChecklistCountsListItemsAndTildeReceipt(t *testing.T) {
-	boxes := "## Checklist\n* [x] HISS-16 compile-context verified\n1. [X] HISS-15 3D tests pass\n"
+	boxes := "## Checklist\n* [x] HISS-16 compile-context verified the `<!--` marker\n1. [X] HISS-15 3D tests pass\n"
 	res, err := ValidatePRChecklist(boxes + fencedReceipt(t, "~~~receipt", "~~~"))
 	if err != nil {
 		t.Fatalf("validate: %v", err)
@@ -129,6 +138,7 @@ func TestChecklistIgnoresFencedAndMidSentenceBoxes(t *testing.T) {
 	cases := map[string]string{
 		"backtick fence": "```\n- [x] HISS-16 compile-context\n- [x] HISS-15 3D tests\n```\n",
 		"tilde fence":    "~~~markdown\n- [x] HISS-16 compile-context\n- [x] HISS-15 3D tests\n~~~\n",
+		"hidden checks":  "<!--\n- [x] HISS-16 compile-context\n- [x] HISS-15 3D tests\n-->\n",
 		"mid-sentence":   "Tick [x] for HISS-16 compile-context and [x] for HISS-15 3D tests.\n",
 		"no list marker": "[x] HISS-16 compile-context\n[x] HISS-15 3D tests\n",
 	}
@@ -185,19 +195,27 @@ func TestChecklistRejectsUnterminatedFence(t *testing.T) {
 // Boundary: a box with no trailing text and tab separators are task-list items; a box glued
 // to its text, a missing separator or a quote marker is not. A longer closing run closes.
 func TestChecklistBoxEdgeSpellings(t *testing.T) {
-	for _, line := range []string{"- [x]", "-\t[x]\tHISS-16 compile-context", "+ [X] hiss-16", "123456789) [x] a"} {
-		if !checkedBoxRegex.MatchString(line) {
-			t.Errorf("%q is a ticked task-list item", line)
+	for _, tc := range []struct {
+		line   string
+		ticked bool
+	}{
+		{"- [x]", true},
+		{"-\t[x]\tHISS-16 compile-context", true},
+		{"+ [X] hiss-16", true},
+		{"123456789) [x] a", true},
+		{"- [x]HISS-16", false},
+		{"-[x] HISS-16", false},
+		{"> [x] HISS-16", false},
+		{"1234567890. [x] a", false},
+	} {
+		res, err := ValidatePRChecklist(tc.line)
+		if err != nil || res.hasTickedBox != tc.ticked {
+			t.Errorf("%q: got %+v, %v, want ticked %t", tc.line, res, err, tc.ticked)
 		}
 	}
-	for _, line := range []string{"- [x]HISS-16", "-[x] HISS-16", "> [x] HISS-16", "1234567890. [x] a"} {
-		if checkedBoxRegex.MatchString(line) {
-			t.Errorf("%q is not a ticked task-list item", line)
-		}
-	}
-	block, err := extractReceiptBlock(strings.Split("~~~ receipt\n{\"a\":1}\n~~~~~\n", "\n"))
-	if err != nil || block != "{\"a\":1}" {
-		t.Fatalf("a longer closing run must close the receipt fence: %q, %v", block, err)
+	res, err := ValidatePRChecklist(prChecklistBoxes + fencedReceipt(t, "~~~ receipt", "~~~~~"))
+	if err != nil || !res.Valid {
+		t.Fatalf("a longer closing run must close the receipt fence: %+v, %v", res, err)
 	}
 }
 
